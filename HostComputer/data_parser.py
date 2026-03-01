@@ -4,7 +4,7 @@ FOC Controller Data Parser
 """
 import re
 from dataclasses import dataclass
-from typing import Optional, Dict, Callable
+from typing import Optional, Callable
 
 
 @dataclass
@@ -48,6 +48,7 @@ class FOCDataParser:
         "========== !!! FAULT DETECTED !!! ==========",
     )
     PACKET_END = "======================================"
+    MAX_BUFFER_SIZE = 8192
     
     def __init__(self):
         self.buffer = ""
@@ -62,6 +63,9 @@ class FOCDataParser:
         try:
             text = data.decode('utf-8', errors='ignore')
             self.buffer += text
+            if len(self.buffer) > self.MAX_BUFFER_SIZE:
+                # 限制无效输入场景下的内存增长
+                self.buffer = self.buffer[-self.MAX_BUFFER_SIZE:]
             self._process_buffer()
         except Exception as e:
             print(f"Data parse error: {e}")
@@ -85,10 +89,18 @@ class FOCDataParser:
             end_idx = self.buffer.find(self.PACKET_END, start_idx)
             
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                packet_end_idx = end_idx + len(self.PACKET_END)
+
+                # 兼容不同长度的 '=' 分隔行，避免留下尾巴字符
+                while packet_end_idx < len(self.buffer) and self.buffer[packet_end_idx] == "=":
+                    packet_end_idx += 1
+                while packet_end_idx < len(self.buffer) and self.buffer[packet_end_idx] in ("\r", "\n"):
+                    packet_end_idx += 1
+
                 # 提取完整数据包
-                packet_text = self.buffer[start_idx:end_idx + len(self.PACKET_END)]
+                packet_text = self.buffer[start_idx:packet_end_idx]
                 # 从缓冲区中移除
-                self.buffer = self.buffer[end_idx + len(self.PACKET_END):]
+                self.buffer = self.buffer[packet_end_idx:]
                 # 解析数据包
                 self._parse_packet(packet_text)
             else:

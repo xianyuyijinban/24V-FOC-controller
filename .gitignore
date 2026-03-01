@@ -45,3 +45,7 @@ desktop.ini
 docs/_build/
 docs/_static/
 docs/_templates/
+
+# Python cache / Python缓存
+__pycache__/
+*.pyc

@@ -87,6 +87,20 @@ class TestFOCDataParser(unittest.TestCase):
         self.assertEqual(len(packets), 1)
         self.assertEqual(packets[0].timestamp, 1234)
 
+    def test_variable_length_separator_is_fully_consumed(self):
+        parser = FOCDataParser()
+        parser.feed_data(NORMAL_PACKET.encode("utf-8"))
+        self.assertEqual(parser.buffer, "")
+
+    def test_noise_without_packet_end_has_bounded_buffer(self):
+        parser = FOCDataParser()
+        noise = b"NOISE-1234567890\r\n"
+
+        for _ in range(10000):
+            parser.feed_data(noise)
+
+        self.assertLessEqual(len(parser.buffer), 8192)
+
 
 class TestCommandBuilder(unittest.TestCase):
     def test_command_builder_outputs(self):

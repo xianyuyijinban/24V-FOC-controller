@@ -12,6 +12,7 @@
 /*==================== 私有宏定义 ====================*/
 #define MI_DEG2RAD      (FOC_PI / 180.0f)
 #define MI_RAD2DEG      (180.0f / FOC_PI)
+#define MI_CONTROL_DT   0.00005f   /* 20kHz控制周期 */
 
 /*==================== 私有函数声明 ====================*/
 static void MI_ResetStateData(MI_Handle_t *handle);
@@ -280,12 +281,12 @@ MI_ErrorCode_t MI_IdentifyRs(MI_Handle_t *handle)
 MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle)
 {
     float elapsed = MI_GetElapsedTime(handle);
+    float Vamp = handle->foc->Vbus * MI_LS_INJ_AMPLITUDE;
     
     if (elapsed < MI_LS_TEST_DURATION) {
         /* 生成高频注入信号 */
-        float t = elapsed / 1000.0f;  /* 转换为秒 */
+        float t = (float)handle->sample_count * MI_CONTROL_DT;
         float omega = 2.0f * FOC_PI * MI_LS_INJ_FREQUENCY;
-        float Vamp = handle->foc->Vbus * MI_LS_INJ_AMPLITUDE;
         
         /* α轴注入高频电压 */
         handle->foc->ValphaBeta.alpha = Vamp * sinf(omega * t);
@@ -293,42 +294,35 @@ MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle)
         
         FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
         
-        /* 采样电压和电流 */
-        handle->sum_v += handle->foc->ValphaBeta.alpha;
-        handle->sum_i += handle->foc->IalphaBeta.alpha;
+        /* 采样电流平方和用于RMS估计 */
         handle->sum_ii += handle->foc->IalphaBeta.alpha * handle->foc->IalphaBeta.alpha;
-        handle->sum_vi += handle->foc->ValphaBeta.alpha * handle->foc->IalphaBeta.alpha;
         handle->sample_count++;
         
         return MI_ERR_IN_PROGRESS;
     } else {
         /* 计算电感 */
-        if (handle->sample_count > 0) {
-            /* 使用最小二乘法拟合 */
-            float n = handle->sample_count;
-            float sum_v_sq = handle->sum_v * handle->sum_v / n;
-            float denominator = n * handle->sum_ii - handle->sum_i * handle->sum_i;
-            
-            if (fabsf(denominator) > 1e-6f) {
-                /* 计算阻抗 Z = Vrms / Irms */
-                float Vrms = sqrtf(sum_v_sq / n);
-                float Irms = sqrtf(handle->sum_ii / n);
+        if (handle->sample_count > 100U) {
+            /* 正弦注入已知幅值：Vrms = Vamp / sqrt(2) */
+            float Vrms = fabsf(Vamp) * 0.70710678f;
+            float Irms = sqrtf(handle->sum_ii / (float)handle->sample_count);
+
+            if (Irms > 0.01f) {
                 float Z = Vrms / Irms;
-                
-                /* 计算感抗 XL = sqrt(Z^2 - Rs^2) */
                 float Rs = handle->param->Rs;
                 float xl_sq = Z * Z - Rs * Rs;
-                /* 防止sqrt负数（由于噪声Z可能小于Rs） */
-                if (xl_sq < 0.0f) xl_sq = 0.0f;
-                float XL = sqrtf(xl_sq);
-                
+                if (xl_sq < 0.0f) {
+                    xl_sq = 0.0f;
+                }
+
                 /* 计算电感 L = XL / (2πf) */
+                float XL = sqrtf(xl_sq);
                 float L = XL / (2.0f * FOC_PI * MI_LS_INJ_FREQUENCY);
-                
-                handle->param->Ld = L;
-                handle->param->Lq = L;  /* 假设各向同性 */
-                
-                return MI_ERR_NONE;
+
+                if (L > 0.0f && L < 0.1f) {
+                    handle->param->Ld = L;
+                    handle->param->Lq = L;  /* 假设各向同性 */
+                    return MI_ERR_NONE;
+                }
             }
         }
         return MI_ERR_LS_NOT_CONVERGED;
@@ -343,34 +337,38 @@ MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle)
  * 原理：
  * 1. 开环拖动到目标转速
  * 2. 切换到电流环(Id=0, Iq=维持电流)
- * 3. 测量d轴电压Vd ≈ -ωe*Ke
- * 4. Ke = |Vd| / ωe
+ * 3. 在αβ静止坐标系估算反电势幅值 |E| ≈ |Vαβ - Rs * Iαβ|
+ * 4. Ke = |E| / |ωe_meas|
  */
 MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
 {
     /* 使用句柄中的状态变量，避免静态变量的线程安全问题 */
     uint8_t *state = &handle->ke_state;
-    float omega_e_target = 0;
-    float speed_sum = 0;
-
+    const float speed_lpf_alpha = 0.2f;
+    float pole_pairs = (handle->param->Pn > 0U) ? (float)handle->param->Pn : 1.0f;
+    float omega_e_target = MI_KE_TEST_SPEED_RPM * 2.0f * FOC_PI / 60.0f * pole_pairs;
     float elapsed = MI_GetElapsedTime(handle);
+    float theta_mech_now, delta_theta, omega_mech, omega_e_meas;
 
     switch (*state) {
         case 0: /* 加速阶段 */
             if (elapsed < MI_KE_RAMP_TIME) {
                 /* 斜坡加速 */
                 float ramp_ratio = elapsed / MI_KE_RAMP_TIME;
-                omega_e_target = MI_KE_TEST_SPEED_RPM * 2.0f * FOC_PI / 60.0f * handle->param->Pn;
                 float omega_e_cmd = omega_e_target * ramp_ratio;
 
                 /* 开环拖动 */
                 handle->foc->Id_ref = 0.0f;
                 handle->foc->Iq_ref = 0.5f; /* 拖动电流 */
                 handle->speed_elec = omega_e_cmd; /* 用于电角度积分 */
+                handle->foc->theta_elec = FOC_AngleNormalize(handle->foc->theta_elec + omega_e_cmd * MI_CONTROL_DT);
+                handle->foc->sin_theta = sinf(handle->foc->theta_elec);
+                handle->foc->cos_theta = cosf(handle->foc->theta_elec);
 
                 return MI_ERR_IN_PROGRESS;
             } else {
                 *state = 1;
+                handle->ke_speed_ready = 0U;
                 MI_ResetStateData(handle); /* 重置计时 */
                 return MI_ERR_IN_PROGRESS;
             }
@@ -380,11 +378,39 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
                 /* 使用电流环维持转速，Id=0控制 */
                 handle->foc->Id_ref = 0;
                 handle->foc->Iq_ref = 0.3f; /* 维持电流 */
+                handle->speed_elec = omega_e_target;
+                handle->foc->theta_elec = FOC_AngleNormalize(handle->foc->theta_elec + handle->speed_elec * MI_CONTROL_DT);
+                handle->foc->sin_theta = sinf(handle->foc->theta_elec);
+                handle->foc->cos_theta = cosf(handle->foc->theta_elec);
 
-                /* 采样d轴电压和转速 */
-                if (fabsf(handle->speed_elec) > 10.0f) { /* 转速足够 */
-                    handle->sum_v += handle->foc->Vdq.d;
-                    handle->sum_i += handle->speed_elec; /* 使用sum_i暂存转速累加 */
+                /* 编码器测速（机械角差分 -> 电角速度） */
+                theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+                if (!handle->ke_speed_ready) {
+                    handle->ke_theta_prev = theta_mech_now;
+                    handle->ke_speed_filt = 0.0f;
+                    handle->ke_speed_ready = 1U;
+                    return MI_ERR_IN_PROGRESS;
+                }
+
+                delta_theta = theta_mech_now - handle->ke_theta_prev;
+                if (delta_theta > FOC_PI) {
+                    delta_theta -= 2.0f * FOC_PI;
+                } else if (delta_theta < -FOC_PI) {
+                    delta_theta += 2.0f * FOC_PI;
+                }
+                handle->ke_theta_prev = theta_mech_now;
+
+                omega_mech = delta_theta / MI_CONTROL_DT;
+                omega_e_meas = omega_mech * pole_pairs;
+                handle->ke_speed_filt += speed_lpf_alpha * (omega_e_meas - handle->ke_speed_filt);
+
+                /* 在αβ静止坐标系估算反电势幅值，降低开环dq坐标失配偏差 */
+                if (fabsf(handle->ke_speed_filt) > 10.0f) {
+                    float e_alpha = handle->foc->ValphaBeta.alpha - handle->param->Rs * handle->foc->IalphaBeta.alpha;
+                    float e_beta = handle->foc->ValphaBeta.beta - handle->param->Rs * handle->foc->IalphaBeta.beta;
+                    float e_mag = sqrtf(e_alpha * e_alpha + e_beta * e_beta);
+                    handle->sum_v += e_mag;
+                    handle->sum_i += fabsf(handle->ke_speed_filt);
                     handle->sample_count++;
                 }
 
@@ -396,19 +422,24 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
 
         case 2: /* 计算Ke */
             if (handle->sample_count > 10) {
-                float Vd_avg = handle->sum_v / handle->sample_count;
-                speed_sum = handle->sum_i; /* 从sum_i恢复转速累加值 */
-                float omega_avg = speed_sum / handle->sample_count;
+                float E_avg = handle->sum_v / handle->sample_count;
+                float omega_avg = handle->sum_i / handle->sample_count;
+                if (fabsf(omega_avg) < 1e-3f) {
+                    *state = 0;
+                    return MI_ERR_KE_NOT_CONVERGED;
+                }
 
-                /* Ke = |Vd| / ωe (稳态时Vd = -ωe*Ke) */
-                handle->param->Ke = fabsf(Vd_avg) / fabsf(omega_avg);
+                /* Ke = |E| / |ωe_meas| */
+                handle->param->Ke = E_avg / omega_avg;
 
                 /* 验证合理性 */
                 if (handle->param->Ke > 0.001f && handle->param->Ke < 1.0f) {
+                    handle->ke_speed_ready = 0U;
                     *state = 0;
                     return MI_ERR_NONE;
                 }
             }
+            handle->ke_speed_ready = 0U;
             *state = 0;
             return MI_ERR_KE_NOT_CONVERGED;
     }
@@ -450,13 +481,14 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
             handle->pn_theta_accum = 0.0f;
             handle->pn_theta_last = *theta_mech_start;
             *theta_elec_last = 0.0f;
+            handle->sample_count = 0U;
             *state = 1;
             return MI_ERR_IN_PROGRESS;
 
         case 1: /* 施加旋转磁场 */
             if (elapsed < MI_PN_TEST_DURATION) {
                 float omega_elec = 2.0f * FOC_PI * 2.0f; /* 2Hz电频率 */
-                float theta_elec_cmd = omega_elec * (elapsed / 1000.0f);
+                float theta_elec_cmd = omega_elec * ((float)handle->sample_count * MI_CONTROL_DT);
                 float theta_mech_now;
                 float delta_mech;
 
@@ -478,6 +510,7 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
                 handle->pn_theta_accum += delta_mech;
                 handle->pn_theta_last = theta_mech_now;
                 *theta_elec_last = theta_elec_cmd;
+                handle->sample_count++;
                 return MI_ERR_IN_PROGRESS;
             }
 
@@ -533,9 +566,26 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
  */
 MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle)
 {
-    /* 简化实现：零位偏移为0 */
-    handle->param->theta_offset = 0.0f;
-    handle->param->valid_flag = 0xFFFFFFFF;  /* 标记所有参数有效 */
+    float elapsed = MI_GetElapsedTime(handle);
+    float pole_pairs = (handle->param->Pn > 0U) ? (float)handle->param->Pn : 1.0f;
+
+    if (elapsed < MI_ALIGN_DURATION) {
+        /* d轴定向锁轴，让转子对齐到已知电角度 */
+        handle->foc->Id_ref = MI_ALIGN_CURRENT;
+        handle->foc->Iq_ref = 0.0f;
+        FOC_SetAngle(handle->foc, 0.0f);
+        return MI_ERR_IN_PROGRESS;
+    }
+
+    /* 锁轴结束后读取机械角并反推出电角零位偏置 */
+    {
+        float theta_mech = TLE5012_GetAngle() * MI_DEG2RAD;
+        handle->param->theta_offset = FOC_AngleNormalize(-theta_mech * pole_pairs);
+    }
+
+    handle->foc->Id_ref = 0.0f;
+    handle->foc->Iq_ref = 0.0f;
+    handle->param->valid_flag = 0xFFFFFFFF;
     return MI_ERR_NONE;
 }
 
@@ -564,12 +614,12 @@ uint8_t MI_CheckMechanicalLock(MI_Handle_t *handle)
 void MI_UpdatePIWithNewRs(FOC_Handle_t *foc, float Rs_new)
 {
     /* 根据新Rs更新电流环Ki */
-    /* Ki = Rs * bandwidth * T_sample */
+    /* 与FOC_App_UpdatePIParams保持一致：Ki = Rs * 2π * bandwidth * T_sample */
     float bandwidth = 2000.0f;  /* 2kHz电流环带宽 */
     float T_sample = 0.00005f;  /* 50μs采样周期 */
     
-    foc->pi_d.Ki = Rs_new * bandwidth * T_sample;
-    foc->pi_q.Ki = Rs_new * bandwidth * T_sample;
+    foc->pi_d.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
+    foc->pi_q.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
 }
 
 /**

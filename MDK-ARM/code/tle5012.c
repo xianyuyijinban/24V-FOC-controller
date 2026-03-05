@@ -63,7 +63,8 @@ void TLE5012_StartRead(void)
             // 超时：强制复位忙标志
             is_busy = 0;
             crc_error_count++;  // 计为一次通信错误
-            
+            tle5012_sensor.data_valid = 0;
+             
             if (fault_callback && crc_error_count >= CRC_ERROR_THRESHOLD) {
                 fault_callback(TLE5012_FAULT_TIMEOUT);
             }
@@ -87,6 +88,7 @@ void TLE5012_StartRead(void)
     if (status != HAL_OK) {
         is_busy = 0;
         crc_error_count++;
+        tle5012_sensor.data_valid = 0;
     }
 }
 

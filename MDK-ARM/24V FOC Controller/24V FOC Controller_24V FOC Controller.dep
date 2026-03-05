@@ -1,7 +1,7 @@
 Dependencies for Project '24V FOC Controller', Target '24V FOC Controller': (DO NOT MODIFY !)
 CompilerVersion: 5060960::V5.06 update 7 (build 960)::.\ARMCC
 F (startup_stm32h743xx.s)(0x699A88E4)(--cpu Cortex-M7.fp.dp -g --apcs=interwork -I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include--pd "__UVISION_VERSION SETA 532" --pd "_RTE_ SETA 1" --pd "STM32H743xx SETA 1" --pd "_RTE_ SETA 1"--list startup_stm32h743xx.lst --xref -o "24v foc controller\startup_stm32h743xx.o" --depend "24v foc controller\startup_stm32h743xx.d")
-F (../Core/Src/main.c)(0x699AAF6B)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\main.o" --omf_browse "24v foc controller\main.crf" --depend "24v foc controller\main.d")
+F (../Core/Src/main.c)(0x69A708C1)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\main.o" --omf_browse "24v foc controller\main.crf" --depend "24v foc controller\main.d")
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
@@ -53,17 +53,17 @@ I (../Core/Inc/spi.h)(0x69739BB7)
 I (../Core/Inc/tim.h)(0x699853BD)
 I (../Core/Inc/usart.h)(0x69620E35)
 I (../Core/Inc/gpio.h)(0x695E38D0)
-I (./code/head.h)(0x699848EA)
-I (./code/drv8350s.h)(0x698E007C)
+I (./code/head.h)(0x69A40FE3)
+I (./code/drv8350s.h)(0x69A81103)
 I (./code/tle5012.h)(0x699A87CF)
 I (./code/adc_sampling.h)(0x699A877E)
-I (./code/foc_core.h)(0x69912E66)
-I (./code/motor_identify.h)(0x699AADE7)
+I (./code/foc_core.h)(0x69A817DA)
+I (./code/motor_identify.h)(0x69A70C25)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
 I (./code/param_storage.h)(0x6990AE48)
-I (./code/foc_app.h)(0x699A8DAB)
+I (./code/foc_app.h)(0x69A8117B)
 I (./code/uart_upload.h)(0x6992FD97)
-F (../Core/Src/gpio.c)(0x698F0BCC)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\gpio.o" --omf_browse "24v foc controller\gpio.crf" --depend "24v foc controller\gpio.d")
+F (../Core/Src/gpio.c)(0x69A708CB)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\gpio.o" --omf_browse "24v foc controller\gpio.crf" --depend "24v foc controller\gpio.d")
 I (../Core/Inc/gpio.h)(0x695E38D0)
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
@@ -415,7 +415,7 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-F (../Core/Src/usart.c)(0x69885B69)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\usart.o" --omf_browse "24v foc controller\usart.crf" --depend "24v foc controller\usart.d")
+F (../Core/Src/usart.c)(0x69A6F9DC)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\usart.o" --omf_browse "24v foc controller\usart.crf" --depend "24v foc controller\usart.d")
 I (../Core/Inc/usart.h)(0x69620E35)
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
@@ -459,7 +459,7 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-F (../Core/Src/stm32h7xx_it.c)(0x699A8DFC)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\stm32h7xx_it.o" --omf_browse "24v foc controller\stm32h7xx_it.crf" --depend "24v foc controller\stm32h7xx_it.d")
+F (../Core/Src/stm32h7xx_it.c)(0x69A818CE)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\stm32h7xx_it.o" --omf_browse "24v foc controller\stm32h7xx_it.crf" --depend "24v foc controller\stm32h7xx_it.d")
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
@@ -502,17 +502,19 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-I (../Core/Inc/stm32h7xx_it.h)(0x699853BD)
-I (./code/head.h)(0x699848EA)
-I (./code/drv8350s.h)(0x698E007C)
+I (../Core/Inc/stm32h7xx_it.h)(0x69A6F9CB)
+I (./code/head.h)(0x69A40FE3)
+I (./code/drv8350s.h)(0x69A81103)
 I (./code/tle5012.h)(0x699A87CF)
 I (./code/adc_sampling.h)(0x699A877E)
-I (./code/foc_core.h)(0x69912E66)
-I (./code/motor_identify.h)(0x699AADE7)
+I (./code/foc_core.h)(0x69A817DA)
+I (./code/motor_identify.h)(0x69A70C25)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
 I (./code/param_storage.h)(0x6990AE48)
-I (./code/foc_app.h)(0x699A8DAB)
+I (./code/foc_app.h)(0x69A8117B)
 I (./code/uart_upload.h)(0x6992FD97)
+I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
+I (C:\Keil_v5\ARM\ARMCC\include\stdio.h)(0x5F63877C)
 F (../Core/Src/stm32h7xx_hal_msp.c)(0x6986148D)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\stm32h7xx_hal_msp.o" --omf_browse "24v foc controller\stm32h7xx_hal_msp.crf" --depend "24v foc controller\stm32h7xx_hal_msp.d")
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
@@ -1648,10 +1650,10 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-F (.\code\head.h)(0x699848EA)()
+F (.\code\head.h)(0x69A40FE3)()
 F (.\code\tle5012.h)(0x699A87CF)()
-F (.\code\tle5012.c)(0x699A87A8)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\tle5012.o" --omf_browse "24v foc controller\tle5012.crf" --depend "24v foc controller\tle5012.d")
-I (code\head.h)(0x699848EA)
+F (.\code\tle5012.c)(0x69A708D6)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\tle5012.o" --omf_browse "24v foc controller\tle5012.crf" --depend "24v foc controller\tle5012.d")
+I (code\head.h)(0x69A40FE3)
 I (../Core/Inc/main.h)(0x698B43C4)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
@@ -1694,17 +1696,17 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-I (code\drv8350s.h)(0x698E007C)
+I (code\drv8350s.h)(0x69A81103)
 I (code\tle5012.h)(0x699A87CF)
 I (code\adc_sampling.h)(0x699A877E)
-I (code\foc_core.h)(0x69912E66)
-I (code\motor_identify.h)(0x699AADE7)
+I (code\foc_core.h)(0x69A817DA)
+I (code\motor_identify.h)(0x69A70C25)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
 I (code\param_storage.h)(0x6990AE48)
-I (code\foc_app.h)(0x699A8DAB)
+I (code\foc_app.h)(0x69A8117B)
 I (code\uart_upload.h)(0x6992FD97)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
-F (.\code\uart_upload.c)(0x699AAEC6)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\uart_upload.o" --omf_browse "24v foc controller\uart_upload.crf" --depend "24v foc controller\uart_upload.d")
+F (.\code\uart_upload.c)(0x69A817F1)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\uart_upload.o" --omf_browse "24v foc controller\uart_upload.crf" --depend "24v foc controller\uart_upload.d")
 I (code\uart_upload.h)(0x6992FD97)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
@@ -1747,21 +1749,21 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-I (code\drv8350s.h)(0x698E007C)
+I (code\drv8350s.h)(0x69A81103)
 I (code\tle5012.h)(0x699A87CF)
 I (../Core/Inc/main.h)(0x698B43C4)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
-I (code\foc_app.h)(0x699A8DAB)
-I (code\foc_core.h)(0x69912E66)
-I (code\motor_identify.h)(0x699AADE7)
+I (code\foc_app.h)(0x69A8117B)
+I (code\foc_core.h)(0x69A817DA)
+I (code\motor_identify.h)(0x69A70C25)
 I (code\param_storage.h)(0x6990AE48)
 I (code\adc_sampling.h)(0x699A877E)
 I (C:\Keil_v5\ARM\ARMCC\include\stdio.h)(0x5F63877C)
 I (C:\Keil_v5\ARM\ARMCC\include\stdarg.h)(0x5F63877C)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
 F (.\code\uart_upload.h)(0x6992FD97)()
-F (.\code\drv8350s.c)(0x698E00D4)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\drv8350s.o" --omf_browse "24v foc controller\drv8350s.crf" --depend "24v foc controller\drv8350s.d")
-I (code\drv8350s.h)(0x698E007C)
+F (.\code\drv8350s.c)(0x69A82704)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\drv8350s.o" --omf_browse "24v foc controller\drv8350s.crf" --depend "24v foc controller\drv8350s.d")
+I (code\drv8350s.h)(0x69A81103)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h)(0x66FBA0D0)
@@ -1804,7 +1806,7 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
-F (.\code\drv8350s.h)(0x698E007C)()
+F (.\code\drv8350s.h)(0x69A81103)()
 F (.\code\adc_sampling.c)(0x699A8757)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\adc_sampling.o" --omf_browse "24v foc controller\adc_sampling.crf" --depend "24v foc controller\adc_sampling.d")
 I (code\adc_sampling.h)(0x699A877E)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
@@ -1850,8 +1852,8 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
 F (.\code\adc_sampling.h)(0x699A877E)()
-F (.\code\foc_app.c)(0x699AAE6B)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\foc_app.o" --omf_browse "24v foc controller\foc_app.crf" --depend "24v foc controller\foc_app.d")
-I (code\foc_app.h)(0x699A8DAB)
+F (.\code\foc_app.c)(0x69A81195)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\foc_app.o" --omf_browse "24v foc controller\foc_app.crf" --depend "24v foc controller\foc_app.d")
+I (code\foc_app.h)(0x69A8117B)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h)(0x66FBA0D0)
@@ -1893,18 +1895,18 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-I (code\foc_core.h)(0x69912E66)
-I (code\motor_identify.h)(0x699AADE7)
+I (code\foc_core.h)(0x69A817DA)
+I (code\motor_identify.h)(0x69A70C25)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
 I (code\param_storage.h)(0x6990AE48)
 I (code\adc_sampling.h)(0x699A877E)
 I (code\tle5012.h)(0x699A87CF)
 I (../Core/Inc/main.h)(0x698B43C4)
-I (code\drv8350s.h)(0x698E007C)
+I (code\drv8350s.h)(0x69A81103)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
-F (.\code\foc_app.h)(0x699A8DAB)()
-F (.\code\foc_core.c)(0x699A8736)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\foc_core.o" --omf_browse "24v foc controller\foc_core.crf" --depend "24v foc controller\foc_core.d")
-I (code\foc_core.h)(0x69912E66)
+F (.\code\foc_app.h)(0x69A8117B)()
+F (.\code\foc_core.c)(0x69A817E7)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\foc_core.o" --omf_browse "24v foc controller\foc_core.crf" --depend "24v foc controller\foc_core.d")
+I (code\foc_core.h)(0x69A817DA)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h)(0x66FBA0D0)
@@ -1947,9 +1949,9 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
-F (.\code\foc_core.h)(0x69912E66)()
-F (.\code\motor_identify.c)(0x699AAE40)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\motor_identify.o" --omf_browse "24v foc controller\motor_identify.crf" --depend "24v foc controller\motor_identify.d")
-I (code\motor_identify.h)(0x699AADE7)
+F (.\code\foc_core.h)(0x69A817DA)()
+F (.\code\motor_identify.c)(0x69A811B9)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\motor_identify.o" --omf_browse "24v foc controller\motor_identify.crf" --depend "24v foc controller\motor_identify.d")
+I (code\motor_identify.h)(0x69A70C25)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
 I (../Core/Inc/stm32h7xx_hal_conf.h)(0x6986148D)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h)(0x66FBA0D0)
@@ -1992,11 +1994,11 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
-I (code\foc_core.h)(0x69912E66)
+I (code\foc_core.h)(0x69A817DA)
 I (code\tle5012.h)(0x699A87CF)
 I (../Core/Inc/main.h)(0x698B43C4)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
-F (.\code\motor_identify.h)(0x699AADE7)()
+F (.\code\motor_identify.h)(0x69A70C25)()
 F (.\code\param_storage.c)(0x699AADC8)(--c99 --gnu -c --cpu Cortex-M7.fp.dp -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc -I ../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32H7xx/Include -I ../Drivers/CMSIS/Include -I ./code-I.\RTE\_24V_FOC_Controller-IC:\Keil_v5\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-IC:\Keil_v5\ARM\PACK\Keil\STM32H7xx_DFP\3.1.1\Drivers\CMSIS\Device\ST\STM32H7xx\Include-D__UVISION_VERSION="532" -D_RTE_ -DSTM32H743xx -D_RTE_ -DUSE_HAL_DRIVER -DSTM32H743xx-o "24v foc controller\param_storage.o" --omf_browse "24v foc controller\param_storage.crf" --depend "24v foc controller\param_storage.d")
 I (code\param_storage.h)(0x6990AE48)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h)(0x66FBA0CF)
@@ -2040,8 +2042,8 @@ I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_tim_ex.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h)(0x66FBA0D0)
 I (../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h)(0x66FBA0D0)
-I (code\motor_identify.h)(0x699AADE7)
+I (code\motor_identify.h)(0x69A70C25)
 I (C:\Keil_v5\ARM\ARMCC\include\stdbool.h)(0x5F63877C)
-I (code\foc_core.h)(0x69912E66)
+I (code\foc_core.h)(0x69A817DA)
 I (C:\Keil_v5\ARM\ARMCC\include\string.h)(0x5F63878A)
 F (.\code\param_storage.h)(0x6990AE48)()

@@ -354,19 +354,17 @@ void DrvUart_Process(void)
     if (isNewFault) {
         /* 新故障，立即上传 */
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_FAULT);
-        DrvUart_AddFaultHistory(&packet);
         
         len = DrvUart_FormatFault(&packet, s_txBuf, DRV_UART_BUF_SIZE);
-        if (len > 0) {
-            if (DrvUart_StartSend(len)) {
-                s_stats.faultUploads++;
-                s_stats.totalUploads++;
-                s_stats.lastUploadTime = currentTime;
-                s_lastUploadTime = currentTime;
-            }
+        if (len > 0 && DrvUart_StartSend(len)) {
+            DrvUart_AddFaultHistory(&packet);
+            s_stats.faultUploads++;
+            s_stats.totalUploads++;
+            s_stats.lastUploadTime = currentTime;
+            s_lastUploadTime = currentTime;
+            /* 仅在故障包成功进入发送流程后更新，避免首次上报被忙状态吞掉 */
+            s_lastFaultFlags = s_drvHandle->runtime.faultFlags;
         }
-        
-        s_lastFaultFlags = s_drvHandle->runtime.faultFlags;
     }
     else if (s_drvHandle->runtime.isFaultActive && !s_txBusy) {
         /* 故障持续中，每 500ms 重复发送 */

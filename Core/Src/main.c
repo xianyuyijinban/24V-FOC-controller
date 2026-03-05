@@ -133,7 +133,13 @@ int main(void)
 	ADC_Sampling_Init(&hadc1);
 	
 	/* 启动ADC DMA采样 */
-	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_data, 4);
+	if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_data, 4) != HAL_OK) {
+		Error_Handler();
+	}
+	/* 仅在DMA全传输完成时处理采样，避免半缓冲期读到混合帧 */
+	if (hadc1.DMA_Handle != NULL) {
+		__HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT);
+	}
 
 	/* ADC电流零点校准（超时会自动回退到默认偏置） */
 	(void)ADC_Sampling_Calibrate(200);
@@ -192,8 +198,14 @@ int main(void)
     
     /* 故障处理 */
     if (drv8350s.runtime.isFaultActive) {
-        /* 故障时停止PWM */
-        FOC_App_Disable(&g_foc_app);
+        /* 故障时仅在功率级仍使能时执行一次下电，避免重复阻塞SPI */
+        if (g_foc_app.enable_pwm) {
+            FOC_App_Disable(&g_foc_app);
+        }
+        if (g_foc_app.state != FOC_STATE_FAULT) {
+            g_foc_app.fault_code = FOC_FAULT_DRV8350S;
+            g_foc_app.state = FOC_STATE_FAULT;
+        }
     }
     
     /* USER CODE END WHILE */

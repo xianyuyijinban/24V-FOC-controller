@@ -189,6 +189,7 @@ typedef struct {
 
     /* Communication status */
     volatile uint8_t  dmaBusy;
+    volatile uint8_t  syncBusy;         /* 阻塞式SPI访问占用标志 */
     volatile uint8_t  spiError;
     volatile uint32_t commCount;
     volatile uint32_t errorCount;

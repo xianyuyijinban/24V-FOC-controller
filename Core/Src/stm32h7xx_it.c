@@ -75,10 +75,26 @@ static uint16_t s_uartCmdLen = 0U;
 static char s_uartCmdQueue[UART_CMD_QUEUE_DEPTH][UART_CMD_LINE_MAX];
 static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
+static volatile uint8_t s_uartCmdDropUntilEol = 0U;
+static volatile uint32_t s_uartRxRestartFailCount = 0U;
+
+static size_t UART_BoundedStrLen(const char *str, size_t maxLen)
+{
+    size_t len = 0U;
+    if (str == NULL) {
+        return 0U;
+    }
+
+    while ((len < maxLen) && (str[len] != '\0')) {
+        len++;
+    }
+    return len;
+}
 
 static void UART_CommandQueuePush(const char *line)
 {
     uint8_t next;
+    size_t copyLen;
 
     if (line == NULL) {
         return;
@@ -90,8 +106,9 @@ static void UART_CommandQueuePush(const char *line)
         s_uartCmdQueueRead = (uint8_t)((s_uartCmdQueueRead + 1U) % UART_CMD_QUEUE_DEPTH);
     }
 
-    strncpy(s_uartCmdQueue[s_uartCmdQueueWrite], line, UART_CMD_LINE_MAX - 1U);
-    s_uartCmdQueue[s_uartCmdQueueWrite][UART_CMD_LINE_MAX - 1U] = '\0';
+    copyLen = UART_BoundedStrLen(line, UART_CMD_LINE_MAX - 1U);
+    memcpy(s_uartCmdQueue[s_uartCmdQueueWrite], line, copyLen);
+    s_uartCmdQueue[s_uartCmdQueueWrite][copyLen] = '\0';
     s_uartCmdQueueWrite = next;
 }
 
@@ -115,7 +132,9 @@ static void UART_CommandExecute(const char *cmd)
 
     if (sscanf(cmd, "CMD:MODE,%ld", &int_arg) == 1) {
         if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_POSITION) {
+            __disable_irq();
             FOC_App_SetControlMode(&g_foc_app, (FOC_ControlMode_t)int_arg);
+            __enable_irq();
         }
         return;
     }
@@ -139,38 +158,76 @@ static void UART_CommandExecute(const char *cmd)
         if (int_arg != 0) {
             FOC_App_StartIdentify(&g_foc_app);
         } else {
-            g_foc_app.enable_identify = 0;
+            FOC_App_StopIdentify(&g_foc_app);
         }
         return;
     }
 
     if (strcmp(cmd, "CMD:CLEAR_FAULT") == 0) {
+        uint16_t fs1 = 0U, fs2 = 0U;
+        uint8_t drv_fault_active = 1U;
+        uint8_t encoder_ok;
+        uint8_t vbus_ok;
+
         (void)DRV8350S_ClearFaults(&drv8350s);
-        g_foc_app.fault_code = FOC_FAULT_NONE;
-        if (g_foc_app.state == FOC_STATE_FAULT) {
-            g_foc_app.state = FOC_STATE_READY;
+
+        if ((DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_FAULT_STATUS_1, &fs1) == 0) &&
+            (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) == 0)) {
+            drv_fault_active = (((fs1 & 0x07FFU) != 0U) || ((fs2 & 0x00FFU) != 0U)) ? 1U : 0U;
+            drv8350s.runtime.regFaultStatus1 = fs1;
+            drv8350s.runtime.regVgsStatus2 = fs2;
+            drv8350s.runtime.isFaultActive = drv_fault_active;
         }
+
+        encoder_ok = TLE5012_IsDataValid();
+        vbus_ok = (g_foc_app.Vbus >= FOC_UNDERVOLTAGE_THRESH) &&
+                  (g_foc_app.Vbus <= FOC_OVERVOLTAGE_THRESH);
+
+        __disable_irq();
+        if ((!drv_fault_active) && encoder_ok && vbus_ok) {
+            g_foc_app.fault_code = FOC_FAULT_NONE;
+            if (g_foc_app.state == FOC_STATE_FAULT) {
+                g_foc_app.state = FOC_STATE_READY;
+            }
+        } else {
+            if (drv_fault_active) {
+                g_foc_app.fault_code = FOC_FAULT_DRV8350S;
+            } else if (!encoder_ok) {
+                g_foc_app.fault_code = FOC_FAULT_ENCODER;
+            } else if (g_foc_app.Vbus > FOC_OVERVOLTAGE_THRESH) {
+                g_foc_app.fault_code = FOC_FAULT_OVERVOLTAGE;
+            } else if (g_foc_app.Vbus < FOC_UNDERVOLTAGE_THRESH) {
+                g_foc_app.fault_code = FOC_FAULT_UNDERVOLTAGE;
+            }
+        }
+        __enable_irq();
         return;
     }
 
     if (sscanf(cmd, "CMD:PI_CURRENT,%f,%f", &f1, &f2) == 2) {
         if (f1 > 0.0f && f2 >= 0.0f) {
+            __disable_irq();
             FOC_PI_Init(&g_foc_app.foc.pi_d, f1, f2, g_foc_app.foc.pi_d.output_max, g_foc_app.foc.pi_d.output_min);
             FOC_PI_Init(&g_foc_app.foc.pi_q, f1, f2, g_foc_app.foc.pi_q.output_max, g_foc_app.foc.pi_q.output_min);
+            __enable_irq();
         }
         return;
     }
 
     if (sscanf(cmd, "CMD:PI_SPEED,%f,%f", &f1, &f2) == 2) {
         if (f1 > 0.0f && f2 >= 0.0f) {
+            __disable_irq();
             FOC_PI_Init(&g_foc_app.pi_speed, f1, f2, g_foc_app.pi_speed.output_max, g_foc_app.pi_speed.output_min);
+            __enable_irq();
         }
         return;
     }
 
     if (sscanf(cmd, "CMD:PI_POS,%f,%f", &f1, &f2) == 2) {
         if (f1 > 0.0f && f2 >= 0.0f) {
+            __disable_irq();
             FOC_PI_Init(&g_foc_app.pi_pos, f1, f2, g_foc_app.pi_pos.output_max, g_foc_app.pi_pos.output_min);
+            __enable_irq();
         }
         return;
     }
@@ -179,11 +236,13 @@ static void UART_CommandExecute(const char *cmd)
 void UART_Command_ProcessPending(void)
 {
     char cmd[UART_CMD_LINE_MAX];
+    size_t copyLen;
 
     while (s_uartCmdQueueRead != s_uartCmdQueueWrite) {
         __disable_irq();
-        strncpy(cmd, s_uartCmdQueue[s_uartCmdQueueRead], UART_CMD_LINE_MAX - 1U);
-        cmd[UART_CMD_LINE_MAX - 1U] = '\0';
+        copyLen = UART_BoundedStrLen(s_uartCmdQueue[s_uartCmdQueueRead], UART_CMD_LINE_MAX - 1U);
+        memcpy(cmd, s_uartCmdQueue[s_uartCmdQueueRead], copyLen);
+        cmd[copyLen] = '\0';
         s_uartCmdQueueRead = (uint8_t)((s_uartCmdQueueRead + 1U) % UART_CMD_QUEUE_DEPTH);
         __enable_irq();
 
@@ -422,12 +481,12 @@ void DMA1_Stream4_IRQHandler(void)
   * @note  20kHz - 电流环控制频率
   * 
   * 控制架构（全部在TIM1中实现）：
-  * - 电流环：20kHz（每周期执行）
-  * - 速度环：2kHz（10分频）
-  * - 位置环：200Hz（100分频）
-  * - 参数识别：200Hz（100分频）
-  * - 编码器读取：5kHz（4分频）
-  * - DRV8350S状态读取：20kHz（每周期）
+ * - 电流环：20kHz（每周期执行）
+ * - 速度环：2kHz（10分频）
+ * - 位置环：200Hz（100分频）
+ * - 参数识别：20kHz（在电流环周期内执行，保证注入波形精度）
+ * - 编码器读取：5kHz（4分频）
+ * - DRV8350S状态读取：20kHz（每周期）
   */
 void TIM1_UP_IRQHandler(void)
 {
@@ -460,7 +519,7 @@ void TIM1_UP_IRQHandler(void)
         FOC_App_SpeedLoop(&g_foc_app);
     }
     
-    /* ===== 位置环 + 参数识别 (200Hz = 20kHz/100) =====
+    /* ===== 位置环 (200Hz = 20kHz/100) =====
      * 位置环输出速度给定，速度环使用
      */
     static uint8_t position_loop_div_counter = 0;
@@ -468,7 +527,6 @@ void TIM1_UP_IRQHandler(void)
     {
         position_loop_div_counter = 0;
         FOC_App_PositionLoop(&g_foc_app);
-        FOC_App_ParamIdentifyLoop(&g_foc_app);
     }
     
     /* ===== DRV8350S栅极驱动状态读取 (20kHz) ===== */
@@ -502,6 +560,20 @@ void SPI3_IRQHandler(void)
   /* USER CODE BEGIN SPI3_IRQn 1 */
 
   /* USER CODE END SPI3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART1 global interrupt.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
 }
 
 /**
@@ -542,13 +614,10 @@ void DMA2_Stream1_IRQHandler(void)
 void TIM2_IRQHandler(void)
 {
     /* USER CODE BEGIN TIM2_IRQn 0 */
-    /* 控制环已移至TIM1中断：
-     * - 速度环: 2kHz (20kHz/10)
-     * - 位置环/参数识别: 200Hz (20kHz/100)
-     * 分频逻辑在 TIM1_UP_IRQHandler 中
-     * 如需使用TIM2，请重新配置并取消下面的注释
-     */
-    return;
+    /* TIM2在当前方案未启用，但仍需清除更新标志，避免误使能后中断风暴 */
+    if ((TIM2->SR & TIM_SR_UIF) != 0U) {
+        TIM2->SR &= ~TIM_SR_UIF;
+    }
     
     /* USER CODE END TIM2_IRQn 0 */
     // HAL_TIM_IRQHandler(&htim2);  /* 已禁用 */
@@ -621,6 +690,14 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
     for (i = 0U; i < Size; i++) {
         uint8_t ch = urR_data[i];
 
+        if (s_uartCmdDropUntilEol) {
+            if (ch == '\n') {
+                s_uartCmdDropUntilEol = 0U;
+                s_uartCmdLen = 0U;
+            }
+            continue;
+        }
+
         if (ch == '\r') {
             continue;
         }
@@ -639,10 +716,22 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
         } else {
             /* 超长命令：丢弃本行，等待下一次换行重新同步 */
             s_uartCmdLen = 0U;
+            s_uartCmdDropUntilEol = 1U;
         }
     }
 
     if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t *)urR_data, sizeof(urR_data)) == HAL_OK) {
+        __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
+    } else {
+        /* 记录重启失败并做一次快速重试，避免接收链路静默失效 */
+        s_uartRxRestartFailCount++;
+        if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t *)urR_data, sizeof(urR_data)) == HAL_OK) {
+            __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
+        } else {
+            s_uartRxRestartFailCount++;
+        }
+    }
+    if (huart1.hdmarx != NULL) {
         __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
     }
 }

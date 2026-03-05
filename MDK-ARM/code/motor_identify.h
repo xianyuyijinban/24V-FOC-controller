@@ -48,6 +48,10 @@ extern "C" {
 #define MI_THETA_LIMIT_DEG      2.0f        /* 角度变化限制 ±2° */
 #define MI_THETA_CHECK_TIME     50          /* 检测时间 ms */
 
+/* 编码器零位对齐 */
+#define MI_ALIGN_CURRENT        0.8f        /* 锁轴d轴电流 A */
+#define MI_ALIGN_DURATION       200         /* 锁轴时长 ms */
+
 /* 错误代码 */
 typedef enum {
     MI_ERR_NONE = 0,
@@ -132,6 +136,9 @@ typedef struct {
     /* Ke识别状态 */
     uint8_t ke_state;           /* Ke识别状态机状态 */
     float speed_elec;           /* 电转速缓存 */
+    float ke_theta_prev;        /* 上次机械角(Ke识别) */
+    float ke_speed_filt;        /* 滤波后的电角速度(Ke识别) */
+    uint8_t ke_speed_ready;     /* Ke测速初始化标志 */
     
     /* 【修复MI-001】Pn识别状态（从静态变量移至此处） */
     uint8_t pn_state;           /* Pn识别状态 */

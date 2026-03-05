@@ -27,6 +27,7 @@ extern "C" {
 #define FOC_CONTROL_FREQ        20000       /* 电流环频率 20kHz */
 #define FOC_SPEED_LOOP_FREQ     2000        /* 【修改】速度环频率 2kHz (原为1kHz) */
 #define FOC_POSITION_LOOP_FREQ  200         /* 【新增】位置环频率 200Hz */
+#define FOC_SPEED_LPF_CUTOFF_HZ 200.0f      /* 速度估算低通截止频率 */
 
 /* 电流采样 */
 #define FOC_ADC_RESOLUTION      12          /* ADC分辨率 */
@@ -115,6 +116,7 @@ typedef struct {
     /* 使能标志 */
     uint8_t enable_pwm;
     uint8_t enable_identify;
+    volatile uint8_t pending_disable;   /* ISR中仅做快速下电，阻塞SPI收尾延后到主循环 */
     
 } FOC_AppHandle_t;
 
@@ -129,7 +131,7 @@ void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle);
 /* 三环控制（分频调用） */
 void FOC_App_SpeedLoop(FOC_AppHandle_t *handle);           /* 速度环 (2kHz) */
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle);        /* 位置环 (200Hz) */
-void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);   /* 参数识别 (200Hz) */
+void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);   /* 兼容接口：参数识别已移至TIM1周期 */
 
 /* 兼容旧代码的函数名（已弃用，保留用于兼容性） */
 #define FOC_App_PositionSpeedLoop FOC_App_SpeedLoop  /* 旧代码兼容性 */
@@ -146,6 +148,7 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);
 void FOC_App_SaveParam(FOC_AppHandle_t *handle);
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle);
+void FOC_App_StopIdentify(FOC_AppHandle_t *handle);
 uint8_t FOC_App_IsIdentifyComplete(FOC_AppHandle_t *handle);
 
 /* 状态查询 */

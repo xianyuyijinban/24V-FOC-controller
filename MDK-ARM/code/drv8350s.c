@@ -22,6 +22,10 @@ static inline uint16_t DRV8350S_BuildWriteFrame(uint8_t addr, uint16_t data);
 static inline uint16_t DRV8350S_BuildReadFrame(uint8_t addr);
 static inline uint16_t DRV8350S_ParseResponse(uint16_t rxData);
 static void DRV8350S_ParseFaultStatus(DRV8350S_Handle_t* handle);
+static int8_t DRV8350S_BusLock(DRV8350S_Handle_t* handle, uint32_t timeoutMs);
+static void DRV8350S_BusUnlock(DRV8350S_Handle_t* handle);
+static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t data);
+static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t* data);
 
 /* Public Functions ----------------------------------------------------------*/
 
@@ -50,6 +54,7 @@ int8_t DRV8350S_Init(DRV8350S_Handle_t* handle,
 
     /* Clear DMA busy flag */
     handle->runtime.dmaBusy = 0;
+    handle->runtime.syncBusy = 0;
 
     return 0;
 }
@@ -209,32 +214,20 @@ int8_t DRV8350S_UnlockRegisters(DRV8350S_Handle_t* handle)
  */
 int8_t DRV8350S_WriteRegister(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t data)
 {
-    uint16_t txFrame, rxDummy;
-
     if (handle == NULL || regAddr > 5) {
         return -1;
     }
 
-    /* Build write frame: W=0, A[3:0], D[10:0] */
-    txFrame = DRV8350S_BuildWriteFrame(regAddr, data);
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
 
-    NSCS_LOW(handle);
-
-    /* Transmit and receive dummy */
-    HAL_StatusTypeDef halStatus = HAL_SPI_TransmitReceive(
-        handle->hspi,
-        (uint8_t*)&txFrame,
-        (uint8_t*)&rxDummy,
-        1,
-        DRV8350S_SPI_TIMEOUT_MS
-    );
-
-    /* Wait for SPI ready (t_READY = 1ms max per datasheet) */
-    HAL_Delay(1);
-
-    NSCS_HIGH(handle);
-
-    return (halStatus == HAL_OK) ? 0 : -1;
+    {
+        int8_t ret = DRV8350S_WriteRegisterUnlocked(handle, regAddr, data);
+        DRV8350S_BusUnlock(handle);
+        return ret;
+    }
 }
 
 /**
@@ -242,47 +235,20 @@ int8_t DRV8350S_WriteRegister(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16
  */
 int8_t DRV8350S_ReadRegister(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t* data)
 {
-    uint16_t txFrame, rxFrame;
-
     if (handle == NULL || regAddr > 5 || data == NULL) {
         return -1;
     }
 
-    /* First frame: send read command */
-    txFrame = DRV8350S_BuildReadFrame(regAddr);
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
 
-    NSCS_LOW(handle);
-
-    HAL_StatusTypeDef halStatus = HAL_SPI_TransmitReceive(
-        handle->hspi,
-        (uint8_t*)&txFrame,
-        (uint8_t*)&rxFrame,
-        1,
-        DRV8350S_SPI_TIMEOUT_MS
-    );
-
-    /* t_NCS_HIGH min = 400ns per datasheet */
-    NSCS_HIGH(handle);
-    __NOP(); __NOP(); __NOP(); __NOP();  /* Short delay */
-
-    /* Second frame: get response (previous register content shifted out) */
-    txFrame = 0x0000;  /* NOP command */
-
-    NSCS_LOW(handle);
-
-    halStatus |= HAL_SPI_TransmitReceive(
-        handle->hspi,
-        (uint8_t*)&txFrame,
-        (uint8_t*)&rxFrame,
-        1,
-        DRV8350S_SPI_TIMEOUT_MS
-    );
-
-    NSCS_HIGH(handle);
-
-    *data = DRV8350S_ParseResponse(rxFrame);
-
-    return (halStatus == HAL_OK) ? 0 : -1;
+    {
+        int8_t ret = DRV8350S_ReadRegisterUnlocked(handle, regAddr, data);
+        DRV8350S_BusUnlock(handle);
+        return ret;
+    }
 }
 
 /**
@@ -293,6 +259,11 @@ int8_t DRV8350S_TriggerAsyncRead(DRV8350S_Handle_t* handle, uint8_t regAddr)
 {
     if (handle == NULL || regAddr > 5) {
         return -1;
+    }
+
+    /* 阻塞式SPI访问持锁期间，异步轮询让路，避免总线竞争 */
+    if (handle->runtime.syncBusy) {
+        return -2;
     }
 
     /* Check if previous DMA transfer is still ongoing */
@@ -326,6 +297,7 @@ int8_t DRV8350S_TriggerAsyncRead(DRV8350S_Handle_t* handle, uint8_t regAddr)
         return 0;
     } else {
         NSCS_HIGH(handle);
+        handle->readReq.pending = 0;
         handle->runtime.spiError = 1;
         handle->runtime.errorCount++;
         return -1;
@@ -338,17 +310,21 @@ int8_t DRV8350S_TriggerAsyncRead(DRV8350S_Handle_t* handle, uint8_t regAddr)
  */
 int8_t DRV8350S_TriggerAsyncReadAll(DRV8350S_Handle_t* handle)
 {
+    int8_t ret;
+
     /* For continuous monitoring, alternate between fault status registers */
     static uint8_t toggle = 0;
 
     if (toggle) {
-        DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_FAULT_STATUS_1);
+        ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_FAULT_STATUS_1);
     } else {
-        DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_VGS_STATUS_2);
+        ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_VGS_STATUS_2);
     }
-    toggle ^= 1;
+    if (ret == 0) {
+        toggle ^= 1;
+    }
 
-    return 0;
+    return ret;
 }
 
 /**
@@ -377,25 +353,28 @@ void DRV8350S_TIM1_UpdateCallback(DRV8350S_Handle_t* handle)
     if (!handle->runtime.dmaBusy) {
         /* Read fault status registers alternately */
         static uint8_t readSequence = 0;
+        int8_t ret = 0;
 
         switch (readSequence) {
             case 0:
-                DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_FAULT_STATUS_1);
+                ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_FAULT_STATUS_1);
                 break;
             case 1:
-                DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_VGS_STATUS_2);
+                ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_VGS_STATUS_2);
                 break;
             case 2:
-                DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_DRIVER_CTRL);
+                ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_DRIVER_CTRL);
                 break;
             case 3:
-                DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_OCP_CTRL);
+                ret = DRV8350S_TriggerAsyncRead(handle, DRV8350S_REG_OCP_CTRL);
                 break;
             default:
                 readSequence = 0;
                 break;
         }
-        readSequence = (readSequence + 1) % 4;
+        if (ret == 0) {
+            readSequence = (readSequence + 1U) % 4U;
+        }
     }
     /* If still busy, we missed a cycle - count as error but don't block */
     else {
@@ -481,6 +460,7 @@ void DRV8350S_DMA_ErrorCallback(DRV8350S_Handle_t* handle)
 
     /* Release SPI bus and mark error */
     handle->runtime.dmaBusy = 0;
+    handle->readReq.pending = 0;
     handle->runtime.spiError = 1;
     handle->runtime.errorCount++;
 
@@ -493,8 +473,25 @@ void DRV8350S_DMA_ErrorCallback(DRV8350S_Handle_t* handle)
  */
 int8_t DRV8350S_ClearFaults(DRV8350S_Handle_t* handle)
 {
-    return DRV8350S_WriteRegister(handle, DRV8350S_REG_DRIVER_CTRL,
-                                  (1U << DRV8350S_CLR_FLT_POS));
+    uint16_t regVal;
+    int8_t ret = -1;
+
+    if (handle == NULL) {
+        return -1;
+    }
+
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
+
+    if (DRV8350S_ReadRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) == 0) {
+        regVal |= (1U << DRV8350S_CLR_FLT_POS);
+        ret = DRV8350S_WriteRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    }
+
+    DRV8350S_BusUnlock(handle);
+    return ret;
 }
 
 /**
@@ -503,15 +500,25 @@ int8_t DRV8350S_ClearFaults(DRV8350S_Handle_t* handle)
 int8_t DRV8350S_EnableGateDrivers(DRV8350S_Handle_t* handle)
 {
     uint16_t regVal;
+    int8_t ret = -1;
 
-    if (DRV8350S_ReadRegister(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) != 0) {
+    if (handle == NULL) {
         return -1;
     }
 
-    regVal &= ~(1U << DRV8350S_COAST_POS);
-    regVal &= ~(1U << DRV8350S_BRAKE_POS);
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
 
-    return DRV8350S_WriteRegister(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    if (DRV8350S_ReadRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) == 0) {
+        regVal &= ~(1U << DRV8350S_COAST_POS);
+        regVal &= ~(1U << DRV8350S_BRAKE_POS);
+        ret = DRV8350S_WriteRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    }
+
+    DRV8350S_BusUnlock(handle);
+    return ret;
 }
 
 /**
@@ -520,15 +527,25 @@ int8_t DRV8350S_EnableGateDrivers(DRV8350S_Handle_t* handle)
 int8_t DRV8350S_DisableGateDrivers(DRV8350S_Handle_t* handle)
 {
     uint16_t regVal;
+    int8_t ret = -1;
 
-    if (DRV8350S_ReadRegister(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) != 0) {
+    if (handle == NULL) {
         return -1;
     }
 
-    regVal |= (1U << DRV8350S_COAST_POS);
-    regVal &= ~(1U << DRV8350S_BRAKE_POS);
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
 
-    return DRV8350S_WriteRegister(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    if (DRV8350S_ReadRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) == 0) {
+        regVal |= (1U << DRV8350S_COAST_POS);
+        regVal &= ~(1U << DRV8350S_BRAKE_POS);
+        ret = DRV8350S_WriteRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    }
+
+    DRV8350S_BusUnlock(handle);
+    return ret;
 }
 
 /**
@@ -537,15 +554,25 @@ int8_t DRV8350S_DisableGateDrivers(DRV8350S_Handle_t* handle)
 int8_t DRV8350S_SetBrake(DRV8350S_Handle_t* handle)
 {
     uint16_t regVal;
+    int8_t ret = -1;
 
-    if (DRV8350S_ReadRegister(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) != 0) {
+    if (handle == NULL) {
         return -1;
     }
 
-    regVal |= (1U << DRV8350S_BRAKE_POS);
-    regVal &= ~(1U << DRV8350S_COAST_POS);
+    if (DRV8350S_BusLock(handle, DRV8350S_SPI_TIMEOUT_MS) != 0) {
+        handle->runtime.errorCount++;
+        return -1;
+    }
 
-    return DRV8350S_WriteRegister(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    if (DRV8350S_ReadRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, &regVal) == 0) {
+        regVal |= (1U << DRV8350S_BRAKE_POS);
+        regVal &= ~(1U << DRV8350S_COAST_POS);
+        ret = DRV8350S_WriteRegisterUnlocked(handle, DRV8350S_REG_DRIVER_CTRL, regVal);
+    }
+
+    DRV8350S_BusUnlock(handle);
+    return ret;
 }
 
 /**
@@ -601,6 +628,137 @@ const char* DRV8350S_FaultToString(uint32_t faultBit)
 
 
 /* Private Functions ---------------------------------------------------------*/
+
+/**
+ * @brief 获取SPI1总线独占权，并等待异步DMA事务退出
+ */
+static int8_t DRV8350S_BusLock(DRV8350S_Handle_t* handle, uint32_t timeoutMs)
+{
+    uint32_t startTick;
+
+    if (handle == NULL) {
+        return -1;
+    }
+
+    startTick = HAL_GetTick();
+
+    while (1) {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        if (handle->runtime.syncBusy == 0U) {
+            handle->runtime.syncBusy = 1U;
+            if (primask == 0U) {
+                __enable_irq();
+            }
+            break;
+        }
+        if (primask == 0U) {
+            __enable_irq();
+        }
+
+        if ((HAL_GetTick() - startTick) > timeoutMs) {
+            return -1;
+        }
+    }
+
+    while ((handle->runtime.dmaBusy != 0U) || (handle->readReq.pending != 0U)) {
+        if ((HAL_GetTick() - startTick) > timeoutMs) {
+            DRV8350S_BusUnlock(handle);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * @brief 释放SPI1总线独占权
+ */
+static void DRV8350S_BusUnlock(DRV8350S_Handle_t* handle)
+{
+    uint32_t primask;
+
+    if (handle == NULL) {
+        return;
+    }
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    handle->runtime.syncBusy = 0U;
+    if (primask == 0U) {
+        __enable_irq();
+    }
+}
+
+/**
+ * @brief 无锁写寄存器（调用方需先持有总线锁）
+ */
+static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t data)
+{
+    uint16_t txFrame, rxDummy;
+    HAL_StatusTypeDef halStatus;
+
+    if (handle == NULL || regAddr > 5U) {
+        return -1;
+    }
+
+    txFrame = DRV8350S_BuildWriteFrame(regAddr, data);
+
+    NSCS_LOW(handle);
+    halStatus = HAL_SPI_TransmitReceive(
+        handle->hspi,
+        (uint8_t*)&txFrame,
+        (uint8_t*)&rxDummy,
+        1,
+        DRV8350S_SPI_TIMEOUT_MS
+    );
+
+    /* t_READY = 1ms (datasheet max) */
+    HAL_Delay(1);
+    NSCS_HIGH(handle);
+
+    return (halStatus == HAL_OK) ? 0 : -1;
+}
+
+/**
+ * @brief 无锁读寄存器（调用方需先持有总线锁）
+ */
+static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t* data)
+{
+    uint16_t txFrame, rxFrame;
+    HAL_StatusTypeDef halStatus;
+
+    if (handle == NULL || regAddr > 5U || data == NULL) {
+        return -1;
+    }
+
+    txFrame = DRV8350S_BuildReadFrame(regAddr);
+    NSCS_LOW(handle);
+    halStatus = HAL_SPI_TransmitReceive(
+        handle->hspi,
+        (uint8_t*)&txFrame,
+        (uint8_t*)&rxFrame,
+        1,
+        DRV8350S_SPI_TIMEOUT_MS
+    );
+
+    NSCS_HIGH(handle);
+    __NOP(); __NOP(); __NOP(); __NOP();
+
+    txFrame = 0x0000U;
+    NSCS_LOW(handle);
+    halStatus |= HAL_SPI_TransmitReceive(
+        handle->hspi,
+        (uint8_t*)&txFrame,
+        (uint8_t*)&rxFrame,
+        1,
+        DRV8350S_SPI_TIMEOUT_MS
+    );
+    NSCS_HIGH(handle);
+
+    *data = DRV8350S_ParseResponse(rxFrame);
+    return (halStatus == HAL_OK) ? 0 : -1;
+}
 
 /**
  * @brief Build SPI write frame

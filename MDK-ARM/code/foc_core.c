@@ -7,6 +7,10 @@
 #include "foc_core.h"
 #include <string.h>
 
+/* 电流环电压矢量饱和后的反算抗积分饱和增益 */
+#define FOC_CURRENT_AW_GAIN    0.2f
+#define FOC_EPSILON            1e-6f
+
 /**
  * @brief Clark变换 (三相静止坐标系 → 两相静止坐标系)
  * @param abc 输入：三相电流/电压 (a, b, c)
@@ -100,9 +104,10 @@ void FOC_SVPWM_Generate(const FOC_AlphaBeta_t *ValphaBeta, float Vbus, FOC_SVPWM
     FOC_ABC_t v_abc;
     float max_u, min_u, u0;
     float ma, mb, mc;
+    float VphaseNorm;
     
-    /* 计算最大线性调制电压幅值 */
-    float Vmax = Vbus * FOC_SQRT3_DIV2;  /* Udc/√3 */
+    /* 归一化基准：调制波 m=1 对应桥臂相电压幅值 Vbus/2 */
+    VphaseNorm = Vbus * 0.5f;
     
     /* 反Clark变换得到三相电压指令(归一化到-1~1) */
     /* 先得到未归一化的三相电压 */
@@ -111,10 +116,10 @@ void FOC_SVPWM_Generate(const FOC_AlphaBeta_t *ValphaBeta, float Vbus, FOC_SVPWM
     v_abc.c = (-ValphaBeta->alpha - FOC_SQRT3 * ValphaBeta->beta) * 0.5f;
     
     /* 归一化到-1~1范围 */
-    if (Vmax > 0.0f) {
-        v_abc.a /= Vmax;
-        v_abc.b /= Vmax;
-        v_abc.c /= Vmax;
+    if (VphaseNorm > 0.0f) {
+        v_abc.a /= VphaseNorm;
+        v_abc.b /= VphaseNorm;
+        v_abc.c /= VphaseNorm;
     }
     
     /* 零序注入算法 */
@@ -167,12 +172,26 @@ void FOC_SVPWM_Generate(const FOC_AlphaBeta_t *ValphaBeta, float Vbus, FOC_SVPWM
  */
 void FOC_PI_Init(FOC_PI_Controller_t *pi, float Kp, float Ki, float output_max, float output_min)
 {
+    float output_span, sep_output;
+
     pi->Kp = Kp;
     pi->Ki = Ki;
     pi->integral = 0.0f;
     pi->output_max = output_max;
     pi->output_min = output_min;
     pi->integral_max = output_max * 0.9f;  /* 积分限幅略小于输出限幅 */
+
+    /* 各环独立积分分离阈值：按输出限幅和Kp换算到误差域 */
+    output_span = fabsf(output_max - output_min);
+    sep_output = output_span * 0.2f;
+    if (fabsf(Kp) > FOC_EPSILON) {
+        pi->integral_sep_thresh = sep_output / fabsf(Kp);
+    } else {
+        pi->integral_sep_thresh = 1e6f;
+    }
+    if (pi->integral_sep_thresh < FOC_EPSILON) {
+        pi->integral_sep_thresh = FOC_EPSILON;
+    }
 }
 
 /**
@@ -186,10 +205,8 @@ void FOC_PI_Init(FOC_PI_Controller_t *pi, float Kp, float Ki, float output_max, 
  */
 float FOC_PI_Update(FOC_PI_Controller_t *pi, float error)
 {
-#define INTEGRAL_SEPARATION_THRESH  0.5f    /* 积分分离阈值 */
-
     /* 积分项更新（带积分分离） */
-    if (fabsf(error) < INTEGRAL_SEPARATION_THRESH) {
+    if (fabsf(error) < pi->integral_sep_thresh) {
         pi->integral += error;
     }
     /* 积分限幅（抗积分饱和） */
@@ -218,8 +235,8 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     memset(foc, 0, sizeof(FOC_Handle_t));
     
     /* 初始化PI控制器 */
-    /* 电压输出限幅：±Vbus/√3 (最大线性调制范围) */
-    float Vmax = 24.0f * FOC_SQRT3_DIV2;  /* 假设默认Vbus=24V */
+    /* 电压矢量限幅：|Vdq| <= Vbus/√3 (SVPWM线性区) */
+    float Vmax = 24.0f / FOC_SQRT3;  /* 假设默认Vbus=24V */
     FOC_PI_Init(&foc->pi_d, Kp_d, Ki_d, Vmax, -Vmax);
     FOC_PI_Init(&foc->pi_q, Kp_q, Ki_q, Vmax, -Vmax);
     
@@ -266,8 +283,8 @@ void FOC_SetVbus(FOC_Handle_t *foc, float Vbus)
 {
     foc->Vbus = Vbus;
     
-    /* 更新PI控制器输出限幅 */
-    float Vmax = Vbus * FOC_SQRT3_DIV2;
+    /* 更新PI输出电压矢量限幅（SVPWM线性区） */
+    float Vmax = Vbus / FOC_SQRT3;
     foc->pi_d.output_max = Vmax;
     foc->pi_d.output_min = -Vmax;
     foc->pi_q.output_max = Vmax;
@@ -303,6 +320,11 @@ void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic)
  */
 void FOC_Run(FOC_Handle_t *foc)
 {
+    float error_d, error_q;
+    float vd_cmd, vq_cmd;
+    float vd_sat, vq_sat;
+    float Vmax, v_mag;
+
     if (!foc->enabled) return;
     
     /* Step 1: Clark变换 */
@@ -312,10 +334,33 @@ void FOC_Run(FOC_Handle_t *foc)
     FOC_Park_Transform(&foc->IalphaBeta, foc->sin_theta, foc->cos_theta, &foc->Idq);
     
     /* Step 3: PI控制器计算DQ轴电压 */
-    float error_d = foc->Id_ref - foc->Idq.d;
-    float error_q = foc->Iq_ref - foc->Idq.q;
-    foc->Vdq.d = FOC_PI_Update(&foc->pi_d, error_d);
-    foc->Vdq.q = FOC_PI_Update(&foc->pi_q, error_q);
+    error_d = foc->Id_ref - foc->Idq.d;
+    error_q = foc->Iq_ref - foc->Idq.q;
+    vd_cmd = FOC_PI_Update(&foc->pi_d, error_d);
+    vq_cmd = FOC_PI_Update(&foc->pi_q, error_q);
+
+    /* Step 3.5: 电压矢量限幅（Vd/Vq联合限幅）+ 反算抗积分饱和 */
+    vd_sat = vd_cmd;
+    vq_sat = vq_cmd;
+    Vmax = foc->pi_d.output_max;
+    v_mag = sqrtf(vd_cmd * vd_cmd + vq_cmd * vq_cmd);
+    if ((Vmax > FOC_EPSILON) && (v_mag > Vmax)) {
+        float scale = Vmax / v_mag;
+        vd_sat = vd_cmd * scale;
+        vq_sat = vq_cmd * scale;
+
+        if (fabsf(foc->pi_d.Ki) > FOC_EPSILON) {
+            foc->pi_d.integral += (FOC_CURRENT_AW_GAIN * (vd_sat - vd_cmd)) / foc->pi_d.Ki;
+            foc->pi_d.integral = FOC_Saturate(foc->pi_d.integral, foc->pi_d.integral_max, -foc->pi_d.integral_max);
+        }
+        if (fabsf(foc->pi_q.Ki) > FOC_EPSILON) {
+            foc->pi_q.integral += (FOC_CURRENT_AW_GAIN * (vq_sat - vq_cmd)) / foc->pi_q.Ki;
+            foc->pi_q.integral = FOC_Saturate(foc->pi_q.integral, foc->pi_q.integral_max, -foc->pi_q.integral_max);
+        }
+    }
+
+    foc->Vdq.d = vd_sat;
+    foc->Vdq.q = vq_sat;
     
     /* Step 4: 反Park变换 */
     FOC_Inverse_Park_Transform(&foc->Vdq, foc->sin_theta, foc->cos_theta, &foc->ValphaBeta);

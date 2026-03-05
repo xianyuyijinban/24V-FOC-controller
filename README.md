@@ -86,6 +86,9 @@ make clean
 
 # Test build / 测试编译
 .\build_test.ps1
+
+# HostComputer parser unit tests / 上位机解析单测（可在仓库根目录直接执行）
+python -m unittest HostComputer/test_data_parser.py
 ```
 
 ---
@@ -209,6 +212,19 @@ Notes / 说明:
 ## Documentation / 文档
 
 - [Project Architecture](Project_Architecture.md) - 详细的项目架构文档
+- [Motor Parameter Identification Primer (ZH)](docs/Motor_Parameter_Identification_Primer_zh.md) - 参数识别原理与调试说明
+
+### Recent Technical Updates / 近期技术更新 (2026-03-04)
+
+- SPI1 访问互斥：阻塞式寄存器读写与TIM1异步DMA轮询已加总线互斥，避免并发竞争导致寄存器访问错乱。
+- 故障中断路径去阻塞：TIM1故障分支改为快速下电，阻塞式DRV收尾移至主循环执行。
+- Ke识别模型更新：改用静止坐标系反电势幅值 `|Vαβ - Rs*Iαβ|` 与实测 `ωe` 估算，提高开环识别阶段鲁棒性。
+- FOC电压链路常数统一：`Vdq` 矢量限幅为 `Vbus/√3`，SVPWM归一化使用 `Vbus/2`，提升母线利用率一致性。
+- UART故障首报修复：仅在故障包成功进入DMA发送后更新故障边沿标志，避免首次故障上报丢失。
+- 串口命令复制改为“有界长度函数 + memcpy”，规避 `-Werror` 下 `strncpy truncation` 告警。
+- FOC调制波接口声明补齐：`FOC_GetModulationWave()` 已在头文件导出。
+- 上位机单测入口兼容：`HostComputer/test_data_parser.py` 现可在仓库根目录直接运行。
+- DRV8350S 异步读失败路径补齐 `readReq.pending` 清理（DMA启动失败和DMA错误回调），避免后续阻塞式 SPI 因等待 `pending==0` 超时。
 
 ---
 

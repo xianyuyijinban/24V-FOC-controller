@@ -15,7 +15,7 @@
 
 ### 主要功能
 - FOC矢量控制（电流环20kHz，速度环2kHz，位置环200Hz）
-- 电机参数自动识别（Rs、Ld、Lq、Ke、Pn、J）
+- 电机参数自动识别（Pn、Rs、Ld/Lq、Ke、编码器零位）
 - Rs在线温度补偿
 - 参数Flash存储与CRC校验
 - 故障保护与诊断
@@ -272,9 +272,9 @@ flowchart TB
         START[开始识别] --> PN[极对数识别]
         PN --> RS[Rs识别<br/>直流伏安法]
         RS --> LS[Ls识别<br/>高频注入法]
-        LS --> KE[Ke识别<br/>反电动势法]
-        KE --> J[J识别<br/>加减速法]
-        J --> ALIGN[编码器对齐]
+        LS --> KE[Ke识别<br/>|Eαβ|/ωe(实测速度)]
+        KE --> J[J/B识别<br/>当前为默认参数占位]
+        J --> ALIGN[编码器对齐<br/>锁轴估计theta_offset]
         ALIGN --> SAVE[保存参数]
     end
 
@@ -378,11 +378,15 @@ void FOC_SetVbus(FOC_Handle_t *foc, float Vbus);
 void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic);
 void FOC_Run(FOC_Handle_t *foc);
 void FOC_GetPWM(FOC_Handle_t *foc, uint16_t *pwm_a, uint16_t *pwm_b, uint16_t *pwm_c, uint16_t pwm_period);
+void FOC_GetModulationWave(const FOC_Handle_t *foc, float *ma, float *mb, float *mc);
 
 /* 辅助函数 */
 static inline float FOC_Saturate(float value, float max, float min);
 static inline float FOC_AngleNormalize(float angle);
 ```
+
+实现注记（2026-03-04）：
+- 电压链路常数统一为：`Vdq`矢量限幅 `Vbus/√3`，SVPWM相电压归一化基准 `Vbus/2`，避免指令电压与调制波缩放不一致导致的母线利用率损失。
 
 ### 2. 电机参数识别模块 (motor_identify.h)
 
@@ -405,7 +409,7 @@ MI_ERR_J_NOT_CONVERGED, MI_ERR_CURRENT_TOO_LOW, MI_ERR_CURRENT_TOO_HIGH, MI_ERR_
 /* 核心函数 */
 void MI_Init(MI_Handle_t *handle, MotorParam_t *param, FOC_Handle_t *foc);
 void MI_StartIdentify(MI_Handle_t *handle);
-void MI_Process(MI_Handle_t *handle);  // 1ms中断调用
+void MI_Process(MI_Handle_t *handle);  // TIM1 20kHz周期调用（识别态）
 uint8_t MI_IsComplete(MI_Handle_t *handle);
 MI_ErrorCode_t MI_GetError(MI_Handle_t *handle);
 const char* MI_GetErrorString(MI_ErrorCode_t error);
@@ -462,7 +466,7 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle);
 void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle);  // 20kHz
 void FOC_App_SpeedLoop(FOC_AppHandle_t *handle);        // 2kHz (TIM1 10分频)
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle);     // 200Hz (TIM1 100分频)
-void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);// 200Hz (TIM1 100分频)
+void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);// 兼容接口（识别已移至TIM1周期）
 
 /* 控制接口 */
 void FOC_App_Enable(FOC_AppHandle_t *handle);
@@ -476,6 +480,7 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);
 void FOC_App_SaveParam(FOC_AppHandle_t *handle);
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle);
+void FOC_App_StopIdentify(FOC_AppHandle_t *handle);
 uint8_t FOC_App_IsIdentifyComplete(FOC_AppHandle_t *handle);
 
 /* 状态查询 */
@@ -488,6 +493,9 @@ const char* FOC_App_GetFaultString(FOC_FaultCode_t fault);
 void FOC_App_GetDebugInfo(FOC_AppHandle_t *handle, float *Id, float *Iq, float *Vd, float *Vq, 
                           float *theta, float *speed, float *Rs_est);
 ```
+
+实现注记（2026-03-04）：
+- TIM1故障路径采用“中断快速下电 + 主循环延后收尾”：中断内只做PWM关断与`DRV_EN`拉低，阻塞式DRV关断流程通过`pending_disable`在`FOC_App_MainLoop()`执行。
 
 ### 5. ADC采样模块 (adc_sampling.h)
 
@@ -549,8 +557,11 @@ void DRV8350S_DisableGateDrivers(DRV8350S_Handle_t* handle);
 void DRV8350S_TIM1_UpdateCallback(DRV8350S_Handle_t* handle);  // 20kHz中断调用
 void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle);
 uint32_t DRV8350S_GetFaultFlags(DRV8350S_Handle_t* handle);
-uint8_t DRV8350S_ReadStatus(DRV8350S_Handle_t* handle, uint8_t addr, uint16_t* data);
+int8_t DRV8350S_ReadRegister(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t* data);
 ```
+
+实现注记（2026-03-04）：
+- SPI1访问新增运行时互斥标志`syncBusy`，阻塞式寄存器访问与TIM1异步DMA轮询互斥，避免并发帧交叠导致寄存器读写错位。
 
 ### 8. UART上传模块 (uart_upload.h)
 
@@ -683,12 +694,11 @@ sequenceDiagram
     TIM1->>TIM1: 解析编码器角度
     TIM1->>TIM1: CRC校验
 
-    Note over LOOP: TIM1分频任务（速度环2kHz，位置环/识别200Hz）
+    Note over LOOP: TIM1分频任务（速度环2kHz，位置环200Hz）
     loop 每0.5ms / 每5ms
         LOOP->>LOOP: 计算电机转速（2kHz）
         LOOP->>LOOP: 速度环PI控制（2kHz）
         LOOP->>LOOP: 位置环PI控制（200Hz）
-        LOOP->>LOOP: 参数识别状态机（200Hz）
     end
 
     UART-->>MAIN: DMA发送完成
@@ -712,7 +722,7 @@ sequenceDiagram
 | 电流环 | 20kHz | 50μs | TIM1中断 | Id/Iq PI控制、SVPWM生成 |
 | 速度环 | 2kHz | 0.5ms | TIM1中断(10分频) | 转速计算、速度PI控制 |
 | 位置环 | 200Hz | 5ms | TIM1中断(100分频) | 位置PI控制、输出速度给定 |
-| 参数识别 | 200Hz | 5ms | TIM1中断(100分频) | 识别状态机处理 |
+| 参数识别 | 20kHz | 50μs | TIM1中断(每周期) | 识别状态机处理（与采样/PWM同步） |
 | 状态上传 | 10Hz | 100ms | Main循环 | UART数据上传、故障监控 |
 | Rs在线估计 | 1kHz | 1ms | TIM1中断(分频) | 低速时估计Rs并补偿 |
 
@@ -791,6 +801,15 @@ graph TB
 | 5 | FOC_FAULT_DRV8350S | 栅极驱动故障 | nFAULT引脚触发 |
 | 6 | FOC_FAULT_PARAM_INVALID | 参数无效 | CRC校验失败 |
 
+### 故障恢复策略（当前实现）
+
+- `CMD:CLEAR_FAULT` 不再无条件恢复 `READY`。
+- 固件会先尝试清除DRV故障，再复读故障寄存器并联合检查：
+  - DRV故障位是否清零
+  - 编码器数据是否有效
+  - 母线电压是否在欠压/过压阈值范围内
+- 仅当上述条件都满足时才从 `FAULT` 进入 `READY`，否则维持故障态并更新故障码。
+
 ---
 
 ## 内存使用估算
@@ -835,6 +854,7 @@ CMD:IREF,0.0,1.0      # 设置电流参考值 (Id_ref, Iq_ref)
 CMD:SREF,10.0         # 设置速度参考值 (rad/s)
 CMD:PREF,3.14159      # 设置位置参考值 (rad)
 CMD:IDENTIFY,1        # 启动参数识别
+CMD:IDENTIFY,0        # 中止参数识别
 CMD:CLEAR_FAULT       # 清除故障
 CMD:PI_CURRENT,0.1,0.01   # 设置电流环PI
 CMD:PI_SPEED,0.5,0.1      # 设置速度环PI
@@ -875,10 +895,73 @@ State : 4
 
 ---
 
+## 近期架构修订（截至 2026-03-04）
+
+截至 2026-03-04，近期代码主线修订如下：
+
+1. 参数识别执行位置调整  
+- 识别状态机在 TIM1 20kHz 周期执行，与ADC采样和PWM输出同周期同步。  
+- Rs/Ls阶段在识别前刷新电流反馈，避免使用过时的 `IalphaBeta`。
+
+2. 识别可中止机制  
+- 新增 `FOC_App_StopIdentify()`；`CMD:IDENTIFY,0` 支持安全中止。  
+- 采用临界区仅修改中止标志，避免主循环与中断并发重置识别结构体。
+
+3. DRV故障处理稳健性  
+- `DRV8350S_ClearFaults` 改为读改写 `DRIVER_CTRL`，避免破坏同寄存器其他配置位。  
+- `DRV8350S_TriggerAsyncReadAll` 返回真实触发结果，便于上层监控异常。
+
+4. 故障恢复条件收敛  
+- `CMD:CLEAR_FAULT` 改为“条件恢复”，需同时满足驱动故障清除、编码器有效、母线电压正常。
+
+5. PI控制器积分分离  
+- 积分分离阈值从全局固定值改为每个PI实例独立阈值（按 `Kp` 与输出范围换算）。
+
+6. Ke识别模型修正  
+- 在测量窗口内采用静止坐标系反电势幅值估算：`|Eαβ| ≈ |Vαβ - Rs * Iαβ|`。  
+- 再结合实测电角速度求 `Ke = |Eαβ| / |ωe|`，降低开环 `dq` 坐标失配带来的偏差。
+
+7. 通信与启动细节  
+- UART DMA接收重启失败增加失败计数与快速重试。  
+- 启动默认 `DRV_EN` 低电平，消除“先高后低”瞬态窗口。
+
+8. SPI1并发访问互斥  
+- 新增 `syncBusy` 与 `DRV8350S_BusLock/BusUnlock`，阻塞式SPI访问（主循环）与TIM1异步DMA轮询实现互斥。  
+- 异步轮询在同步访问占用期间自动让路，避免寄存器读写帧交叠与数据错位。
+
+9. TIM1故障路径去阻塞  
+- 新增ISR快速下电路径：故障时在中断内仅做PWM快速关断和 `DRV_EN` 拉低。  
+- 阻塞式DRV收尾操作（含SPI访问）延后到主循环通过 `pending_disable` 执行，降低中断长阻塞风险。
+
+10. FOC电压归一化与限幅一致化  
+- `FOC_SetVbus/FOC_Init` 的电压矢量限幅统一为 `Vbus/√3`（SVPWM线性区）。  
+- `FOC_SVPWM_Generate` 归一化基准改为 `Vbus/2`（调制波定义），并与抗积分饱和链路解耦对齐。
+
+11. UART故障首报可靠性  
+- `DrvUart_Process()` 仅在故障包成功进入DMA发送后更新 `s_lastFaultFlags`。  
+- 避免“DMA忙/发送失败时先更新标志”造成首次故障边沿被吞掉。
+
+12. 命令队列复制构建兼容性  
+- `stm32h7xx_it.c` 中命令入队/出队由 `strncpy` 改为“有界长度函数 + memcpy”。  
+- 消除 `-Werror` 下 `strncpy truncation` 告警导致的构建中断风险。
+
+13. FOC调制波接口导出修正  
+- `FOC_GetModulationWave()` 已在 `foc_core.h` 补齐声明，与 `foc_core.c` 实现保持一致。
+
+14. 上位机单测入口兼容  
+- `HostComputer/test_data_parser.py` 增加本地目录注入，支持在仓库根目录直接执行 `python -m unittest HostComputer/test_data_parser.py`。
+
+15. DRV8350S 异步失败路径状态收敛  
+- `DRV8350S_TriggerAsyncRead()` 在 DMA 启动失败分支补齐 `readReq.pending = 0`。  
+- `DRV8350S_DMA_ErrorCallback()` 在 DMA 错误回调中同步清 `readReq.pending`。  
+- 避免 `DRV8350S_BusLock()` 因等待 `pending==0` 长时间不满足而超时失败。
+
+---
+
 ## 版本信息
 
-- **版本**: v1.2
-- **日期**: 2025-01-13
+- **版本**: v1.7
+- **日期**: 2026-03-04
 - **作者**: FOC开发团队
 - **硬件**: STM32H743VIT6 + TLE5012B + DRV8350S
 
@@ -888,4 +971,9 @@ State : 4
 |------|------|----------|
 | v1.0 | 2026-01-01 | 初始版本，基础FOC控制 |
 | v1.1 | 2026-02-15 | 添加电机参数识别和Rs在线补偿 |
-| v1.2 | 2025-01-13 | 添加位置环控制，更新文档 |
+| v1.2 | 2026-02-22 | 添加位置环控制，更新文档 |
+| v1.3 | 2026-03-02 | 控制链路与识别时序修订（TIM1统一调度） |
+| v1.4 | 2026-03-03 | 故障恢复、Ke识别模型、识别中止并发与PI分离阈值修订 |
+| v1.5 | 2026-03-04 | SPI1互斥访问、TIM1故障路径去阻塞、Ke估算改为αβ反电势幅值 |
+| v1.6 | 2026-03-04 | FOC电压常数一致化、UART故障首报修复、命令复制告警修复、FOC接口导出补齐、单测入口兼容 |
+| v1.7 | 2026-03-04 | DRV8350S异步读失败路径清理pending，避免BusLock等待超时 |

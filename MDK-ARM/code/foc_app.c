@@ -20,6 +20,7 @@ extern DRV8350S_Handle_t drv8350s;
 
 /* 私有函数前向声明 */
 static void FOC_App_UpdatePIParams(FOC_AppHandle_t *handle);
+static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 
 /**
  * @brief FOC应用层初始化
@@ -69,6 +70,11 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
  */
 void FOC_App_MainLoop(FOC_AppHandle_t *handle)
 {
+    if (handle->pending_disable) {
+        handle->pending_disable = 0U;
+        FOC_App_Disable(handle);
+    }
+
     switch (handle->state) {
         case FOC_STATE_IDLE:
             /* 等待启动参数识别或加载参数 */
@@ -78,20 +84,31 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
             break;
             
         case FOC_STATE_PARAM_IDENTIFY:
-            /* 参数识别状态机在TIM2中断中运行 */
-            if (MI_IsComplete(&handle->mi_handle)) {
+            /* 参数识别状态机在TIM1中断中运行 */
+            if (!handle->enable_identify) {
+                /* 外部请求中止识别 */
+                MI_Init(&handle->mi_handle, &handle->motor_param, &handle->foc);
+                FOC_App_Disable(handle);
+                handle->fault_code = FOC_FAULT_NONE;
+            } else if (MI_IsComplete(&handle->mi_handle)) {
+                /* 识别结束后先关闭功率级，回到安全待机 */
+                FOC_App_Disable(handle);
+
                 /* 识别完成，保存参数 */
                 FOC_App_SaveParam(handle);
                 
                 /* 更新三环PI参数 */
                 FOC_App_UpdatePIParams(handle);
                 
+                handle->fault_code = FOC_FAULT_NONE;
                 handle->state = FOC_STATE_READY;
                 handle->enable_identify = 0;
             } else if (MI_GetError(&handle->mi_handle) != MI_ERR_NONE) {
                 /* 识别出错 */
+                FOC_App_Disable(handle);
                 handle->fault_code = FOC_FAULT_PARAM_INVALID;
                 handle->state = FOC_STATE_FAULT;
+                handle->enable_identify = 0;
             }
             break;
             
@@ -134,24 +151,29 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 {
     ADC_Sampling_t *adc;
     float angle_deg;
-    uint8_t pole_pairs;
+    uint8_t pole_pairs = 1U;
+    uint8_t identify_direct_svpwm = 0U;
 
     if (handle->state != FOC_STATE_RUNNING && handle->state != FOC_STATE_PARAM_IDENTIFY) {
         return;
     }
 
     if ((handle->state == FOC_STATE_RUNNING) && !TLE5012_IsDataValid()) {
-        handle->fault_code = FOC_FAULT_ENCODER;
-        FOC_App_Disable(handle);
-        handle->state = FOC_STATE_FAULT;
+        FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ENCODER);
         return;
     }
 
     /* 读取编码器角度 */
     angle_deg = TLE5012_GetAngle();
     handle->theta_mech = angle_deg * 3.14159f / 180.0f;  /* 转换为弧度 */
-    pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
-    handle->theta_elec = handle->theta_mech * pole_pairs + handle->motor_param.theta_offset;
+    if (handle->state == FOC_STATE_RUNNING) {
+        pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
+        handle->theta_elec = handle->theta_mech * pole_pairs + handle->motor_param.theta_offset;
+        FOC_SetAngle(&handle->foc, handle->theta_elec);
+    } else {
+        /* 识别阶段角度由识别状态机决定（开环），不覆盖 */
+        handle->theta_elec = handle->foc.theta_elec;
+    }
 
     /* 使用ADC采样模块计算后的物理量（含零点校准） */
     adc = ADC_Sampling_GetData();
@@ -171,11 +193,28 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     
     /* 更新FOC输入 */
     FOC_UpdateCurrent(&handle->foc, handle->Ia, handle->Ib, handle->Ic);
-    FOC_SetAngle(&handle->foc, handle->theta_elec);
     FOC_SetVbus(&handle->foc, handle->Vbus);
+
+    /* 参数识别在TIM1周期内执行，保证注入波形和采样同步
+     * 注意：先刷新最新电流反馈，再执行识别，避免使用旧IalphaBeta
+     */
+    if (handle->state == FOC_STATE_PARAM_IDENTIFY && handle->enable_identify) {
+        FOC_Clarke_Transform(&handle->foc.Iabc, &handle->foc.IalphaBeta);
+        MI_Process(&handle->mi_handle);
+    }
     
-    /* 执行FOC计算 */
-    FOC_Run(&handle->foc);
+    if ((handle->state == FOC_STATE_PARAM_IDENTIFY) &&
+        handle->enable_identify &&
+        ((handle->mi_handle.state == MI_STATE_RS_IDENTIFY) ||
+         (handle->mi_handle.state == MI_STATE_LS_IDENTIFY))) {
+        /* Rs/Ls识别阶段直接使用识别模块生成的SVPWM */
+        identify_direct_svpwm = 1U;
+    }
+
+    if (!identify_direct_svpwm) {
+        /* 执行FOC计算 */
+        FOC_Run(&handle->foc);
+    }
     
     /* 更新PWM */
     if (handle->enable_pwm) {
@@ -198,6 +237,29 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 }
 
 /**
+ * @brief ISR中故障快速下电：仅做无阻塞动作，阻塞SPI收尾延后到主循环
+ */
+static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->enable_pwm = 0U;
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0U);
+    htim1.Instance->BDTR &= ~TIM_BDTR_MOE;
+
+    HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
+    MI_RsOnlineEstimator_Enable(&handle->rs_est, 0U);
+
+    handle->fault_code = fault;
+    handle->state = FOC_STATE_FAULT;
+    handle->pending_disable = 1U;
+}
+
+/**
  * @brief 转速计算和速度环控制（2kHz）
  * @param handle FOC应用层句柄指针
  * 
@@ -215,6 +277,9 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 {
     static float theta_prev = 0.0f;
     static uint8_t speed_loop_ready = 0U;
+    const float Ts = 1.0f / (float)FOC_SPEED_LOOP_FREQ;
+    const float wc = 2.0f * FOC_PI * FOC_SPEED_LPF_CUTOFF_HZ;
+    float alpha = (wc * Ts) / (1.0f + wc * Ts);
 
     if (handle->state != FOC_STATE_RUNNING) {
         speed_loop_ready = 0U;
@@ -234,6 +299,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 
     /* 计算转速（简化：微分法） */
     float delta_theta = handle->theta_mech - theta_prev;
+    float speed_raw;
     float speed_ref_temp;
     float speed_error;
 
@@ -244,7 +310,11 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         delta_theta += 2.0f * FOC_PI;
     }
 
-    handle->speed_mech = delta_theta * FOC_SPEED_LOOP_FREQ;  /* 注意：FOC_SPEED_LOOP_FREQ现在是2000 */
+    /* 一阶低通滤波，抑制编码器量化和采样抖动 */
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    speed_raw = delta_theta * FOC_SPEED_LOOP_FREQ;
+    handle->speed_mech += alpha * (speed_raw - handle->speed_mech);
     handle->speed_elec = handle->speed_mech * handle->motor_param.Pn;
     theta_prev = handle->theta_mech;
 
@@ -311,20 +381,15 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
 }
 
 /**
- * @brief 参数识别状态机处理（200Hz）
+ * @brief 参数识别状态机处理（兼容接口）
  * @param handle FOC应用层句柄指针
  * 
- * 【重要】此函数在TIM1_UP_IRQHandler中断中通过分频（100分频）调用
- * 执行频率：20kHz / 100 = 200Hz
- * 
- * 与位置环同频率，确保参数识别的实时性
+ * 参数识别已移至 FOC_App_TIM1_IRQHandler() 每个PWM周期执行。
+ * 保留该函数仅用于兼容旧调用点。
  */
 void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle)
 {
-    /* 参数识别状态机 */
-    if (handle->state == FOC_STATE_PARAM_IDENTIFY) {
-        MI_Process(&handle->mi_handle);
-    }
+    (void)handle;
 }
 
 /**
@@ -409,7 +474,7 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
     /* 禁用Rs在线估计 */
     MI_RsOnlineEstimator_Enable(&handle->rs_est, 0);
     
-    if (handle->state == FOC_STATE_RUNNING) {
+    if (handle->state == FOC_STATE_RUNNING || handle->state == FOC_STATE_PARAM_IDENTIFY) {
         handle->state = FOC_STATE_READY;
     }
 }
@@ -588,12 +653,49 @@ void FOC_App_SaveParam(FOC_AppHandle_t *handle)
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
 {
     if (handle->state == FOC_STATE_IDLE || handle->state == FOC_STATE_READY) {
+        /* 参数识别需要实际激励：确保功率级已上电并允许PWM输出 */
+        if (!handle->enable_pwm) {
+            HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
+            HAL_Delay(1);
+            (void)DRV8350S_ClearFaults(&drv8350s);
+            if (DRV8350S_EnableGateDrivers(&drv8350s) != 0) {
+                handle->fault_code = FOC_FAULT_DRV8350S;
+                handle->state = FOC_STATE_FAULT;
+                handle->enable_pwm = 0;
+                handle->enable_identify = 0;
+                HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
+                return;
+            }
+
+            HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+            HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+            HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+            HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+            HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+            HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+            handle->enable_pwm = 1;
+        }
+
         /* 初始化参数识别 */
         MI_Init(&handle->mi_handle, &handle->motor_param, &handle->foc);
         MI_StartIdentify(&handle->mi_handle);
         
         handle->state = FOC_STATE_PARAM_IDENTIFY;
         handle->enable_identify = 1;
+    }
+}
+
+/**
+ * @brief 中止参数识别
+ * @param handle FOC应用层句柄指针
+ */
+void FOC_App_StopIdentify(FOC_AppHandle_t *handle)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    handle->enable_identify = 0;
+    if (primask == 0U) {
+        __enable_irq();
     }
 }
 

@@ -47,6 +47,7 @@ typedef struct {
     float Kp;
     float Ki;
     float integral;
+    float integral_sep_thresh;
     float output_max;
     float output_min;
     float integral_max;
@@ -115,6 +116,7 @@ void FOC_SetVbus(FOC_Handle_t *foc, float Vbus);
 void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic);
 void FOC_Run(FOC_Handle_t *foc);
 void FOC_GetPWM(FOC_Handle_t *foc, uint16_t *pwm_a, uint16_t *pwm_b, uint16_t *pwm_c, uint16_t pwm_period);
+void FOC_GetModulationWave(const FOC_Handle_t *foc, float *ma, float *mb, float *mc);
 
 /* 辅助函数 */
 static inline float FOC_Saturate(float value, float max, float min)

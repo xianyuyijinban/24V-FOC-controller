@@ -114,6 +114,7 @@ typedef struct {
     uint32_t speed_loop_count;
     
     /* 使能标志 */
+    uint8_t power_unlocked;        /* 0=锁定，1=允许功率级动作 */
     uint8_t enable_pwm;
     uint8_t enable_identify;
     volatile uint8_t pending_disable;   /* ISR中仅做快速下电，阻塞SPI收尾延后到主循环 */
@@ -139,6 +140,7 @@ void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);   /* 兼容接口：参
 /* 控制接口 */
 void FOC_App_Enable(FOC_AppHandle_t *handle);
 void FOC_App_Disable(FOC_AppHandle_t *handle);
+void FOC_App_ResetMotionState(FOC_AppHandle_t *handle);
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);

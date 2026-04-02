@@ -421,7 +421,7 @@ void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle)
  */
 void FOC_App_Enable(FOC_AppHandle_t *handle)
 {
-    if (handle->state == FOC_STATE_READY) {
+    if ((handle->state == FOC_STATE_READY) && handle->power_unlocked) {
         /* 先上电驱动芯片，再开栅极，最后启动PWM */
         HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
         HAL_Delay(1);  /* 给DRV_EN上电留出稳定时间 */
@@ -458,6 +458,7 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
 void FOC_App_Disable(FOC_AppHandle_t *handle)
 {
     handle->enable_pwm = 0;
+    FOC_App_ResetMotionState(handle);
     
     /* 停止PWM输出 */
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
@@ -477,6 +478,30 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
     if (handle->state == FOC_STATE_RUNNING || handle->state == FOC_STATE_PARAM_IDENTIFY) {
         handle->state = FOC_STATE_READY;
     }
+}
+
+void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->Id_ref = 0.0f;
+    handle->Iq_ref = 0.0f;
+    handle->speed_ref = 0.0f;
+    handle->pos_ref = handle->theta_mech;
+    handle->speed_mech = 0.0f;
+    handle->speed_elec = 0.0f;
+
+    FOC_SetCurrentReference(&handle->foc, 0.0f, 0.0f);
+    handle->foc.Vdq.d = 0.0f;
+    handle->foc.Vdq.q = 0.0f;
+    handle->foc.ValphaBeta.alpha = 0.0f;
+    handle->foc.ValphaBeta.beta = 0.0f;
+    handle->foc.pi_d.integral = 0.0f;
+    handle->foc.pi_q.integral = 0.0f;
+    handle->pi_speed.integral = 0.0f;
+    handle->pi_pos.integral = 0.0f;
 }
 
 /**
@@ -652,6 +677,10 @@ void FOC_App_SaveParam(FOC_AppHandle_t *handle)
  */
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
 {
+    if (!handle->power_unlocked) {
+        return;
+    }
+
     if (handle->state == FOC_STATE_IDLE || handle->state == FOC_STATE_READY) {
         /* 参数识别需要实际激励：确保功率级已上电并允许PWM输出 */
         if (!handle->enable_pwm) {

@@ -101,6 +101,7 @@ C_SOURCES = \
 $(wildcard $(CORE_DIR)/Src/*.c) \
 $(CODE_DIR)/adc_sampling.c \
 $(CODE_DIR)/drv8350s.c \
+$(CODE_DIR)/demo_button_control.c \
 $(CODE_DIR)/foc_app.c \
 $(CODE_DIR)/foc_core.c \
 $(CODE_DIR)/motor_identify.c \

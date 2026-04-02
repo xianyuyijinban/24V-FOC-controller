@@ -121,8 +121,22 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    if (sscanf(cmd, "CMD:UNLOCK,%ld", &int_arg) == 1) {
+        if (int_arg != 0) {
+            g_foc_app.power_unlocked = 1U;
+        } else {
+            g_foc_app.power_unlocked = 0U;
+            FOC_App_StopIdentify(&g_foc_app);
+            FOC_App_Disable(&g_foc_app);
+        }
+        return;
+    }
+
     if (sscanf(cmd, "CMD:ENABLE,%ld", &int_arg) == 1) {
         if (int_arg != 0) {
+            if (!g_foc_app.power_unlocked) {
+                return;
+            }
             FOC_App_Enable(&g_foc_app);
         } else {
             FOC_App_Disable(&g_foc_app);
@@ -156,6 +170,9 @@ static void UART_CommandExecute(const char *cmd)
 
     if (sscanf(cmd, "CMD:IDENTIFY,%ld", &int_arg) == 1) {
         if (int_arg != 0) {
+            if (!g_foc_app.power_unlocked) {
+                return;
+            }
             FOC_App_StartIdentify(&g_foc_app);
         } else {
             FOC_App_StopIdentify(&g_foc_app);
@@ -186,6 +203,7 @@ static void UART_CommandExecute(const char *cmd)
         __disable_irq();
         if ((!drv_fault_active) && encoder_ok && vbus_ok) {
             g_foc_app.fault_code = FOC_FAULT_NONE;
+            FOC_App_ResetMotionState(&g_foc_app);
             if (g_foc_app.state == FOC_STATE_FAULT) {
                 g_foc_app.state = FOC_STATE_READY;
             }

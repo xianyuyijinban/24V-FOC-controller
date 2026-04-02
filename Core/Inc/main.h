@@ -59,6 +59,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN Private defines */
+#define MOD2_Pin GPIO_PIN_12
+#define MOD2_GPIO_Port GPIOB
+#define MOD1_Pin GPIO_PIN_13
+#define MOD1_GPIO_Port GPIOB
 
 /* USER CODE END Private defines */
 

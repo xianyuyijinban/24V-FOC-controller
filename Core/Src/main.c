@@ -32,6 +32,7 @@
 /* USER CODE BEGIN Includes */
 
 #include "head.h"
+#include "demo_button_control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -114,6 +115,7 @@ int main(void)
   
   /* 初始化FOC应用�? */
   FOC_App_Init(&g_foc_app);
+  DemoButtonControl_Init(&g_foc_app);
   
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
@@ -192,6 +194,8 @@ int main(void)
 
     /* FOC应用层主循环 - 状�?�机和故障处�? */
     FOC_App_MainLoop(&g_foc_app);
+
+    DemoButtonControl_Service();
     
     /* UART数据上传处理 */
     DrvUart_Process();

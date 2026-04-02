@@ -55,6 +55,8 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 | SPI3_SCK | PC10 | TLE5012 Clock |
 | SPI3_MISO | PC11 | TLE5012 Data Out |
 | SPI3_MOSI | PC12 | TLE5012 Data In |
+| MOD2 | PB12 | Local identify start/abort button (active low) |
+| MOD1 | PB13 | Local demo-mode toggle button (active low) |
 | USART1_TX | PB14 | Serial TX |
 | USART1_RX | PB15 | Serial RX |
 | ADC1_INP17 | PA1 | Phase U Current |
@@ -117,6 +119,7 @@ python -m unittest HostComputer/test_data_parser.py
 │       ├── motor_identify.h/c  # 电机参数识别
 │       ├── param_storage.h/c   # 参数存储
 │       ├── adc_sampling.h/c    # ADC采样处理
+│       ├── demo_button_control.h/c  # 本地演示按钮控制
 │       ├── tle5012.h/c   # TLE5012B编码器驱动
 │       ├── drv8350s.h/c  # DRV8350S栅极驱动
 │       └── uart_upload.h/c     # UART数据上传
@@ -174,6 +177,8 @@ parser.feed_data(serial_data)
 
 | Command / 命令 | Format / 格式 | Description / 说明 |
 |---------------|--------------|-------------------|
+| Unlock | `CMD:UNLOCK,1` | Unlock power-stage arming / 解锁功率级动作许可 |
+| Lock | `CMD:UNLOCK,0` | Relock and force disable / 重新上锁并强制下电 |
 | Enable | `CMD:ENABLE,1` | Enable motor / 使能电机 |
 | Disable | `CMD:ENABLE,0` | Disable motor / 禁用电机 |
 | Set Mode | `CMD:MODE,n` | 0=Torque, 1=Speed, 2=Position |
@@ -189,8 +194,20 @@ parser.feed_data(serial_data)
 Notes / 说明:
 - Each command must end with newline (`\n` or `\r\n`) for parsing.
 - 命令需以换行结束（`\n` 或 `\r\n`）才能被固件解析。
-- Power stage is disabled after boot; send `CMD:ENABLE,1` to start PWM/gate drive.
-- 固件上电默认关闭功率级；需发送 `CMD:ENABLE,1` 才会启动PWM与栅极驱动。
+- Power stage is locked after boot; send `CMD:UNLOCK,1` first, then `CMD:ENABLE,1` or `CMD:IDENTIFY,1`.
+- 上电后功率级默认锁定；需先发送 `CMD:UNLOCK,1`，再发送 `CMD:ENABLE,1` 或 `CMD:IDENTIFY,1`。
+- Before unlock, `CMD:ENABLE,1` and `CMD:IDENTIFY,1` are ignored by firmware.
+- 在解锁前，固件会忽略 `CMD:ENABLE,1` 与 `CMD:IDENTIFY,1`。
+
+### Local Demo Buttons / 板载演示按钮
+
+- `PB13 = MOD1`, `PB12 = MOD2`，两者均为低电平按下、主循环轮询消抖。
+- 两个按钮都遵守与串口一致的解锁门禁；`power_unlocked == 0` 时不会触发功率级动作。
+- `MOD1` 在两种本地 demo 模式间切换：
+  - 第一次有效按下进入 `10 deg/s` 匀速旋转（`0.174533 rad/s`）。
+  - 再次按下进入“回零弹簧”模式，目标为机械绝对零位 `0 rad`。
+- 回零弹簧模式使用力矩模式按角度误差线性增大恢复力，误差达到约 `120 deg`（`2.0943951 rad`）后饱和到最大演示电流。
+- `MOD2` 在解锁后用于启动参数识别；若当前已在识别，则再次按下会中止识别。
 
 ---
 

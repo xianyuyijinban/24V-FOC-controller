@@ -25,8 +25,19 @@ function Get-ObjectPath([string]$src)
 
 function Invoke-AndCheck([string]$exe, [string[]]$toolArgs)
 {
-    $output = & $exe @toolArgs 2>&1
-    $ok = ($LASTEXITCODE -eq 0)
+    $previousErrorActionPreference = $ErrorActionPreference
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+
+    try {
+        $ErrorActionPreference = "Continue"
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = & $exe @toolArgs 2>&1
+        $ok = ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+
     return @{
         Ok = $ok
         Output = $output
@@ -132,6 +143,7 @@ $CORE_SOURCES = @(
 
 $FOC_SOURCES = @(
     "MDK-ARM/code/adc_sampling.c",
+    "MDK-ARM/code/demo_button_control.c",
     "MDK-ARM/code/drv8350s.c",
     "MDK-ARM/code/foc_app.c",
     "MDK-ARM/code/foc_core.c",

@@ -7,11 +7,14 @@
  */
 
 #include "adc_sampling.h"
+#include <math.h>
 #include <string.h>
 
 /* 私有变量 */
 static ADC_HandleTypeDef* s_hadc = NULL;
 static ADC_Sampling_t s_adcData;
+static volatile uint8_t s_controlWindowOpen = 1U;
+static volatile uint32_t s_lastConsumedFrameSequence = 0U;
 
 /* 外部变量声明（在stm32h7xx_it.c中定义） */
 extern volatile uint16_t adc_data[8];
@@ -34,6 +37,8 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc)
     s_adcData.offsetA = (int16_t)ADC_HALF;
     s_adcData.offsetB = (int16_t)ADC_HALF;
     s_adcData.offsetC = (int16_t)ADC_HALF;
+    s_controlWindowOpen = 1U;
+    s_lastConsumedFrameSequence = 0U;
     
     return 0;
 }
@@ -43,6 +48,9 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc)
  */
 void ADC_Sampling_Process(void)
 {
+    uint8_t frameValid = s_controlWindowOpen;
+    uint32_t frameCycle = s_adcData.controlCycleSequence;
+
     /* 从全局ADC缓冲区读取数据
      * adc_data[0] = PA1 (INP17) - 电流A相
      * adc_data[1] = PA2 (INP14) - 电流B相
@@ -61,8 +69,62 @@ void ADC_Sampling_Process(void)
     s_adcData.vbus = ADC_CalcVoltage(s_adcData.rawVbus, K_VBUS_DIV);
     
     /* 更新标志 */
-    s_adcData.dataReady = 1;
+    if (frameValid) {
+        s_adcData.dataReady = 1U;
+        s_adcData.lastCommittedCycle = frameCycle;
+    } else {
+        s_adcData.dataReady = 0U;
+        s_adcData.invalidWindowCount++;
+    }
     s_adcData.sampleCount++;
+    s_adcData.frameSequence++;
+}
+
+/**
+ * @brief 控制ISR进入时关闭当前采样窗口
+ */
+void ADC_Sampling_BeginControlCycle(void)
+{
+    s_controlWindowOpen = 0U;
+    s_adcData.controlCycleSequence++;
+}
+
+/**
+ * @brief 控制ISR退出时打开下一控制周期的采样窗口
+ */
+void ADC_Sampling_EndControlCycle(void)
+{
+    s_controlWindowOpen = 1U;
+}
+
+/**
+ * @brief 仅允许控制环消费本控制周期对应的新ADC帧
+ */
+uint8_t ADC_Sampling_TryConsumeLatest(void)
+{
+    uint32_t expectedCycle = (s_adcData.controlCycleSequence == 0U) ?
+        0U : (s_adcData.controlCycleSequence - 1U);
+
+    if (s_adcData.dataReady &&
+        (s_adcData.frameSequence != s_lastConsumedFrameSequence) &&
+        (s_adcData.lastCommittedCycle == expectedCycle)) {
+        s_lastConsumedFrameSequence = s_adcData.frameSequence;
+        s_adcData.lastConsumedCycle = s_adcData.controlCycleSequence;
+        s_adcData.frameAgeCycles = 0U;
+        s_adcData.dataReady = 0U;
+        return 1U;
+    }
+
+    s_adcData.sampleMissCount++;
+    if (s_adcData.controlCycleSequence > s_adcData.lastCommittedCycle) {
+        s_adcData.frameAgeCycles =
+            s_adcData.controlCycleSequence - s_adcData.lastCommittedCycle;
+    } else {
+        s_adcData.frameAgeCycles = 0U;
+    }
+    s_adcData.dataReady = 0U;
+
+    return 0U;
 }
 
 /**

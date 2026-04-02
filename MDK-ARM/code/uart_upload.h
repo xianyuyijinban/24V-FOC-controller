@@ -18,7 +18,7 @@ extern "C" {
 #include <stdbool.h>
 
 /* 配置宏 -------------------------------------------------------------------*/
-#define DRV_UART_BUF_SIZE           512     /* 发送缓冲区大小 */
+#define DRV_UART_BUF_SIZE           1024    /* 发送缓冲区大小 */
 #define DRV_UPLOAD_INTERVAL_MS      100     /* 正常数据上传间隔 (ms) */
 #define DRV_FAULT_HISTORY_SIZE      8       /* 故障历史记录数量 */
 
@@ -56,6 +56,22 @@ typedef struct {
     float    Id_ref;            /* D轴电流参考 */
     float    Iq_ref;            /* Q轴电流参考 */
     uint8_t  focState;          /* FOC状态 */
+
+    /* ADC采样诊断 */
+    char     adcTriggerSource[24];        /* ADC触发源描述 */
+    float    adcCurrentSampleTimeCycles;  /* 电流通道采样时间 */
+    float    adcVbusSampleTimeCycles;     /* 母线通道采样时间 */
+    uint32_t adcFrameSequence;            /* ADC帧序号 */
+    uint32_t adcFrameAgeCycles;           /* ADC帧年龄(控制周期) */
+    uint32_t adcSampleMissCount;          /* 缺帧计数 */
+    uint32_t adcInvalidWindowCount;       /* 晚帧/窗口无效计数 */
+    uint16_t adcRawCurrentA;              /* A相原始ADC */
+    uint16_t adcRawCurrentB;              /* B相原始ADC */
+    uint16_t adcRawCurrentC;              /* C相原始ADC */
+    float    adcCurrentA;                 /* A相电流(A) */
+    float    adcCurrentB;                 /* B相电流(A) */
+    float    adcCurrentC;                 /* C相电流(A) */
+    float    adcVbus;                     /* 母线电压(V) */
 
     uint8_t  packetType;        /* 数据包类型 */
 } DrvUart_DataPacket_t;

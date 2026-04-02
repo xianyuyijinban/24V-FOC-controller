@@ -9,6 +9,71 @@ ROOT = Path(__file__).resolve().parent
 
 
 class TestBuildSystemConsistency(unittest.TestCase):
+    def test_adc_low_side_sampling_timing_contract(self):
+        adc_c = (ROOT / "Core" / "Src" / "adc.c").read_text(encoding="utf-8")
+        tim_c = (ROOT / "Core" / "Src" / "tim.c").read_text(encoding="utf-8")
+        dma_c = (ROOT / "Core" / "Src" / "dma.c").read_text(encoding="utf-8")
+
+        self.assertIn("hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T1_TRGO2;", adc_c)
+        self.assertIn("sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;", adc_c)
+        self.assertIn("sConfig.SamplingTime = ADC_SAMPLETIME_16CYCLES_5;", adc_c)
+        self.assertIn("sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_OC4REF;", tim_c)
+        self.assertIn("HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4)", tim_c)
+        self.assertIn("HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);", dma_c)
+        self.assertIn("HAL_NVIC_SetPriority(TIM1_UP_IRQn, 1, 0);", tim_c)
+
+    def test_adc_sampling_tracks_frame_freshness_by_control_cycle(self):
+        adc_h = (ROOT / "MDK-ARM" / "code" / "adc_sampling.h").read_text(encoding="utf-8")
+        adc_c = (ROOT / "MDK-ARM" / "code" / "adc_sampling.c").read_text(encoding="utf-8")
+
+        self.assertIn("volatile uint32_t frameSequence;", adc_h)
+        self.assertIn("volatile uint32_t lastCommittedCycle;", adc_h)
+        self.assertIn("volatile uint32_t frameAgeCycles;", adc_h)
+        self.assertIn("volatile uint32_t sampleMissCount;", adc_h)
+        self.assertIn("volatile uint32_t invalidWindowCount;", adc_h)
+        self.assertIn("void ADC_Sampling_BeginControlCycle(void);", adc_h)
+        self.assertIn("void ADC_Sampling_EndControlCycle(void);", adc_h)
+        self.assertIn("uint8_t ADC_Sampling_TryConsumeLatest(void);", adc_h)
+        self.assertIn("static volatile uint8_t s_controlWindowOpen = 1U;", adc_c)
+        self.assertIn("void ADC_Sampling_BeginControlCycle(void)", adc_c)
+        self.assertIn("void ADC_Sampling_EndControlCycle(void)", adc_c)
+        self.assertIn("uint8_t ADC_Sampling_TryConsumeLatest(void)", adc_c)
+
+    def test_foc_loop_faults_after_repeated_adc_sample_misses(self):
+        foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+
+        self.assertIn("FOC_FAULT_ADC_SAMPLING", foc_h)
+        self.assertIn("#define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD", foc_h)
+        self.assertIn("ADC_Sampling_BeginControlCycle();", foc_c)
+        self.assertIn("ADC_Sampling_TryConsumeLatest()", foc_c)
+        self.assertIn("FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ADC_SAMPLING);", foc_c)
+        self.assertIn("ADC_Sampling_EndControlCycle();", foc_c)
+
+    def test_uart_upload_includes_adc_sampling_diagnostics(self):
+        uart_h = (ROOT / "MDK-ARM" / "code" / "uart_upload.h").read_text(encoding="utf-8")
+        uart_c = (ROOT / "MDK-ARM" / "code" / "uart_upload.c").read_text(encoding="utf-8")
+
+        self.assertIn("adcTriggerSource", uart_h)
+        self.assertIn("adcCurrentSampleTimeCycles", uart_h)
+        self.assertIn("adcVbusSampleTimeCycles", uart_h)
+        self.assertIn("adcFrameSequence", uart_h)
+        self.assertIn("adcFrameAgeCycles", uart_h)
+        self.assertIn("adcSampleMissCount", uart_h)
+        self.assertIn("adcInvalidWindowCount", uart_h)
+        self.assertIn("adcRawCurrentA", uart_h)
+        self.assertIn("adcRawCurrentB", uart_h)
+        self.assertIn("adcRawCurrentC", uart_h)
+        self.assertIn("adcCurrentA", uart_h)
+        self.assertIn("adcCurrentB", uart_h)
+        self.assertIn("adcCurrentC", uart_h)
+        self.assertIn("adcVbus", uart_h)
+        self.assertIn("ADC_SAMPLING_TRIGGER_SOURCE_TEXT", uart_c)
+        self.assertIn("[ADC Sampling]", uart_c)
+        self.assertIn("packet->adcFrameSequence", uart_c)
+        self.assertIn("packet->adcRawCurrentA", uart_c)
+        self.assertIn("packet->adcCurrentA", uart_c)
+
     def test_build_ps1_wrapper_tolerates_native_stderr_with_zero_exit(self):
         script = (ROOT / "build.ps1").read_text(encoding="utf-8")
         match = re.search(

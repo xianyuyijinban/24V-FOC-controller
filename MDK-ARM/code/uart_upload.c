@@ -90,9 +90,13 @@ extern FOC_AppHandle_t g_foc_app;
  */
 static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
 {
+    ADC_Sampling_t* adc;
+
     if (packet == NULL || s_drvHandle == NULL) {
         return;
     }
+
+    adc = ADC_Sampling_GetData();
 
     packet->timestamp = HAL_GetTick();
     packet->packetType = type;
@@ -119,6 +123,24 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->Id_ref = g_foc_app.Id_ref;
     packet->Iq_ref = g_foc_app.Iq_ref;
     packet->focState = (uint8_t)g_foc_app.state;
+
+    (void)snprintf(packet->adcTriggerSource,
+                   sizeof(packet->adcTriggerSource),
+                   "%s",
+                   ADC_SAMPLING_TRIGGER_SOURCE_TEXT);
+    packet->adcCurrentSampleTimeCycles = ADC_SAMPLING_CURRENT_SAMPLE_TIME_CYCLES;
+    packet->adcVbusSampleTimeCycles = ADC_SAMPLING_VBUS_SAMPLE_TIME_CYCLES;
+    packet->adcFrameSequence = adc->frameSequence;
+    packet->adcFrameAgeCycles = adc->frameAgeCycles;
+    packet->adcSampleMissCount = adc->sampleMissCount;
+    packet->adcInvalidWindowCount = adc->invalidWindowCount;
+    packet->adcRawCurrentA = adc->rawCurrentA;
+    packet->adcRawCurrentB = adc->rawCurrentB;
+    packet->adcRawCurrentC = adc->rawCurrentC;
+    packet->adcCurrentA = adc->currentA;
+    packet->adcCurrentB = adc->currentB;
+    packet->adcCurrentC = adc->currentC;
+    packet->adcVbus = adc->vbus;
 }
 
 /**
@@ -135,7 +157,7 @@ static int16_t DrvUart_FormatNormal(const DrvUart_DataPacket_t* packet, uint8_t*
         } \
     } while (0)
     
-    if (packet == NULL || buf == NULL || bufSize < 300) {
+    if (packet == NULL || buf == NULL || bufSize < 512) {
         return -1;
     }
     
@@ -165,6 +187,26 @@ static int16_t DrvUart_FormatNormal(const DrvUart_DataPacket_t* packet, uint8_t*
     APPEND_FMT("  Vd:     %7.3f V\r\n", packet->Vd);
     APPEND_FMT("  Vq:     %7.3f V\r\n", packet->Vq);
     APPEND_FMT("  Speed:  %7.2f rad/s\r\n", packet->speed);
+    APPEND_FMT("  Vbus:   %7.2f V\r\n", packet->adcVbus);
+
+    APPEND_FMT("\r\n[ADC Sampling]\r\n");
+    APPEND_FMT("  Trigger: %s\r\n", packet->adcTriggerSource);
+    APPEND_FMT("  Samp:    Iabc=%4.1f cyc | Vbus=%4.1f cyc\r\n",
+               packet->adcCurrentSampleTimeCycles,
+               packet->adcVbusSampleTimeCycles);
+    APPEND_FMT("  Frame:   seq=%lu age=%lu miss=%lu invalid=%lu\r\n",
+               packet->adcFrameSequence,
+               packet->adcFrameAgeCycles,
+               packet->adcSampleMissCount,
+               packet->adcInvalidWindowCount);
+    APPEND_FMT("  Raw:     A=%4u B=%4u C=%4u\r\n",
+               packet->adcRawCurrentA,
+               packet->adcRawCurrentB,
+               packet->adcRawCurrentC);
+    APPEND_FMT("  Curr:    Ia=%7.3f Ib=%7.3f Ic=%7.3f\r\n",
+               packet->adcCurrentA,
+               packet->adcCurrentB,
+               packet->adcCurrentC);
 
     /* 分隔线 */
     APPEND_FMT("===========================================\r\n");
@@ -189,7 +231,7 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
         } \
     } while (0)
     
-    if (packet == NULL || buf == NULL || bufSize < 400) {
+    if (packet == NULL || buf == NULL || bufSize < 700) {
         return -1;
     }
     
@@ -252,6 +294,26 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
         if (vs2 & (1U << 1)) APPEND_FMT("    - C High-Side\r\n");
         if (vs2 & (1U << 0)) APPEND_FMT("    - C Low-Side\r\n");
     }
+
+    APPEND_FMT("\r\n[ADC Sampling]\r\n");
+    APPEND_FMT("  Trigger: %s\r\n", packet->adcTriggerSource);
+    APPEND_FMT("  Samp:    Iabc=%4.1f cyc | Vbus=%4.1f cyc\r\n",
+               packet->adcCurrentSampleTimeCycles,
+               packet->adcVbusSampleTimeCycles);
+    APPEND_FMT("  Frame:   seq=%lu age=%lu miss=%lu invalid=%lu\r\n",
+               packet->adcFrameSequence,
+               packet->adcFrameAgeCycles,
+               packet->adcSampleMissCount,
+               packet->adcInvalidWindowCount);
+    APPEND_FMT("  Raw:     A=%4u B=%4u C=%4u\r\n",
+               packet->adcRawCurrentA,
+               packet->adcRawCurrentB,
+               packet->adcRawCurrentC);
+    APPEND_FMT("  Curr:    Ia=%7.3f Ib=%7.3f Ic=%7.3f | Vbus=%7.2f V\r\n",
+               packet->adcCurrentA,
+               packet->adcCurrentB,
+               packet->adcCurrentC,
+               packet->adcVbus);
     
     /* 建议操作 */
     APPEND_FMT("\r\n>>> ACTION REQUIRED <<<\r\n");

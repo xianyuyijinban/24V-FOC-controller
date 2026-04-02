@@ -149,18 +149,20 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
  */
 void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 {
-    ADC_Sampling_t *adc;
+    ADC_Sampling_t *adc = NULL;
     float angle_deg;
     uint8_t pole_pairs = 1U;
     uint8_t identify_direct_svpwm = 0U;
 
+    ADC_Sampling_BeginControlCycle();
+
     if (handle->state != FOC_STATE_RUNNING && handle->state != FOC_STATE_PARAM_IDENTIFY) {
-        return;
+        goto exit_cycle;
     }
 
     if ((handle->state == FOC_STATE_RUNNING) && !TLE5012_IsDataValid()) {
         FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ENCODER);
-        return;
+        goto exit_cycle;
     }
 
     /* 读取编码器角度 */
@@ -177,6 +179,14 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     }
 
     /* 使用ADC采样模块计算后的物理量（含零点校准） */
+    if (!ADC_Sampling_TryConsumeLatest()) {
+        adc = ADC_Sampling_GetData();
+        if (adc->sampleMissCount >= FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD) {
+            FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ADC_SAMPLING);
+        }
+        goto exit_cycle;
+    }
+
     adc = ADC_Sampling_GetData();
     handle->Ia = adc->currentA;
     handle->Ib = adc->currentB;
@@ -235,6 +245,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
             handle->foc.Idq.d, handle->foc.Idq.q,
             handle->speed_elec);
     }
+
+exit_cycle:
+    ADC_Sampling_EndControlCycle();
 }
 
 /**
@@ -792,6 +805,7 @@ const char* FOC_App_GetFaultString(FOC_FaultCode_t fault)
         case FOC_FAULT_ENCODER:         return "Encoder";
         case FOC_FAULT_DRV8350S:        return "DRV8350S";
         case FOC_FAULT_PARAM_INVALID:   return "Param Invalid";
+        case FOC_FAULT_ADC_SAMPLING:    return "ADC Sampling";
         default:                        return "Unknown";
     }
 }

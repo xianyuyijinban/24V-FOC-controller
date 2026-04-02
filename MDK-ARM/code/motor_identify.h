@@ -79,6 +79,7 @@ typedef struct {
     float J;                /* 转动惯量 kg·m² */
     float B;                /* 摩擦系数 N·m·s/rad */
     float theta_offset;     /* 编码器零位偏移 rad */
+    float theta_mech_zero;  /* 识别/对齐得到的机械零位 rad */
     
     /* 参数有效性标志 */
     uint32_t valid_flag;

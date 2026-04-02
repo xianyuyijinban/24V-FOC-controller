@@ -23,7 +23,7 @@ extern "C" {
 
 /* 参数魔数（用于验证数据有效性） */
 #define PARAM_MAGIC_NUMBER      0x4D4F544F  /* "MOTO" */
-#define PARAM_VERSION           0x00010001  /* 版本 1.1 */
+#define PARAM_VERSION           0x00010002  /* 版本 1.2 */
 
 /* 最大重试次数 */
 #define PARAM_MAX_RETRY         3

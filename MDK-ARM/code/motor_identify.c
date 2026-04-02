@@ -580,6 +580,7 @@ MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle)
     /* 锁轴结束后读取机械角并反推出电角零位偏置 */
     {
         float theta_mech = TLE5012_GetAngle() * MI_DEG2RAD;
+        handle->param->theta_mech_zero = theta_mech;
         handle->param->theta_offset = FOC_AngleNormalize(-theta_mech * pole_pairs);
     }
 

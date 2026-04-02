@@ -190,6 +190,7 @@ void Param_SetDefault(MotorParam_t *param)
     param->J = 0.0001f;         /* 0.0001 kg·m² */
     param->B = 0.001f;          /* 0.001 N·m·s/rad */
     param->theta_offset = 0.0f;
+    param->theta_mech_zero = 0.0f;
     param->valid_flag = 0;
 }
 

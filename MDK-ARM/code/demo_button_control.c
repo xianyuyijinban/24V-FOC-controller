@@ -114,7 +114,8 @@ static void DemoButtonControl_UpdateZeroSpringCurrent(void)
         s_zero_spring_wait_active = 0U;
     }
 
-    angle_error = DemoButtonControl_WrapPmPi(0.0f - s_app->theta_mech);
+    angle_error = DemoButtonControl_WrapPmPi(
+        s_app->motor_param.theta_mech_zero - s_app->theta_mech);
     iq_mag = fabsf(angle_error) / DEMO_BUTTON_ZERO_SAT_RAD;
     if (iq_mag > 1.0f) {
         iq_mag = 1.0f;

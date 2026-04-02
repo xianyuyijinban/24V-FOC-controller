@@ -15,7 +15,7 @@
 
 ### 主要功能
 - FOC矢量控制（电流环20kHz，速度环2kHz，位置环200Hz）
-- 电机参数自动识别（Pn、Rs、Ld/Lq、Ke、编码器零位）
+- 电机参数自动识别（Pn、Rs、Ld/Lq、Ke、编码器零位、机械零位）
 - Rs在线温度补偿
 - 参数Flash存储与CRC校验
 - 故障保护与诊断
@@ -274,7 +274,7 @@ flowchart TB
         RS --> LS[Ls识别<br/>高频注入法]
         LS --> KE[Ke识别<br/>|Eαβ|/ωe(实测速度)]
         KE --> J[J/B识别<br/>当前为默认参数占位]
-        J --> ALIGN[编码器对齐<br/>锁轴估计theta_offset]
+        J --> ALIGN[编码器对齐<br/>锁轴估计theta_offset / theta_mech_zero]
         ALIGN --> SAVE[保存参数]
     end
 
@@ -392,7 +392,7 @@ static inline float FOC_AngleNormalize(float angle);
 
 ```c
 /* 数据结构 */
-MotorParam_t        // 电机参数结构体 (Rs, Ld, Lq, Ke, Pn, J, B, theta_offset)
+MotorParam_t        // 电机参数结构体 (Rs, Ld, Lq, Ke, Pn, J, B, theta_offset, theta_mech_zero)
 RsOnlineEstimator_t // Rs在线估计器
 MI_Handle_t         // 识别控制句柄
 

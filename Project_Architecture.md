@@ -70,6 +70,9 @@ graph TB
     end
 
     subgraph 上位机
+        GUIAPP[gui_app.py]
+        HOSTWIN[main_window.py<br/>HostMainWindow]
+        SERIALW[serial_worker.py]
         PARSER[data_parser.py]
     end
 
@@ -117,6 +120,9 @@ graph TB
     
     %% 到上位机
     UART --> PARSER
+    GUIAPP --> HOSTWIN
+    HOSTWIN --> SERIALW
+    SERIALW --> PARSER
 ```
 
 ---
@@ -334,7 +340,13 @@ flowchart TB
 │       └── uart_upload.h/c     # UART数据上传
 │
 ├── HostComputer/
-│   ├── data_parser.py          # 数据解析器
+│   ├── __init__.py             # HostComputer包入口
+│   ├── data_parser.py          # 数据解析器 / 命令构建
+│   ├── gui_app.py              # 本地GUI入口
+│   ├── gui_logic.py            # GUI状态映射
+│   ├── main_window.py          # HostMainWindow主窗口
+│   ├── serial_service.py       # 可测试的串口发送/解析核心
+│   ├── serial_worker.py        # QThread串口worker
 │   └── requirements.txt        # Python依赖
 │
 ├── Drivers/
@@ -637,6 +649,8 @@ class FOCDataParser:
 
 class CommandBuilder:
     @staticmethod
+    def unlock_power(unlock: bool) -> str
+    @staticmethod
     def enable_motor(enable: bool) -> str
     @staticmethod
     def set_mode(mode: int) -> str        # 0=力矩 1=速度 2=位置
@@ -659,6 +673,29 @@ class CommandBuilder:
     @staticmethod
     def set_position_pi(kp: float, ki: float) -> str
 ```
+
+### 10. 本地Host GUI (HostComputer/*.py)
+
+```python
+class HostMainWindow(QMainWindow):
+    tabs                  # Debug Panel / Identify / Advanced Control / PI Parameters
+    def set_serial_worker(self, worker) -> None
+    def apply_mode_selection(self, mode: int) -> None
+    def apply_packet(self, packet: FOCDataPacket) -> None
+
+class SerialWorker(QObject):
+    connection_changed    # Qt signal(bool)
+    log_line              # Qt signal(level, message)
+    packet_received       # Qt signal(FOCDataPacket)
+    ports_updated         # Qt signal(list[str])
+```
+
+当前本地 GUI 架构采用 `gui_app.py -> HostMainWindow -> SerialWorker -> FOCDataParser/CommandBuilder` 的分层关系：
+
+- `gui_app.py` 创建 `QApplication`、`QThread` 和 `SerialWorker`
+- `HostMainWindow` 提供调试页、占位页、命令按钮、状态卡片和故障日志
+- `SerialWorker` 在后台线程内处理串口枚举、连接、读写和 parser 回调
+- `gui_logic.py` 保持模式标签、按钮使能和数据显示格式为纯 Python 逻辑，便于单测
 
 ---
 

@@ -117,6 +117,16 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("s_app->motor_param.theta_mech_zero - s_app->theta_mech", demo_c)
         self.assertIn("识别/对齐", readme)
 
+    def test_host_gui_docs_and_entry_exist(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        architecture = (ROOT / "Project_Architecture.md").read_text(encoding="utf-8")
+        gui_entry = ROOT / "HostComputer" / "gui_app.py"
+
+        self.assertTrue(gui_entry.exists())
+        self.assertIn("python -m HostComputer.gui_app", readme)
+        self.assertIn("HostComputer/main_window.py", readme)
+        self.assertIn("HostMainWindow", architecture)
+
 
 if __name__ == "__main__":
     unittest.main()

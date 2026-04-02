@@ -110,6 +110,8 @@ class TestFOCDataParser(unittest.TestCase):
 
 class TestCommandBuilder(unittest.TestCase):
     def test_command_builder_outputs(self):
+        self.assertEqual(CommandBuilder.unlock_power(True), "CMD:UNLOCK,1\n")
+        self.assertEqual(CommandBuilder.unlock_power(False), "CMD:UNLOCK,0\n")
         self.assertEqual(CommandBuilder.enable_motor(True), "CMD:ENABLE,1\n")
         self.assertEqual(CommandBuilder.enable_motor(False), "CMD:ENABLE,0\n")
         self.assertEqual(CommandBuilder.set_mode(2), "CMD:MODE,2\n")

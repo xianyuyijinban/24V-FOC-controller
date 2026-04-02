@@ -190,6 +190,11 @@ class FOCDataParser:
 
 class CommandBuilder:
     """命令构建器 - 构建发送给下位机的命令"""
+
+    @staticmethod
+    def unlock_power(unlock: bool) -> str:
+        """解锁/上锁功率级"""
+        return f"CMD:UNLOCK,{1 if unlock else 0}\n"
     
     @staticmethod
     def enable_motor(enable: bool) -> str:

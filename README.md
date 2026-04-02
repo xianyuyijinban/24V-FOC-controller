@@ -91,6 +91,10 @@ make clean
 
 # HostComputer parser unit tests / 上位机解析单测（可在仓库根目录直接执行）
 python -m unittest HostComputer/test_data_parser.py
+
+# Local host GUI / 本地上位机 GUI
+python -m pip install -r HostComputer/requirements.txt
+python -m HostComputer.gui_app
 ```
 
 ---
@@ -125,7 +129,13 @@ python -m unittest HostComputer/test_data_parser.py
 │       └── uart_upload.h/c     # UART数据上传
 ├── Drivers/              # HAL and CMSIS drivers / HAL和CMSIS驱动
 ├── HostComputer/         # Host PC software / 上位机软件
-│   ├── data_parser.py    # 数据解析器
+│   ├── __init__.py       # HostComputer package入口
+│   ├── data_parser.py    # 数据解析器与命令构建
+│   ├── gui_app.py        # 本地GUI启动入口
+│   ├── gui_logic.py      # GUI显示/状态映射逻辑
+│   ├── main_window.py    # PyQt6主窗口 (HostMainWindow)
+│   ├── serial_service.py # 可测试的串口服务核心
+│   ├── serial_worker.py  # QThread串口worker
 │   └── requirements.txt  # Python依赖
 ├── Makefile              # GNU Make build file / GNU Make编译文件
 ├── build.ps1             # PowerShell build script / PowerShell编译脚本
@@ -136,22 +146,27 @@ python -m unittest HostComputer/test_data_parser.py
 
 ## Host Computer Software / 上位机软件
 
-The host computer software is in a separate repository:
+### Local bench GUI / 仓库内本地调试GUI
 
-上位机软件在单独的仓库中：
+本仓库现在包含一个可直接运行的本地 PyQt6 上位机调试工具，适合台架联调和故障诊断：
 
-🔗 **https://github.com/xianyuyijinban/24V-FOC-Controller-Host**
+- 安装依赖：`python -m pip install -r HostComputer/requirements.txt`
+- 启动 GUI：`python -m HostComputer.gui_app`
+- 主要入口文件：`HostComputer/gui_app.py`
+- 主窗口实现：`HostComputer/main_window.py`
+- 串口线程与协议接线：`HostComputer/serial_worker.py`
 
-Features / 特性:
-- Real-time waveform display / 实时波形显示
-- Serial communication / 串口通信
-- Motor parameter identification / 电机参数识别
-- Three-loop control configuration / 三环控制配置
-- English/Chinese language support / 中英文切换
+当前本地 GUI 提供：
+- 串口端口枚举、连接、断开
+- `UNLOCK` / `LOCK` / `ENABLE` / `DISABLE` / `CLEAR FAULT`
+- `START IDENTIFY` / `STOP IDENTIFY`
+- 力矩/速度/位置模式切换与单目标值下发
+- 实时状态卡片、故障摘要、串口日志
+- `Identify`、`Advanced Control`、`PI Parameters` 预留页签
 
-### Local Data Parser / 本地数据解析器
+### Local data parser / 本地数据解析器
 
-项目包含一个Python数据解析器 (`HostComputer/data_parser.py`)，用于解析下位机上传的文本格式数据：
+项目同时保留一个 Python 数据解析器 (`HostComputer/data_parser.py`)，用于解析下位机上传的文本格式数据：
 
 ```python
 from data_parser import FOCDataParser, FOCDataPacket
@@ -162,6 +177,12 @@ parser.set_packet_callback(on_packet_received)
 # 喂入串口数据
 parser.feed_data(serial_data)
 ```
+
+### External host repository / 外部上位机仓库
+
+独立的 host 仓库仍可作为后续功能扩展参考，但不再是明天台架调试的唯一入口：
+
+🔗 **https://github.com/xianyuyijinban/24V-FOC-Controller-Host**
 
 ---
 

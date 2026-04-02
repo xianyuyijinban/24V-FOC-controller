@@ -49,3 +49,6 @@ docs/_templates/
 # Python cache / Python缓存
 __pycache__/
 *.pyc
+
+# Local worktrees / 本地工作树
+.worktrees/

@@ -98,6 +98,7 @@ typedef struct {
     float theta_elec;           /* 电角度 rad */
     float speed_mech;           /* 机械转速 rad/s */
     float speed_elec;           /* 电转速 rad/s */
+    uint32_t theta_sample_seq;  /* 机械角度样本序号 */
     
     /* 参考值 */
     float Id_ref;

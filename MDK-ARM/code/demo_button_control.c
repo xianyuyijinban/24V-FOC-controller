@@ -23,8 +23,20 @@ static const float DEMO_BUTTON_ZERO_SPRING_IQ_MAX = 1.5f;
 
 static FOC_AppHandle_t *s_app = NULL;
 static DemoButtonMode_t s_mode = DEMO_BUTTON_MODE_NONE;
+static uint8_t s_zero_spring_wait_active = 0U;
+static uint32_t s_zero_spring_wait_seq = 0U;
 static DemoButtonDebounce_t s_mod1_button;
 static DemoButtonDebounce_t s_mod2_button;
+
+static void DemoButtonControl_ArmZeroSpringWait(void)
+{
+    if (s_app == NULL) {
+        return;
+    }
+
+    s_zero_spring_wait_active = 1U;
+    s_zero_spring_wait_seq = s_app->theta_sample_seq;
+}
 
 static void DemoButtonControl_InitButton(
     DemoButtonDebounce_t *button,
@@ -95,6 +107,13 @@ static void DemoButtonControl_UpdateZeroSpringCurrent(void)
         return;
     }
 
+    if (s_zero_spring_wait_active != 0U) {
+        if (s_app->theta_sample_seq == s_zero_spring_wait_seq) {
+            return;
+        }
+        s_zero_spring_wait_active = 0U;
+    }
+
     angle_error = DemoButtonControl_WrapPmPi(0.0f - s_app->theta_mech);
     iq_mag = fabsf(angle_error) / DEMO_BUTTON_ZERO_SAT_RAD;
     if (iq_mag > 1.0f) {
@@ -117,10 +136,12 @@ static void DemoButtonControl_HandleMod1Press(void)
 
     if (s_mode != DEMO_BUTTON_MODE_SPEED_10DPS) {
         s_mode = DEMO_BUTTON_MODE_SPEED_10DPS;
+        s_zero_spring_wait_active = 0U;
         FOC_App_SetControlMode(s_app, FOC_MODE_SPEED);
         FOC_App_SetSpeedRef(s_app, DEMO_BUTTON_SPEED_REF_RAD_S);
     } else {
         s_mode = DEMO_BUTTON_MODE_ZERO_SPRING;
+        DemoButtonControl_ArmZeroSpringWait();
         FOC_App_SetControlMode(s_app, FOC_MODE_TORQUE);
     }
 
@@ -151,6 +172,8 @@ void DemoButtonControl_Init(FOC_AppHandle_t *app)
 {
     s_app = app;
     s_mode = DEMO_BUTTON_MODE_NONE;
+    s_zero_spring_wait_active = 0U;
+    s_zero_spring_wait_seq = 0U;
     DemoButtonControl_InitButton(&s_mod1_button, MOD1_GPIO_Port, MOD1_Pin);
     DemoButtonControl_InitButton(&s_mod2_button, MOD2_GPIO_Port, MOD2_Pin);
 }
@@ -162,6 +185,11 @@ void DemoButtonControl_Service(void)
 
     if (s_app == NULL) {
         return;
+    }
+
+    if ((s_mode == DEMO_BUTTON_MODE_ZERO_SPRING) &&
+        (s_app->state != FOC_STATE_RUNNING)) {
+        DemoButtonControl_ArmZeroSpringWait();
     }
 
     mod1_pressed = DemoButtonControl_UpdateButton(&s_mod1_button);

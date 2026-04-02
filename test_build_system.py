@@ -93,6 +93,18 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertRegex(demo_c, r"2\.09439[0-9]*f")
         self.assertIn("FOC_App_SetCurrentRef", demo_c)
 
+    def test_zero_spring_waits_for_fresh_angle_sample_after_enable(self):
+        foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+        demo_c = (ROOT / "MDK-ARM" / "code" / "demo_button_control.c").read_text(encoding="utf-8")
+
+        self.assertIn("theta_sample_seq", foc_h)
+        self.assertIn("handle->theta_sample_seq++;", foc_c)
+        self.assertIn("s_zero_spring_wait_active", demo_c)
+        self.assertIn("s_zero_spring_wait_seq", demo_c)
+        self.assertIn("s_app->theta_sample_seq", demo_c)
+        self.assertIn("s_app->theta_sample_seq == s_zero_spring_wait_seq", demo_c)
+
 
 if __name__ == "__main__":
     unittest.main()

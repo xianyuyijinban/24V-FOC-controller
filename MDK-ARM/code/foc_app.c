@@ -166,6 +166,7 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     /* 读取编码器角度 */
     angle_deg = TLE5012_GetAngle();
     handle->theta_mech = angle_deg * 3.14159f / 180.0f;  /* 转换为弧度 */
+    handle->theta_sample_seq++;
     if (handle->state == FOC_STATE_RUNNING) {
         pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
         handle->theta_elec = handle->theta_mech * pole_pairs + handle->motor_param.theta_offset;

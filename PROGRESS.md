@@ -41,3 +41,10 @@
 - Prevention: Keep `test_zero_spring_uses_identify_aligned_mechanical_zero` in `test_build_system.py`, and whenever demo spring behavior or identify/alignment persistence changes, rerun `python -m unittest -v test_build_system.py` and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before closing the task.
 - Commit: 02410121151d0821761712cb6fbf9a133c4e26ab
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-02 23:32] Low-side ADC sampling timing and freshness contract
+- Problem: `ADC1` was still triggered by `TIM1 TRGO=UPDATE` with short `8.5-cycle` sample times, while `TIM1_UP_IRQHandler()` could run before `DMA1_Stream2_IRQHandler()` committed the latest frame. That let the 20kHz FOC loop read stale one-cycle-old current data and gave the host no explicit visibility into timing misses for the low-side shunt path.
+- Resolution: Retargeted `ADC1` regular conversions to `TIM1_TRGO2` sourced from internal `TIM1_CH4/OC4REF`, increased current/Vbus sample times to `32.5/16.5 cycles`, raised `DMA1_Stream2_IRQn` above `TIM1_UP_IRQn`, added control-cycle-aware ADC frame sequencing and miss/invalid-window counters in `adc_sampling`, gated `FOC_App_TIM1_IRQHandler()` on a fresh current-cycle frame with escalation to `FOC_FAULT_ADC_SAMPLING`, expanded UART status/fault uploads with ADC diagnostics, added regression tests for the timing/freshness contract, and updated the implementation plan plus architecture/README docs.
+- Prevention: Keep the new timing/freshness/UART contracts in `test_build_system.py`, rerun `python -m unittest test_build_system.py`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` after any future TIM1/ADC/DMA/FOC/UART sampling changes, and preserve the rule that the control loop may only consume a frame explicitly validated for the current PWM cycle.
+- Commit: 8d44727b34c6a0810c1e3dcf23dc4d02c1b03bdb
+- Recurrence policy: Not allowed to happen again.

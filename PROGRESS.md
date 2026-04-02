@@ -41,3 +41,10 @@
 - Prevention: Keep `test_zero_spring_uses_identify_aligned_mechanical_zero` in `test_build_system.py`, and whenever demo spring behavior or identify/alignment persistence changes, rerun `python -m unittest -v test_build_system.py` and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before closing the task.
 - Commit: 02410121151d0821761712cb6fbf9a133c4e26ab
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-02 23:01] Local host debug GUI milestone
+- Problem: The repository had only a parser-side host utility, so tomorrow's bench session still lacked a runnable in-repo GUI for serial connection management, command dispatch, runtime status visibility, and fault inspection.
+- Resolution: Added a local PyQt6 host GUI package with `HostMainWindow`, a worker-backed serial path, pure-Python GUI presentation logic, command helpers for `CMD:UNLOCK`, host-side unit tests, and README/architecture updates documenting `python -m HostComputer.gui_app` as the local startup path.
+- Prevention: Keep the new `HostComputer/test_gui_logic.py`, `HostComputer/test_serial_service.py`, `HostComputer/test_main_window.py`, `test_build_system.py::test_host_gui_docs_and_entry_exist`, and the offscreen `HostMainWindow` smoke launch in the verification routine whenever host GUI wiring, docs, or startup paths change.
+- Commit: 49560693973c4792e88bf74859b9830884ea2233
+- Recurrence policy: Not allowed to happen again.

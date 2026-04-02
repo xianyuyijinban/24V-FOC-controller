@@ -42,6 +42,7 @@ extern "C" {
 #define FOC_OVERCURRENT_THRESH      15.0f   /* 过流保护阈值 A */
 #define FOC_OVERVOLTAGE_THRESH      28.0f   /* 过压保护阈值 V */
 #define FOC_UNDERVOLTAGE_THRESH     18.0f   /* 欠压保护阈值 V */
+#define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */
 
 /*==================== 数据结构 ====================*/
@@ -65,6 +66,7 @@ typedef enum {
     FOC_FAULT_ENCODER,
     FOC_FAULT_DRV8350S,
     FOC_FAULT_PARAM_INVALID,
+    FOC_FAULT_ADC_SAMPLING,
 } FOC_FaultCode_t;
 
 /* 控制模式 */

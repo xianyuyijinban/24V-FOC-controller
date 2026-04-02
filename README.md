@@ -64,6 +64,15 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 | ADC1_INP15 | PA3 | Phase W Current |
 | ADC1_INP4 | PC4 | Bus Voltage |
 
+### ADC Sampling Timing / ADC采样时序
+
+- `TIM1_CH4` 仅作为内部采样参考，不驱动外部引脚。
+- `TIM1_TRGO2 = OC4REF`，`ADC1` 常规组触发源改为 `TIM1_TRGO2`，避免继续使用粗粒度 `UPDATE` 触发。
+- 三相电流通道采样时间为 `32.5 cycles`，母线电压通道采样时间为 `16.5 cycles`。
+- `DMA1_Stream2_IRQn` 优先级高于 `TIM1_UP_IRQn`，设计目标是 `TIM1_CH4 -> ADC DMA完成 -> TIM1控制ISR`。
+- `TIM1` 控制环现在只消费“当前控制周期内完成”的 ADC 帧；单次缺帧会计数并上报，连续缺帧会升级为 `FOC_FAULT_ADC_SAMPLING`。
+- UART 状态/故障上传现在包含 ADC 帧序号、帧年龄、缺帧计数、无效窗口计数、原始电流 ADC 值以及换算后的 `Ia/Ib/Ic/Vbus`。
+
 ---
 
 ## Build Instructions / 编译说明
@@ -253,6 +262,13 @@ Notes / 说明:
 
 - [Project Architecture](Project_Architecture.md) - 详细的项目架构文档
 - [Motor Parameter Identification Primer (ZH)](docs/Motor_Parameter_Identification_Primer_zh.md) - 参数识别原理与调试说明
+
+### Recent Technical Updates / 近期技术更新 (2026-04-02)
+
+- 低边分流采样重构：`ADC1` 触发源从 `TIM1 TRGO=UPDATE` 切换为 `TIM1 TRGO2=OC4REF`，将采样点移动到可控的低边导通窗口。
+- ADC 帧交接加固：`adc_sampling` 新增控制周期窗口、帧序号、帧年龄、缺帧计数与无效窗口计数，`TIM1` 电流环只消费当前周期已提交的 ADC 帧。
+- 采样故障策略落地：连续采样缺失会触发 `FOC_FAULT_ADC_SAMPLING`，避免闭环在不可信电流反馈上继续运行。
+- UART 诊断增强：正常/故障上传包新增采样触发源、采样时间、帧序号、原始 ADC 三相电流和换算后的 `Ia/Ib/Ic/Vbus`。
 
 ### Recent Technical Updates / 近期技术更新 (2026-03-04)
 

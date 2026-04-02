@@ -49,6 +49,11 @@ extern "C" {
 /* 电流不平衡检测阈值 */
 #define CURRENT_IMBALANCE_THRESH    0.5f    /* 三相电流和阈值(A) */
 
+/* 采样时序配置 */
+#define ADC_SAMPLING_TRIGGER_SOURCE_TEXT         "TIM1_TRGO2_OC4REF"
+#define ADC_SAMPLING_CURRENT_SAMPLE_TIME_CYCLES  32.5f
+#define ADC_SAMPLING_VBUS_SAMPLE_TIME_CYCLES     16.5f
+
 /* ADC通道定义 */
 #define ADC_CH_CURRENT_A    0   /* PA1 - ADC1_INP17 - 电流A相 */
 #define ADC_CH_CURRENT_B    1   /* PA2 - ADC1_INP14 - 电流B相 */
@@ -89,6 +94,13 @@ typedef struct {
     /* 状态标志 */
     volatile uint8_t dataReady;         /* 数据更新标志 */
     volatile uint32_t sampleCount;      /* 采样计数 */
+    volatile uint32_t controlCycleSequence; /* 当前控制周期序号 */
+    volatile uint32_t frameSequence;    /* 已提交ADC帧序号 */
+    volatile uint32_t lastCommittedCycle; /* 最近一次有效提交对应的控制周期 */
+    volatile uint32_t lastConsumedCycle; /* 最近一次成功消费对应的控制周期 */
+    volatile uint32_t frameAgeCycles;   /* 当前数据相对消费侧的年龄(控制周期) */
+    volatile uint32_t sampleMissCount;  /* 控制周期未拿到新帧的次数 */
+    volatile uint32_t invalidWindowCount; /* 帧在关闭窗口到达的次数 */
     
     /* 【新增】校准状态 */
     ADC_CalibStatus_t calibStatus;      /* 校准状态 */
@@ -108,6 +120,22 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc);
  * @brief 处理ADC采样数据（在DMA中断中调用）
  */
 void ADC_Sampling_Process(void);
+
+/**
+ * @brief 关闭当前采样窗口并进入新的控制周期
+ */
+void ADC_Sampling_BeginControlCycle(void);
+
+/**
+ * @brief 打开下一控制周期的采样窗口
+ */
+void ADC_Sampling_EndControlCycle(void);
+
+/**
+ * @brief 尝试消费当前控制周期对应的最新ADC帧
+ * @return 1=成功拿到当前周期新帧，0=缺帧/晚帧
+ */
+uint8_t ADC_Sampling_TryConsumeLatest(void);
 
 /**
  * @brief 启动零点校准（在无电流时调用）

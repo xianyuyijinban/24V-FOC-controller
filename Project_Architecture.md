@@ -524,10 +524,18 @@ ADC_CH_VBUS         // PC4 - 母线电压
 /* 核心函数 */
 int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc);
 void ADC_Sampling_Process(void);  // DMA中断调用
+void ADC_Sampling_BeginControlCycle(void);  // TIM1更新ISR入口调用
+void ADC_Sampling_EndControlCycle(void);    // TIM1更新ISR退出前调用
+uint8_t ADC_Sampling_TryConsumeLatest(void); // 仅允许消费当前周期ADC帧
 void ADC_Sampling_Calibrate(uint16_t samples);
 float ADC_CalcCurrent(uint16_t raw, int16_t offset);
 float ADC_CalcVoltage(uint16_t raw, float divider);
 ```
+
+- `TIM1_CH4` 作为内部比较基准，`TIM1_TRGO2 = OC4REF`，`ADC1` 常规扫描由 `TIM1_TRGO2` 触发。
+- 三相电流采样时间为 `32.5 cycles`，母线电压采样时间为 `16.5 cycles`。
+- `adc_sampling` 维护 `frameSequence / frameAgeCycles / sampleMissCount / invalidWindowCount`，并通过控制周期窗口约束 DMA 帧只能在当前 PWM 周期内被消费。
+- `DMA1_Stream2_IRQn` 优先级高于 `TIM1_UP_IRQn`，设计契约为“ADC DMA先提交，TIM1控制ISR后消费”。
 
 ### 6. 编码器驱动模块 (tle5012.h)
 
@@ -837,6 +845,7 @@ graph TB
 | 4 | FOC_FAULT_ENCODER | 编码器故障 | CRC错误或通信失败 |
 | 5 | FOC_FAULT_DRV8350S | 栅极驱动故障 | nFAULT引脚触发 |
 | 6 | FOC_FAULT_PARAM_INVALID | 参数无效 | CRC校验失败 |
+| 7 | FOC_FAULT_ADC_SAMPLING | ADC采样时序故障 | 连续控制周期未拿到当前周期新ADC帧 |
 
 ### 故障恢复策略（当前实现）
 
@@ -1014,3 +1023,4 @@ State : 4
 | v1.5 | 2026-03-04 | SPI1互斥访问、TIM1故障路径去阻塞、Ke估算改为αβ反电势幅值 |
 | v1.6 | 2026-03-04 | FOC电压常数一致化、UART故障首报修复、命令复制告警修复、FOC接口导出补齐、单测入口兼容 |
 | v1.7 | 2026-03-04 | DRV8350S异步读失败路径清理pending，避免BusLock等待超时 |
+| v1.8 | 2026-04-02 | 低边分流ADC触发改为TIM1_CH4/TRGO2，新增ADC帧新鲜度校验、采样故障升级与UART诊断 |

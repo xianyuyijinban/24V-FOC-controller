@@ -34,3 +34,10 @@
 - Prevention: Keep the new `test_zero_spring_waits_for_fresh_angle_sample_after_enable` contract in `test_build_system.py`, and whenever local demo torque behavior is touched, rerun both `python -m unittest -v test_build_system.py` and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before claiming the mode is deterministic.
 - Commit: c2641a63db886423baff61774cfb8853896164be
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-02 17:49] Zero-spring anchors to identified mechanical zero
+- Problem: The local zero-spring demo mode used raw mechanical `0 rad` as its return target, but parameter identification only persisted electrical `theta_offset`. After encoder align, spring mode could therefore pull toward an arbitrary absolute encoder origin instead of the identified/aligned mechanical home.
+- Resolution: Added persisted `theta_mech_zero` to `MotorParam_t`, stored it during `MI_EncoderAlign()`, bumped `PARAM_VERSION` so old flash payloads are rejected cleanly, switched `demo_button_control.c` to compute spring error from `theta_mech_zero - theta_mech`, and updated `README.md` plus `Project_Architecture.md` to document the separate electrical/mechanical zero semantics.
+- Prevention: Keep `test_zero_spring_uses_identify_aligned_mechanical_zero` in `test_build_system.py`, and whenever demo spring behavior or identify/alignment persistence changes, rerun `python -m unittest -v test_build_system.py` and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before closing the task.
+- Commit: 02410121151d0821761712cb6fbf9a133c4e26ab
+- Recurrence policy: Not allowed to happen again.

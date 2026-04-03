@@ -90,3 +90,10 @@
 - Prevention: Keep the new `test_build_system.py` contracts for packaging assets and PowerShell wrapper compatibility, and whenever Host GUI packaging/build plumbing changes, rerun `python -m unittest discover -s HostComputer -p "test_*.py" -v`, `python -m unittest test_build_system.py -v`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`, and a short packaged `24V_FOC_Host.exe` smoke launch before closing the task.
 - Commit: 47cbc19e88683fb73a873f75ac7e230b41aa7055
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-03 22:31] Bench boot path switched to HSI
+- Problem: The STM32H743 board still stalled in `SystemClock_Config()` because `HSEON=1` while `HSERDY=0`, so the firmware never got past clock init and bench debugging could not continue. `FDCAN` startup also still depended on the external crystal path, which would have kept the bring-up chain fragile even after switching the core clock.
+- Resolution: Switched the runtime system clock path to `HSI 64MHz + PLL1` while keeping `SYSCLK=480MHz`, added a bench-only `FOC_DEBUG_DISABLE_FDCAN_INIT` gate so startup skips `FDCAN` init until the crystal path is repaired, updated the CubeMX `.ioc` clock source to match the firmware, added a source-contract test for the HSI/FDCAN recovery path, and refreshed `README.md` plus `Project_Architecture.md` to document the temporary bench configuration and `CMSIS-DAP` debug flow.
+- Prevention: Keep `test_build_system.py::test_debug_boot_path_uses_hsi_and_gates_fdcan_init` in the repo, and whenever startup clocks, external crystal usage, or early peripheral init are changed, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
+- Commit: 171179a3a3e890b8965dbb4dc6d688b4026ac235
+- Recurrence policy: Not allowed to happen again.

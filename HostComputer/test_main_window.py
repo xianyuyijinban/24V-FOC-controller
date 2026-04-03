@@ -108,6 +108,34 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertIn("Connected", window.identify_connection_value.text())
         self.assertIn("Unlocked", window.identify_power_value.text())
 
+    def test_ready_packet_clears_identify_and_enable_latched_button_state(self):
+        window = self._window()
+        window.update_connection_state(True)
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        window.handle_log_line("TX", "CMD:IDENTIFY,1")
+        window.apply_packet(FOCDataPacket(foc_state=3, is_fault_active=False))
+        self.assertTrue(window.identify_start_page_button.isEnabled())
+        self.assertFalse(window.identify_stop_page_button.isEnabled())
+
+        window.handle_log_line("TX", "CMD:ENABLE,1")
+        window.apply_packet(FOCDataPacket(foc_state=3, is_fault_active=False))
+        self.assertTrue(window.enable_button.isEnabled())
+        self.assertFalse(window.disable_button.isEnabled())
+
+    def test_disconnect_clears_stale_runtime_snapshot_before_reconnect(self):
+        window = self._window()
+        window.update_connection_state(True)
+        window.apply_packet(FOCDataPacket(timestamp=1000, angle=45.0, foc_state=4))
+        self.assertIn("45.00 deg", window.angle_value.text())
+
+        window.update_connection_state(False)
+        self.assertEqual(window.angle_value.text(), "--")
+        self.assertEqual(window.data_status_value.text(), "Idle")
+
+        window.update_connection_state(True)
+        self.assertEqual(window.angle_value.text(), "--")
+        self.assertEqual(window.data_status_value.text(), "Waiting for packets")
+
     def test_log_filters_and_clear_actions_refresh_log_view(self):
         window = self._window()
         window.handle_log_line("INFO", "hello")

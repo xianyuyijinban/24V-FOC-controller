@@ -42,6 +42,7 @@ try:
         LoopTuning,
         RollingPlotBuffer,
         apply_command_effects,
+        apply_packet_effects,
         build_current_ref_command,
         build_pi_command,
         build_position_ref_command,
@@ -68,6 +69,7 @@ except ImportError:
         LoopTuning,
         RollingPlotBuffer,
         apply_command_effects,
+        apply_packet_effects,
         build_current_ref_command,
         build_pi_command,
         build_position_ref_command,
@@ -611,7 +613,21 @@ class HostMainWindow(QMainWindow):
             self._state.power_unlocked = False
             self._state.motor_enabled = False
             self._state.identify_active = False
+            self._state.foc_state = None
+            self._state.fault_active = False
+            self._state.last_packet = None
+            self._state.last_packet_received_at_ms = None
+            self._clear_runtime_snapshot()
+            self._plot_buffer = RollingPlotBuffer(max_samples=300)
+            self._refresh_plot()
 
+        self._apply_control_enable_state()
+        self._refresh_identify_state_panel()
+        self._refresh_mode_views()
+        self._refresh_session_status()
+        self._sync_connect_button()
+
+    def _apply_control_enable_state(self):
         state = button_enable_state(self._state)
         self.connection_status_value.setText("Connected" if self._state.is_connected else "Disconnected")
         self.connection_state_detail_value.setText("Connected" if self._state.is_connected else "Disconnected")
@@ -643,11 +659,6 @@ class HostMainWindow(QMainWindow):
         self.quick_safe_stop_button.setEnabled(self._state.is_connected and (self._state.power_unlocked or self._state.motor_enabled))
         self.export_plot_button.setEnabled(bool(self._plot_buffer.export_rows()))
 
-        self._refresh_identify_state_panel()
-        self._refresh_mode_views()
-        self._refresh_session_status()
-        self._sync_connect_button()
-
     def apply_mode_selection(self, mode: int, emit_command: bool = True):
         self._state.selected_mode = int(mode)
         self.target_label.setText(mode_target_label(self._state.selected_mode))
@@ -660,7 +671,7 @@ class HostMainWindow(QMainWindow):
             self._dispatch_command(CommandBuilder.set_mode(self._state.selected_mode))
 
     def apply_packet(self, packet: FOCDataPacket):
-        self._state.last_packet = packet
+        apply_packet_effects(self._state, packet)
         self._state.last_packet_received_at_ms = int(time.monotonic() * 1000)
         snapshot = packet_snapshot(packet)
         fault = fault_summary_text(packet)
@@ -685,6 +696,9 @@ class HostMainWindow(QMainWindow):
                 f"{packet.timestamp} ms | state={packet.foc_state} | fault={'ACTIVE' if packet.is_fault_active else 'NORMAL'}"
             )
         self.export_plot_button.setEnabled(bool(self._plot_buffer.export_rows()))
+        self._apply_control_enable_state()
+        self._refresh_identify_state_panel()
+        self._refresh_mode_views()
         self._refresh_session_status()
 
     def handle_log_line(self, level: str, message: str):
@@ -916,6 +930,19 @@ class HostMainWindow(QMainWindow):
         self.identify_fault_value.setStyleSheet(
             "color: #b91c1c; font-weight: 700;" if fault_text == "ACTIVE" else "color: #166534; font-weight: 700;"
         )
+
+    def _clear_runtime_snapshot(self):
+        self.packet_timestamp_value.setText("--")
+        self.state_value.setText("--")
+        self.angle_value.setText("--")
+        self.speed_value.setText("--")
+        self.currents_value.setText("--")
+        self.refs_value.setText("--")
+        self.voltages_value.setText("--")
+        self.fault_state_value.setText("NORMAL")
+        self.fault_registers_value.setText("FAULT1 0x0000 | VGS2 0x0000")
+        self.fault_timestamp_value.setText("--")
+        self.fault_state_value.setStyleSheet("color: #166534; font-weight: 700;")
 
     def _refresh_session_status(self):
         if not self._state.is_connected:

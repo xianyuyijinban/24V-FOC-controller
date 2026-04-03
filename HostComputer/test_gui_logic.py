@@ -9,11 +9,16 @@ if str(CURRENT_DIR) not in sys.path:
 
 from data_parser import FOCDataPacket
 from gui_logic import (
+    FOC_STATE_FAULT,
+    FOC_STATE_PARAM_IDENTIFY,
+    FOC_STATE_READY,
+    FOC_STATE_RUNNING,
     GuiProfile,
     HostAppState,
     LoopTuning,
     RollingPlotBuffer,
     apply_command_effects,
+    apply_packet_effects,
     build_current_ref_command,
     build_pi_command,
     build_position_ref_command,
@@ -83,6 +88,37 @@ class TestGuiLogic(unittest.TestCase):
         self.assertFalse(state.power_unlocked)
         self.assertFalse(state.motor_enabled)
         self.assertFalse(state.identify_active)
+
+    def test_apply_packet_effects_reconciles_runtime_flags_from_foc_state(self):
+        state = HostAppState(is_connected=True, power_unlocked=True, motor_enabled=True, identify_active=True)
+        apply_packet_effects(state, FOCDataPacket(foc_state=FOC_STATE_READY, is_fault_active=False))
+        self.assertFalse(state.motor_enabled)
+        self.assertFalse(state.identify_active)
+        self.assertEqual(state.foc_state, FOC_STATE_READY)
+
+        apply_packet_effects(state, FOCDataPacket(foc_state=FOC_STATE_PARAM_IDENTIFY, is_fault_active=False))
+        self.assertFalse(state.motor_enabled)
+        self.assertTrue(state.identify_active)
+        self.assertEqual(state.foc_state, FOC_STATE_PARAM_IDENTIFY)
+
+        apply_packet_effects(state, FOCDataPacket(foc_state=FOC_STATE_RUNNING, is_fault_active=False))
+        self.assertTrue(state.motor_enabled)
+        self.assertFalse(state.identify_active)
+        self.assertEqual(state.foc_state, FOC_STATE_RUNNING)
+
+    def test_button_enable_state_blocks_start_and_enable_when_fault_is_active(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_enabled=True,
+            foc_state=FOC_STATE_FAULT,
+            fault_active=True,
+        )
+        button_state = button_enable_state(state)
+        self.assertFalse(button_state["can_enable"])
+        self.assertFalse(button_state["can_identify_start"])
+        self.assertFalse(button_state["can_disable"])
+        self.assertTrue(button_state["can_clear_fault"])
 
     def test_packet_snapshot_formats_runtime_values(self):
         packet = FOCDataPacket(

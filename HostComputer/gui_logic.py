@@ -27,6 +27,13 @@ MODE_NAMES = {
     2: "Position",
 }
 
+FOC_STATE_IDLE = 0
+FOC_STATE_INIT = 1
+FOC_STATE_PARAM_IDENTIFY = 2
+FOC_STATE_READY = 3
+FOC_STATE_RUNNING = 4
+FOC_STATE_FAULT = 5
+
 LOG_LEVELS = ("INFO", "TX", "RX", "ERROR")
 PLOT_CHANNELS = ("angle", "speed", "Id", "Iq", "Id_ref", "Iq_ref", "Vd", "Vq")
 DEFAULT_PROFILE_PATH = Path.home() / ".24v_foc_host_gui.json"
@@ -114,6 +121,8 @@ class HostAppState:
     power_unlocked: bool = False
     motor_enabled: bool = False
     identify_active: bool = False
+    foc_state: Optional[int] = None
+    fault_active: bool = False
     available_ports: list[str] = field(default_factory=list)
     last_packet: Optional[FOCDataPacket] = None
     last_packet_received_at_ms: Optional[int] = None
@@ -225,15 +234,16 @@ def button_enable_state(state: HostAppState) -> dict[str, bool]:
     unlocked = bool(state.power_unlocked)
     enabled = bool(state.motor_enabled)
     identify_active = bool(state.identify_active)
+    fault_active = bool(state.fault_active or state.foc_state == FOC_STATE_FAULT)
     return {
         "can_unlock": connected and not unlocked,
         "can_lock": connected and unlocked,
-        "can_enable": connected and unlocked and not enabled,
-        "can_disable": connected and enabled,
+        "can_enable": connected and unlocked and not enabled and not identify_active and not fault_active,
+        "can_disable": connected and enabled and not fault_active,
         "can_clear_fault": connected,
-        "can_identify_start": connected and unlocked and not identify_active,
+        "can_identify_start": connected and unlocked and not identify_active and not enabled and not fault_active,
         "can_identify_stop": connected and identify_active,
-        "can_send_target": connected,
+        "can_send_target": connected and not identify_active and not fault_active,
     }
 
 
@@ -264,6 +274,21 @@ def apply_command_effects(state: HostAppState, command: str):
             state.selected_mode = int(text.split(",", 1)[1])
         except (IndexError, ValueError):
             pass
+
+
+def apply_packet_effects(state: HostAppState, packet: FOCDataPacket):
+    state.last_packet = packet
+    state.foc_state = int(packet.foc_state)
+    state.fault_active = bool(packet.is_fault_active)
+    if state.foc_state == FOC_STATE_PARAM_IDENTIFY:
+        state.identify_active = True
+        state.motor_enabled = False
+    elif state.foc_state == FOC_STATE_RUNNING:
+        state.identify_active = False
+        state.motor_enabled = True
+    else:
+        state.identify_active = False
+        state.motor_enabled = False
 
 
 def packet_snapshot(packet: FOCDataPacket) -> dict[str, str]:

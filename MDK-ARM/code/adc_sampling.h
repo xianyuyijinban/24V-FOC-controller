@@ -132,6 +132,11 @@ void ADC_Sampling_BeginControlCycle(void);
 void ADC_Sampling_EndControlCycle(void);
 
 /**
+ * @brief 重置控制周期相关的采样时序状态
+ */
+void ADC_Sampling_ResetTimingState(void);
+
+/**
  * @brief 尝试消费当前控制周期对应的最新ADC帧
  * @return 1=成功拿到当前周期新帧，0=缺帧/晚帧
  */

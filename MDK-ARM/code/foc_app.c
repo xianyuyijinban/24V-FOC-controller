@@ -448,6 +448,8 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
             HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
             return;
         }
+
+        ADC_Sampling_ResetTimingState();
         
         /* 启动PWM输出 */
         HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -473,6 +475,7 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
 {
     handle->enable_pwm = 0;
     FOC_App_ResetMotionState(handle);
+    ADC_Sampling_ResetTimingState();
     
     /* 停止PWM输出 */
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
@@ -719,6 +722,8 @@ void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
             handle->enable_pwm = 1;
         }
 
+        ADC_Sampling_ResetTimingState();
+
         /* 初始化参数识别 */
         MI_Init(&handle->mi_handle, &handle->motor_param, &handle->foc);
         MI_StartIdentify(&handle->mi_handle);
@@ -737,6 +742,7 @@ void FOC_App_StopIdentify(FOC_AppHandle_t *handle)
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
     handle->enable_identify = 0;
+    ADC_Sampling_ResetTimingState();
     if (primask == 0U) {
         __enable_irq();
     }

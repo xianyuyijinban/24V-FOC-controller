@@ -37,8 +37,7 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc)
     s_adcData.offsetA = (int16_t)ADC_HALF;
     s_adcData.offsetB = (int16_t)ADC_HALF;
     s_adcData.offsetC = (int16_t)ADC_HALF;
-    s_controlWindowOpen = 1U;
-    s_lastConsumedFrameSequence = 0U;
+    ADC_Sampling_ResetTimingState();
     
     return 0;
 }
@@ -98,6 +97,22 @@ void ADC_Sampling_EndControlCycle(void)
 }
 
 /**
+ * @brief 重置控制周期相关的采样时序状态
+ */
+void ADC_Sampling_ResetTimingState(void)
+{
+    s_controlWindowOpen = 1U;
+    s_lastConsumedFrameSequence = s_adcData.frameSequence;
+    s_adcData.dataReady = 0U;
+    s_adcData.controlCycleSequence = 0U;
+    s_adcData.lastCommittedCycle = 0U;
+    s_adcData.lastConsumedCycle = 0U;
+    s_adcData.frameAgeCycles = 0U;
+    s_adcData.sampleMissCount = 0U;
+    s_adcData.invalidWindowCount = 0U;
+}
+
+/**
  * @brief 仅允许控制环消费本控制周期对应的新ADC帧
  */
 uint8_t ADC_Sampling_TryConsumeLatest(void)
@@ -109,8 +124,9 @@ uint8_t ADC_Sampling_TryConsumeLatest(void)
         (s_adcData.frameSequence != s_lastConsumedFrameSequence) &&
         (s_adcData.lastCommittedCycle == expectedCycle)) {
         s_lastConsumedFrameSequence = s_adcData.frameSequence;
-        s_adcData.lastConsumedCycle = s_adcData.controlCycleSequence;
+        s_adcData.lastConsumedCycle = expectedCycle;
         s_adcData.frameAgeCycles = 0U;
+        s_adcData.sampleMissCount = 0U;
         s_adcData.dataReady = 0U;
         return 1U;
     }

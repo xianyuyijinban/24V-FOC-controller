@@ -535,7 +535,7 @@ float ADC_CalcVoltage(uint16_t raw, float divider);
 - `TIM1_CH4` 作为内部比较基准，`TIM1_TRGO2 = OC4REF`，`ADC1` 常规扫描由 `TIM1_TRGO2` 触发。
 - 三相电流采样时间为 `32.5 cycles`，母线电压采样时间为 `16.5 cycles`。
 - `adc_sampling` 维护 `frameSequence / frameAgeCycles / sampleMissCount / invalidWindowCount`，并通过控制周期窗口约束 DMA 帧只能在当前 PWM 周期内被消费。
-- `DMA1_Stream2_IRQn` 优先级高于 `TIM1_UP_IRQn`，设计契约为“ADC DMA先提交，TIM1控制ISR后消费”。
+- NVIC 使用 `NVIC_PRIORITYGROUP_4`；`DMA1_Stream2_IRQn`（ADC DMA）优先级高于 `TIM1_UP_IRQn`，而 `SPI1/SPI3` 相关 DMA/IRQ 保持在 `TIM1_UP_IRQn` 之后，设计契约为“ADC DMA先提交，TIM1控制ISR后消费，其他外设中断不得抢在控制环前面阻塞电流环”。
 
 ### 6. 编码器驱动模块 (tle5012.h)
 

@@ -69,7 +69,7 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 - `TIM1_CH4` 仅作为内部采样参考，不驱动外部引脚。
 - `TIM1_TRGO2 = OC4REF`，`ADC1` 常规组触发源改为 `TIM1_TRGO2`，避免继续使用粗粒度 `UPDATE` 触发。
 - 三相电流通道采样时间为 `32.5 cycles`，母线电压通道采样时间为 `16.5 cycles`。
-- `DMA1_Stream2_IRQn` 优先级高于 `TIM1_UP_IRQn`，设计目标是 `TIM1_CH4 -> ADC DMA完成 -> TIM1控制ISR`。
+- NVIC 使用 `NVIC_PRIORITYGROUP_4`，并保持 `DMA1_Stream2_IRQn < TIM1_UP_IRQn < SPI DMA/IRQ`，设计目标是 `TIM1_CH4 -> ADC DMA完成 -> TIM1控制ISR`。
 - `TIM1` 控制环现在只消费“当前控制周期内完成”的 ADC 帧；单次缺帧会计数并上报，连续缺帧会升级为 `FOC_FAULT_ADC_SAMPLING`。
 - UART 状态/故障上传现在包含 ADC 帧序号、帧年龄、缺帧计数、无效窗口计数、原始电流 ADC 值以及换算后的 `Ia/Ib/Ic/Vbus`。
 

@@ -13,14 +13,19 @@ class TestBuildSystemConsistency(unittest.TestCase):
         adc_c = (ROOT / "Core" / "Src" / "adc.c").read_text(encoding="utf-8")
         tim_c = (ROOT / "Core" / "Src" / "tim.c").read_text(encoding="utf-8")
         dma_c = (ROOT / "Core" / "Src" / "dma.c").read_text(encoding="utf-8")
+        msp_c = (ROOT / "Core" / "Src" / "stm32h7xx_hal_msp.c").read_text(encoding="utf-8")
 
         self.assertIn("hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T1_TRGO2;", adc_c)
         self.assertIn("sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;", adc_c)
         self.assertIn("sConfig.SamplingTime = ADC_SAMPLETIME_16CYCLES_5;", adc_c)
         self.assertIn("sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_OC4REF;", tim_c)
         self.assertIn("HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4)", tim_c)
+        self.assertIn("HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4);", msp_c)
         self.assertIn("HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);", dma_c)
         self.assertIn("HAL_NVIC_SetPriority(TIM1_UP_IRQn, 1, 0);", tim_c)
+        self.assertIn("HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 2, 0);", dma_c)
+        self.assertIn("HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 2, 0);", dma_c)
+        self.assertIn("HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 2, 0);", dma_c)
 
     def test_adc_sampling_tracks_frame_freshness_by_control_cycle(self):
         adc_h = (ROOT / "MDK-ARM" / "code" / "adc_sampling.h").read_text(encoding="utf-8")
@@ -38,6 +43,9 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("void ADC_Sampling_BeginControlCycle(void)", adc_c)
         self.assertIn("void ADC_Sampling_EndControlCycle(void)", adc_c)
         self.assertIn("uint8_t ADC_Sampling_TryConsumeLatest(void)", adc_c)
+        self.assertIn("void ADC_Sampling_ResetTimingState(void);", adc_h)
+        self.assertIn("void ADC_Sampling_ResetTimingState(void)", adc_c)
+        self.assertIn("s_adcData.sampleMissCount = 0U;", adc_c)
 
     def test_foc_loop_faults_after_repeated_adc_sample_misses(self):
         foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
@@ -49,6 +57,7 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("ADC_Sampling_TryConsumeLatest()", foc_c)
         self.assertIn("FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ADC_SAMPLING);", foc_c)
         self.assertIn("ADC_Sampling_EndControlCycle();", foc_c)
+        self.assertIn("ADC_Sampling_ResetTimingState();", foc_c)
 
     def test_uart_upload_includes_adc_sampling_diagnostics(self):
         uart_h = (ROOT / "MDK-ARM" / "code" / "uart_upload.h").read_text(encoding="utf-8")

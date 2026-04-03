@@ -69,3 +69,10 @@
 - Prevention: Keep generated documentation outputs under ignored paths, and when a design doc is used to drive implementation, commit it in the same task so review, implementation, and follow-up fixes all reference the same tracked source document.
 - Commit: f28db495dd3c0f858325a6174eec2f8ddfad687d
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-03 12:00] Host GUI roadmap completed in-repo
+- Problem: The in-repo host GUI still stopped at a bench-safe shell with placeholder tabs, fragmented state handling, no reusable validation/notification path, and no dedicated GUI coverage for advanced target entry, PI tuning, identify workflow, plotting, preset persistence, or operator session helpers.
+- Resolution: Added a shared host-side GUI state/validation/persistence layer, rewired the PyQt main window into functional `Debug Panel / Identify / Advanced Control / PI Parameters` pages, covered all current firmware command paths with dedicated controls, added bounded live plotting plus CSV export, preset/settings persistence, stale-data indication, structured log filtering, quick actions, and refreshed README/architecture docs plus host-side tests/build contracts.
+- Prevention: Keep the expanded host-side unit tests (`HostComputer/test_data_parser.py`, `HostComputer/test_gui_logic.py`, `HostComputer/test_serial_service.py`, `HostComputer/test_main_window.py`), the GUI doc/source contract in `test_build_system.py`, and the fresh verification routine (`python -m unittest -v ...`, `python -m unittest -v test_build_system.py`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1`) as mandatory evidence whenever host GUI architecture, command coverage, docs, or persistence behavior changes.
+- Commit: 63479e600df3ed8e2075d5582d8fdbac8f1851ae
+- Recurrence policy: Not allowed to happen again.

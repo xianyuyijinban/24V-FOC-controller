@@ -83,3 +83,10 @@
 - Prevention: Keep the new regression tests in `HostComputer/test_gui_logic.py` and `HostComputer/test_main_window.py` that exercise READY-after-identify, READY-after-enable, fault gating, and disconnect/reconnect stale-data handling; whenever GUI button rules or runtime state plumbing change, rerun `python -m unittest -v HostComputer/test_data_parser.py HostComputer/test_gui_logic.py HostComputer/test_serial_service.py HostComputer/test_main_window.py` and `python -m unittest -v test_build_system.py` before closing the task.
 - Commit: d8c5715b06810fd04c3feb7eda24d9367e381010
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-03 15:27] Host GUI Windows packaging path
+- Problem: The in-repo Host GUI still required a live Python environment, so there was no bench-ready Windows application bundle. During packaging bring-up, the new PowerShell wrapper also failed under `powershell.exe` when `PSNativeCommandUseErrorActionPreference` was undefined.
+- Resolution: Added a PyInstaller one-folder packaging path with `build_host_gui_app.ps1`, `HostComputer/host_gui_app.spec`, and a launcher entrypoint, documented the Windows app workflow in `README.md`, ignored `dist/` outputs, and fixed the build wrapper so native stderr handling remains compatible with shells that do not define `PSNativeCommandUseErrorActionPreference`. Verified the packaged output by building `dist/24V_FOC_Host/24V_FOC_Host.exe` and smoke-launching it successfully.
+- Prevention: Keep the new `test_build_system.py` contracts for packaging assets and PowerShell wrapper compatibility, and whenever Host GUI packaging/build plumbing changes, rerun `python -m unittest discover -s HostComputer -p "test_*.py" -v`, `python -m unittest test_build_system.py -v`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`, and a short packaged `24V_FOC_Host.exe` smoke launch before closing the task.
+- Commit: 47cbc19e88683fb73a873f75ac7e230b41aa7055
+- Recurrence policy: Not allowed to happen again.

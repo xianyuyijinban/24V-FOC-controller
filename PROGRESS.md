@@ -7,6 +7,7 @@
 3. Every entry must include a real git commit SHA.
 4. Recurrence of the same issue is not allowed; add concrete prevention controls.
 5. Do not close the task before this file is updated.
+6. Existing log content is append-only by default; do not delete, rewrite, truncate, or silently replace older entries unless the user explicitly asks for that exact change.
 
 ## Entry Template
 
@@ -53,4 +54,11 @@
 - Resolution: Retargeted `ADC1` regular conversions to `TIM1_TRGO2` sourced from internal `TIM1_CH4/OC4REF`, increased current/Vbus sample times to `32.5/16.5 cycles`, raised `DMA1_Stream2_IRQn` above `TIM1_UP_IRQn`, added control-cycle-aware ADC frame sequencing and miss/invalid-window counters in `adc_sampling`, gated `FOC_App_TIM1_IRQHandler()` on a fresh current-cycle frame with escalation to `FOC_FAULT_ADC_SAMPLING`, expanded UART status/fault uploads with ADC diagnostics, added regression tests for the timing/freshness contract, and updated the implementation plan plus architecture/README docs.
 - Prevention: Keep the new timing/freshness/UART contracts in `test_build_system.py`, rerun `python -m unittest test_build_system.py`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` after any future TIM1/ADC/DMA/FOC/UART sampling changes, and preserve the rule that the control loop may only consume a frame explicitly validated for the current PWM cycle.
 - Commit: 8d44727b34c6a0810c1e3dcf23dc4d02c1b03bdb
+- Recurrence policy: Not allowed to happen again.
+
+## [2026-04-03 11:05] ADC miss semantics and IRQ ladder follow-up
+- Problem: The first low-side ADC timing redesign left two regressions: `sampleMissCount` accumulated across the full uptime instead of representing consecutive misses, and `TIM1_UP_IRQn` was demoted below unrelated SPI DMA preemption levels under `NVIC_PRIORITYGROUP_3`, reintroducing current-loop jitter risk.
+- Resolution: Added `ADC_Sampling_ResetTimingState()` plus success-path miss-counter clearing so ADC sampling faults only escalate after consecutive misses within the active run/identify session, switched the global NVIC grouping to `NVIC_PRIORITYGROUP_4`, kept `DMA1_Stream2_IRQn` ahead of `TIM1_UP_IRQn`, and pushed SPI DMA/IRQ priorities behind the control loop. Updated source-contract tests plus README/architecture notes to lock the priority ladder and consecutive-miss semantics.
+- Prevention: Keep the strengthened `test_build_system.py` checks for `NVIC_PRIORITYGROUP_4`, `DMA1_Stream2_IRQn < TIM1_UP_IRQn < SPI DMA/IRQ`, and ADC timing-state resets; rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` after any future TIM1/ADC/DMA/FOC interrupt or sampling-state changes.
+- Commit: f19240fba8ccaa196ee459e2209ba4e4cf6373e8
 - Recurrence policy: Not allowed to happen again.

@@ -73,6 +73,7 @@ graph TB
         GUIAPP[gui_app.py]
         HOSTWIN[main_window.py<br/>HostMainWindow]
         SERIALW[serial_worker.py]
+        GUILOGIC[gui_logic.py<br/>状态/校验/plot/preset]
         PARSER[data_parser.py]
     end
 
@@ -121,6 +122,7 @@ graph TB
     %% 到上位机
     UART --> PARSER
     GUIAPP --> HOSTWIN
+    HOSTWIN --> GUILOGIC
     HOSTWIN --> SERIALW
     SERIALW --> PARSER
 ```
@@ -343,8 +345,8 @@ flowchart TB
 │   ├── __init__.py             # HostComputer包入口
 │   ├── data_parser.py          # 数据解析器 / 命令构建
 │   ├── gui_app.py              # 本地GUI入口
-│   ├── gui_logic.py            # GUI状态映射
-│   ├── main_window.py          # HostMainWindow主窗口
+│   ├── gui_logic.py            # GUI状态、验证、plot缓存、preset持久化
+│   ├── main_window.py          # HostMainWindow主窗口与四个功能页签
 │   ├── serial_service.py       # 可测试的串口发送/解析核心
 │   ├── serial_worker.py        # QThread串口worker
 │   └── requirements.txt        # Python依赖
@@ -701,9 +703,20 @@ class SerialWorker(QObject):
 当前本地 GUI 架构采用 `gui_app.py -> HostMainWindow -> SerialWorker -> FOCDataParser/CommandBuilder` 的分层关系：
 
 - `gui_app.py` 创建 `QApplication`、`QThread` 和 `SerialWorker`
-- `HostMainWindow` 提供调试页、占位页、命令按钮、状态卡片和故障日志
+- `HostMainWindow` 现在提供 `Debug Panel / Identify / Advanced Control / PI Parameters` 四个功能页签
 - `SerialWorker` 在后台线程内处理串口枚举、连接、读写和 parser 回调
-- `gui_logic.py` 保持模式标签、按钮使能和数据显示格式为纯 Python 逻辑，便于单测
+- `gui_logic.py` 保持应用状态、输入校验、命令路由、plot 缓冲、CSV 导出和本地 preset 持久化为纯 Python 逻辑，便于单测
+
+当前 GUI 页签职责：
+
+- `Debug Panel`
+  - 连接管理、功率级动作、一键常用操作、运行状态卡片、故障摘要、日志与实时 plot
+- `Identify`
+  - 识别状态总览、开始/停止/清故障入口、识别事件日志
+- `Advanced Control`
+  - 力矩/速度/位置三类独立下发控件，并高亮当前活动模式
+- `PI Parameters`
+  - 三套 PI 参数编辑、本地默认值加载与 preset 持久化入口
 
 ---
 

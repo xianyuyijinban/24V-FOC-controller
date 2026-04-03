@@ -166,12 +166,36 @@ python -m HostComputer.gui_app
 - 串口线程与协议接线：`HostComputer/serial_worker.py`
 
 当前本地 GUI 提供：
-- 串口端口枚举、连接、断开
-- `UNLOCK` / `LOCK` / `ENABLE` / `DISABLE` / `CLEAR FAULT`
-- `START IDENTIFY` / `STOP IDENTIFY`
-- 力矩/速度/位置模式切换与单目标值下发
-- 实时状态卡片、故障摘要、串口日志
-- `Identify`、`Advanced Control`、`PI Parameters` 预留页签
+- `Debug Panel`
+  - 串口端口枚举、连接、断开
+  - `UNLOCK` / `LOCK` / `ENABLE` / `DISABLE` / `CLEAR FAULT`
+  - 一键 `Unlock + Enable`、`Disable + Lock`、`Clear Fault + Re-arm Hint`
+  - 模式切换、运行状态卡片、故障摘要、串口日志、可折叠实时曲线
+- `Identify`
+  - 连接/上锁状态提醒
+  - `START IDENTIFY` / `STOP IDENTIFY` / `CLEAR FAULT`
+  - 识别事件与状态快照日志
+- `Advanced Control`
+  - 力矩模式 `Id_ref / Iq_ref`
+  - 速度模式 `speed`
+  - 位置模式 `position`
+  - 本地 preset 保存/加载
+- `PI Parameters`
+  - 电流环 / 速度环 / 位置环 `Kp / Ki`
+  - 本地默认参数加载与 preset 保存/加载
+
+当前 GUI 使用用户本地 JSON 配置文件保存：
+- 最近使用的串口、波特率、模式
+- 常用目标值
+- PI 参数默认值
+
+默认配置文件路径：
+- Windows: `%USERPROFILE%\\.24v_foc_host_gui.json`
+
+已知限制：
+- 识别进度目前基于已有命令与状态快照做页面占位，尚未解析更细粒度的固件识别阶段数据包。
+- 曲线导出仅导出当前滚动缓存，不会自动长期录波。
+- preset 目前是单份本地配置文件，不含多命名配置管理。
 
 ### Local data parser / 本地数据解析器
 

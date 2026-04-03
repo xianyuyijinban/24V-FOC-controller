@@ -195,11 +195,20 @@ class TestBuildSystemConsistency(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         architecture = (ROOT / "Project_Architecture.md").read_text(encoding="utf-8")
         gui_entry = ROOT / "HostComputer" / "gui_app.py"
+        gui_logic = ROOT / "HostComputer" / "gui_logic.py"
+        main_window = ROOT / "HostComputer" / "main_window.py"
 
         self.assertTrue(gui_entry.exists())
+        self.assertTrue(gui_logic.exists())
+        self.assertTrue(main_window.exists())
         self.assertIn("python -m HostComputer.gui_app", readme)
         self.assertIn("HostComputer/main_window.py", readme)
+        self.assertIn("Advanced Control", readme)
+        self.assertIn("PI Parameters", readme)
+        self.assertIn("Identify", readme)
         self.assertIn("HostMainWindow", architecture)
+        self.assertIn("gui_logic.py", architecture)
+        self.assertIn("Debug Panel", architecture)
 
 
 if __name__ == "__main__":

@@ -104,6 +104,9 @@ python -m unittest HostComputer/test_data_parser.py
 # Local host GUI / 本地上位机 GUI
 python -m pip install -r HostComputer/requirements.txt
 python -m HostComputer.gui_app
+
+# Package the Host GUI into a Windows app / 将上位机GUI打包为Windows应用
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1
 ```
 
 ---
@@ -196,6 +199,16 @@ python -m HostComputer.gui_app
 - 识别进度目前基于已有命令与状态快照做页面占位，尚未解析更细粒度的固件识别阶段数据包。
 - 曲线导出仅导出当前滚动缓存，不会自动长期录波。
 - preset 目前是单份本地配置文件，不含多命名配置管理。
+
+### Package as a Windows app / 打包为 Windows 应用
+
+- 打包脚本：`build_host_gui_app.ps1`
+- 打包工具：`PyInstaller`（由脚本自动安装）
+- 输出目录：`dist/24V_FOC_Host/`
+- 主程序：`dist/24V_FOC_Host/24V_FOC_Host.exe`
+- 推荐流程：
+  - `python -m unittest discover -s HostComputer -p "test_*.py" -v`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`
 
 ### Local data parser / 本地数据解析器
 

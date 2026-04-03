@@ -125,6 +125,50 @@ class TestBuildSystemConsistency(unittest.TestCase):
         )
         self.assertIn("OK=True", run.stdout)
 
+    def test_host_gui_packaging_wrapper_handles_missing_native_error_variable(self):
+        script = (ROOT / "build_host_gui_app.ps1").read_text(encoding="utf-8")
+        match = re.search(
+            r"function Invoke-AndCheck\(\[string\]\$exe, \[string\[\]\]\$toolArgs\)\s*\{[\s\S]*?^}",
+            script,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "build_host_gui_app.ps1 should define Invoke-AndCheck")
+
+        harness = "\n".join(
+            [
+                '$ErrorActionPreference = "Stop"',
+                "Set-StrictMode -Version Latest",
+                "Remove-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue",
+                match.group(0),
+                '$result = Invoke-AndCheck "cmd.exe" @("/c", "echo packaged-warning 1>&2 & exit /b 0")',
+                'Write-Output "OK=$($result.Ok)"',
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = Path(temp_dir) / "build_host_gui_invoke_wrapper_harness.ps1"
+            script_path.write_text(harness, encoding="utf-8")
+            run = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(
+            run.returncode,
+            0,
+            "Host GUI Invoke-AndCheck should tolerate shells where PSNativeCommandUseErrorActionPreference is undefined",
+        )
+        self.assertIn("OK=True", run.stdout)
+
     def test_local_demo_buttons_gpio_and_unlock_contract(self):
         main_h = (ROOT / "Core" / "Inc" / "main.h").read_text(encoding="utf-8")
         gpio_c = (ROOT / "Core" / "Src" / "gpio.c").read_text(encoding="utf-8")
@@ -209,6 +253,32 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("HostMainWindow", architecture)
         self.assertIn("gui_logic.py", architecture)
         self.assertIn("Debug Panel", architecture)
+
+    def test_host_gui_packaging_contract(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        package_script = ROOT / "build_host_gui_app.ps1"
+        spec_file = ROOT / "HostComputer" / "host_gui_app.spec"
+
+        self.assertTrue(package_script.exists())
+        self.assertTrue(spec_file.exists())
+
+        script = package_script.read_text(encoding="utf-8")
+        spec = spec_file.read_text(encoding="utf-8")
+
+        self.assertIn("HostComputer/requirements.txt", script)
+        self.assertIn("PyInstaller", script)
+        self.assertIn("HostComputer/host_gui_app.spec", script)
+        self.assertIn("24V_FOC_Host", script)
+
+        self.assertIn("name='24V_FOC_Host'", spec)
+        self.assertIn("console=False", spec)
+        self.assertIn("pyqtgraph", spec)
+        self.assertIn("PROJECT_ROOT = Path(SPECPATH).parent", spec)
+        self.assertIn("host_gui_launcher.py", spec)
+
+        self.assertIn("build_host_gui_app.ps1", readme)
+        self.assertIn("24V_FOC_Host.exe", readme)
+        self.assertIn("PyInstaller", readme)
 
 
 if __name__ == "__main__":

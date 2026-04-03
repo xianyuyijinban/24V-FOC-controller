@@ -1,5 +1,6 @@
 # Build outputs / 编译输出
 build/
+dist/
 *.o
 *.elf
 *.bin

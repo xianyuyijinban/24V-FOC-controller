@@ -40,6 +40,16 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 
 ---
 
+## Bench Bring-Up Note / 台架启动说明
+
+- 当前固件处于临时台架恢复配置：`SystemClock_Config()` 已从外部 `HSE 25MHz` 切换到内部 `HSI 64MHz + PLL1`，目标仍保持 `SYSCLK = 480MHz`。
+- 切换原因是当前硬件上 `HSE` 未就绪，固件如果继续依赖外部晶振会在时钟初始化阶段直接停在 `Error_Handler()`，后续外设根本起不来。
+- `FDCAN` 目前通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续依赖外部晶振；本轮台架调试保留 `TIM1 / ADC / SPI / UART / GPIO` 主链路。
+- 待外部晶振链路修复并重新验证 CAN 位时序后，再恢复 `HSE + FDCAN` 正常配置。
+- 当前推荐烧录/调试探头：`CMSIS-DAP`（SWD）。
+
+---
+
 ## Pinout / 引脚定义
 
 | Function / 功能 | Pin / 引脚 | Description / 说明 |
@@ -306,6 +316,12 @@ Notes / 说明:
 - ADC 帧交接加固：`adc_sampling` 新增控制周期窗口、帧序号、帧年龄、缺帧计数与无效窗口计数，`TIM1` 电流环只消费当前周期已提交的 ADC 帧。
 - 采样故障策略落地：连续采样缺失会触发 `FOC_FAULT_ADC_SAMPLING`，避免闭环在不可信电流反馈上继续运行。
 - UART 诊断增强：正常/故障上传包新增采样触发源、采样时间、帧序号、原始 ADC 三相电流和换算后的 `Ia/Ib/Ic/Vbus`。
+
+### Bench Bring-Up Update / 台架启动更新 (2026-04-03)
+
+- 时钟启动临时改为 `HSI 64MHz + PLL1`，保持 `SYSCLK 480MHz`，绕开当前 `HSE` 不起振导致的上电死停问题。
+- 新增 `FOC_DEBUG_DISABLE_FDCAN_INIT` 启动门控，在外部晶振恢复前跳过 `FDCAN` 初始化，避免无关外设拖垮 bench 启动链。
+- `test_build_system.py` 已新增源码契约，锁定 `HSI` 启动和 `FDCAN` 门控，防止后续改动把这条恢复路径悄悄回退。
 
 ### Recent Technical Updates / 近期技术更新 (2026-03-04)
 

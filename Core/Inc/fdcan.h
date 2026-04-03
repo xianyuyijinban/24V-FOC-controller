@@ -35,6 +35,11 @@ extern "C" {
 extern FDCAN_HandleTypeDef hfdcan1;
 
 /* USER CODE BEGIN Private defines */
+#define FOC_DEBUG_DISABLE_FDCAN_INIT 1U
+/* Bench recovery mode:
+ * keep the generated FDCAN node present in the project, but skip runtime init
+ * until the external crystal path is repaired and CAN timing is revalidated.
+ */
 
 /* USER CODE END Private defines */
 

@@ -62,3 +62,10 @@
 - Prevention: Keep the strengthened `test_build_system.py` checks for `NVIC_PRIORITYGROUP_4`, `DMA1_Stream2_IRQn < TIM1_UP_IRQn < SPI DMA/IRQ`, and ADC timing-state resets; rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` after any future TIM1/ADC/DMA/FOC interrupt or sampling-state changes.
 - Commit: f19240fba8ccaa196ee459e2209ba4e4cf6373e8
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-03 11:14] ADC sampling design doc tracked and generated docs ignored
+- Problem: After the ADC timing follow-up fixes, the approved design doc `docs/plans/2026-04-02-adc-low-side-sampling-design.md` was still untracked and `docs/_generated/` remained as noisy generated workspace output, leaving the repository state ambiguous even though the implementation work had been landed.
+- Resolution: Added `docs/_generated/` to `.gitignore` so generated documentation artifacts stay local, and committed the ADC low-side sampling design document so the design baseline now lives in version control next to the implementation and follow-up fixes.
+- Prevention: Keep generated documentation outputs under ignored paths, and when a design doc is used to drive implementation, commit it in the same task so review, implementation, and follow-up fixes all reference the same tracked source document.
+- Commit: f28db495dd3c0f858325a6174eec2f8ddfad687d
+- Recurrence policy: Not allowed to happen again.

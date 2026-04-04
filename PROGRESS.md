@@ -97,3 +97,10 @@
 - Prevention: Keep `test_build_system.py::test_debug_boot_path_uses_hsi_and_gates_fdcan_init` in the repo, and whenever startup clocks, external crystal usage, or early peripheral init are changed, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
 - Commit: 171179a3a3e890b8965dbb4dc6d688b4026ac235
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-04 10:10] TLE5012 NSS driven from PA15
+- Problem: The hardware had moved the TLE5012 encoder `NSS` line to `PA15`, but the firmware still assumed the encoder chip-select was hard-tied low. As a result, `SPI3` transactions never actually asserted/deasserted the encoder select line, and the error path also lacked any recovery to release `NSS` on transfer failure.
+- Resolution: Added explicit `TLE5012_NSS` pin definitions in `main.h`, switched `tle5012.[ch]` to software chip-select control on `PA15`, asserted `NSS` before each DMA read and released it on DMA completion, timeout recovery, and SPI error callback, then updated the source-contract tests plus `README.md` and `Project_Architecture.md` to document the `SPI3 + DMA + software NSS` path.
+- Prevention: Keep `test_build_system.py::test_tle5012_uses_pa15_as_software_nss` in the repo, and whenever encoder SPI wiring, DMA callbacks, or GPIO ownership changes, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
+- Commit: b6a00c5e27c52c02b0a0f74cf9aec5c37a61f108
+- Recurrence policy: Not allowed to happen again.

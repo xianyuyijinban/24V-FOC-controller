@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN Private defines */
+#define TLE5012_NSS_Pin GPIO_PIN_15
+#define TLE5012_NSS_GPIO_Port GPIOA
 #define MOD2_Pin GPIO_PIN_12
 #define MOD2_GPIO_Port GPIOB
 #define MOD1_Pin GPIO_PIN_13

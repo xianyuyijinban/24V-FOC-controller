@@ -15,9 +15,9 @@
 
 #include "main.h"
 
-// TLE5012B CS引脚接地，始终使能，无需软件控制
-// #define TLE5012_CS_PORT      GPIOB
-// #define TLE5012_CS_PIN       GPIO_PIN_0
+// TLE5012B 使用软件片选，NSS 连接到 MCU PA15
+#define TLE5012_CS_PORT      TLE5012_NSS_GPIO_Port
+#define TLE5012_CS_PIN       TLE5012_NSS_Pin
 
 // TLE5012B 寄存器地址
 #define TLE5012_REG_AVAL     0x02  // 角度值寄存器
@@ -45,6 +45,7 @@ typedef struct {
 void TLE5012_Init(void);
 void TLE5012_StartRead(void); // 触发异步读取
 void TLE5012_ProcessData(uint16_t *rx_buf); // 处理接收到的数据
+void TLE5012_HandleTransferError(void); // SPI错误/启动失败恢复
 float TLE5012_GetAngle(void); // 获取角度值（0-360度）
 
 /* 【新增】故障处理函数 */

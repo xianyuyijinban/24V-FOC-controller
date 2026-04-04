@@ -9,6 +9,28 @@ ROOT = Path(__file__).resolve().parent
 
 
 class TestBuildSystemConsistency(unittest.TestCase):
+    def test_tle5012_uses_pa15_as_software_nss(self):
+        main_h = (ROOT / "Core" / "Inc" / "main.h").read_text(encoding="utf-8")
+        gpio_c = (ROOT / "Core" / "Src" / "gpio.c").read_text(encoding="utf-8")
+        tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
+        tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("TLE5012_NSS_Pin", main_h)
+        self.assertIn("TLE5012_NSS_GPIO_Port", main_h)
+        self.assertIn("HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);", gpio_c)
+        self.assertIn("#define TLE5012_CS_PORT      TLE5012_NSS_GPIO_Port", tle_h)
+        self.assertIn("#define TLE5012_CS_PIN       TLE5012_NSS_Pin", tle_h)
+        self.assertIn("static void TLE5012_AssertCS(void)", tle_c)
+        self.assertIn("static void TLE5012_ReleaseCS(void)", tle_c)
+        self.assertIn("HAL_GPIO_WritePin(TLE5012_CS_PORT, TLE5012_CS_PIN, GPIO_PIN_RESET);", tle_c)
+        self.assertIn("HAL_GPIO_WritePin(TLE5012_CS_PORT, TLE5012_CS_PIN, GPIO_PIN_SET);", tle_c)
+        self.assertIn("TLE5012_ReleaseCS();", tle_c)
+        self.assertIn("TLE5012_AssertCS();", tle_c)
+        self.assertIn("void TLE5012_HandleTransferError(void);", tle_h)
+        self.assertIn("void TLE5012_HandleTransferError(void)", tle_c)
+        self.assertIn("TLE5012_HandleTransferError();", it_c)
+
     def test_debug_boot_path_uses_hsi_and_gates_fdcan_init(self):
         main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
         fdcan_h = (ROOT / "Core" / "Inc" / "fdcan.h").read_text(encoding="utf-8")

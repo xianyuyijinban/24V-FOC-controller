@@ -547,6 +547,8 @@ float ADC_CalcVoltage(uint16_t raw, float divider);
 
 ### 6. 编码器驱动模块 (tle5012.h)
 
+- `TLE5012B` 当前使用 `SPI3 + DMA + 软件NSS`；`PA15` 作为片选脚，驱动在每次读取前拉低、在 DMA 完成/错误/超时恢复时拉高，避免编码器总线长期被选通。
+
 ```c
 /* 数据结构 */
 TLE5012_Data_t      // 编码器数据结构

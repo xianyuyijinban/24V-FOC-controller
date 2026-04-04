@@ -15,6 +15,9 @@ TLE5012_Data_t tle5012_sensor = {0};
 
 // 函数前置声明
 static uint8_t TLE5012_CalculateCRC8(uint16_t data);
+static void TLE5012_AssertCS(void);
+static void TLE5012_ReleaseCS(void);
+static void TLE5012_HandleCommFault(TLE5012_Fault_t fault);
 
 // 私有变量
 static uint8_t is_busy = 0;
@@ -33,14 +36,41 @@ static TLE5012_FaultCallback_t fault_callback = NULL;
 // 1 0000 0 000010 0001 = 0x8021
 #define TLE5012_READ_CMD 0x8021
 
+static void TLE5012_AssertCS(void)
+{
+    HAL_GPIO_WritePin(TLE5012_CS_PORT, TLE5012_CS_PIN, GPIO_PIN_RESET);
+}
+
+static void TLE5012_ReleaseCS(void)
+{
+    HAL_GPIO_WritePin(TLE5012_CS_PORT, TLE5012_CS_PIN, GPIO_PIN_SET);
+}
+
+static void TLE5012_HandleCommFault(TLE5012_Fault_t fault)
+{
+    TLE5012_ReleaseCS();
+
+    if (!is_busy) {
+        return;
+    }
+
+    is_busy = 0;
+    crc_error_count++;
+    tle5012_sensor.data_valid = 0;
+
+    if (fault_callback && crc_error_count >= CRC_ERROR_THRESHOLD) {
+        fault_callback(fault);
+    }
+}
+
 void TLE5012_Init(void)
 {
     memset(tle5012_tx_buf, 0, sizeof(tle5012_tx_buf));
     memset(tle5012_rx_buf, 0, sizeof(tle5012_rx_buf));
     crc_error_count = 0;
     is_busy = 0;
-    
-    // CS接地，始终使能，无需初始化GPIO
+
+    TLE5012_ReleaseCS();
 }
 
 /**
@@ -60,14 +90,8 @@ void TLE5012_StartRead(void)
     // 【修复】添加超时保护：如果忙状态持续超过SPI_TIMEOUT_MS，强制复位
     if (is_busy) {
         if ((HAL_GetTick() - busy_start_time) > SPI_TIMEOUT_MS) {
-            // 超时：强制复位忙标志
-            is_busy = 0;
-            crc_error_count++;  // 计为一次通信错误
-            tle5012_sensor.data_valid = 0;
-             
-            if (fault_callback && crc_error_count >= CRC_ERROR_THRESHOLD) {
-                fault_callback(TLE5012_FAULT_TIMEOUT);
-            }
+            (void)HAL_SPI_DMAStop(&hspi3);
+            TLE5012_HandleCommFault(TLE5012_FAULT_TIMEOUT);
         } else {
             return; // 正常忙状态，跳过本次读取
         }
@@ -80,22 +104,20 @@ void TLE5012_StartRead(void)
     tle5012_tx_buf[1] = 0x0000;           // Dummy (为了接收Data)
     tle5012_tx_buf[2] = 0x0000;           // Dummy (为了接收Safety)
 
-    // CS接地，始终使能，直接启动SPI DMA
+    TLE5012_AssertCS();
     HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(&hspi3, 
         (uint8_t*)tle5012_tx_buf, (uint8_t*)tle5012_rx_buf, 3);
     
     // 如果启动失败，恢复状态
     if (status != HAL_OK) {
-        is_busy = 0;
-        crc_error_count++;
-        tle5012_sensor.data_valid = 0;
+        TLE5012_HandleTransferError();
     }
 }
 
 // DMA传输完成回调处理函数
 void TLE5012_ProcessData(uint16_t *rx_buf)
 {
-    // CS接地，无需拉高
+    TLE5012_ReleaseCS();
     is_busy = 0;
 
     // rx_buf[0]: 收到的是发送出去的命令 (回环)
@@ -144,6 +166,11 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
     }
     
     tle5012_sensor.update_flag = 1;
+}
+
+void TLE5012_HandleTransferError(void)
+{
+    TLE5012_HandleCommFault(TLE5012_FAULT_DATA);
 }
 
 // 获取角度值（0-360度）

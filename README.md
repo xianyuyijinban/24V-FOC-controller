@@ -65,6 +65,7 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 | SPI3_SCK | PC10 | TLE5012 Clock |
 | SPI3_MISO | PC11 | TLE5012 Data Out |
 | SPI3_MOSI | PC12 | TLE5012 Data In |
+| TLE5012_NSS | PA15 | TLE5012 software chip select (active low) |
 | MOD2 | PB12 | Local identify start/abort button (active low) |
 | MOD1 | PB13 | Local demo-mode toggle button (active low) |
 | USART1_TX | PB14 | Serial TX |

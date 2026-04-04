@@ -686,7 +686,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
     }
     
     if (hspi == &hspi3) {
-        // TLE5012 CS接地，无�???操作
+        TLE5012_HandleTransferError();
     }
 }
 

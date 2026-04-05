@@ -31,3 +31,16 @@
 - 编码器板网表 `Netlist_PCB2_2026-04-05.tel` 显示：`SPI3_MOSI` 通过 `R1(100R)`、`SPI3_MISO` 通过 `R2(100R)` 同时汇到 `U1.4`；`SPI3_SCK` 通过 `R3(100R)` 到 `U1.3`，`SPI3_NSS` 通过 `R4(100R)` 到 `U1.2`。这说明 TLE5012 接口在硬件上就是把 MCU 的 `MOSI/MISO` 通过串阻并到传感器单 `DATA` 线上，不是标准四线全双工 SPI。
 - 结合当前 `tle5012.c` 的实现，`HAL_SPI_TransmitReceive_DMA()` 按两线全双工连续发送 `0x8021, 0x0000, 0x0000`，主机在数据阶段仍持续驱动 `MOSI`，没有切换为高阻/单线接收，也没有按器件协议插入方向切换延时 `twr_delay`。这与板上单线 `DATA` 适配方式直接冲突，和现场抓到的 `tle5012_rx_buf = [0x8021, 0x0000, 0x8021]` 现象一致。
 - 附带问题: 当前 `TLE5012_CalculateCRC8()` 仅对 `raw_data` 一字做 CRC，而器件安全字的 CRC 依赖完整传输字节序列；即使物理层修通，现有 CRC 校验也会误判。
+
+## [2026-04-05 18:38] TLE5012 / DRV8350S SPI 协议与诊断上电修复
+- 类型: 已修复的代码逻辑问题
+- TLE5012: `SPI3` 改为 `1-line` 半双工，读取流程改成“命令 DMA 发送 -> `twr_delay` -> Data/Safety DMA 接收”，`stm32h7xx_it.c` 中拆分为 `HAL_SPI_TxCpltCallback()` 和 `HAL_SPI_RxCpltCallback()` 两段处理，避免再走错误的全双工 `TransmitReceive` 路径。
+- TLE5012 CRC: 参考 Infineon 官方库的 SSC 安全字检查方式，CRC 改为覆盖“命令字 + 数据字”字节序列，不再只对 `raw_data` 单字计算；同时把 `SYSTEM / INTERFACE / INVALID_ANGLE` 三个安全位一起纳入 `data_valid` 判定。
+- DRV8350S: `main.c` 中先拉高 `DRV_EN` 并等待 `1 ms`，再执行 `DRV8350S_Configure()`；`drv8350s.c` 的同步/异步读统一改为单个 `16-bit` 帧直接取当前帧回包，不再发送额外 `NOP`，也不再解析不存在的 `rxBuf[1]`。
+- 诊断策略: 保持 `DRV_EN` 上电，只通过 `DRV8350S_DisableGateDrivers()` 让功率级进入 `COAST/Hi-Z`，这样故障态和待机态都能继续轮询驱动寄存器并实时上传，而不会驱动 MOS。
+- 保护阈值: 启动配置里把 `DRV8350S vdsLvl` 改为 `0x01`，对应 `0.07 V typ` 的压降阈值，匹配你前面要求的过流检测基线。
+- 验证:
+  - `python -m pytest test_build_system.py -q` -> `20 passed`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1` -> `Successful: 8, Failed: 0`
+  - `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` -> 链接成功并生成 `24V_FOC_Controller.hex/.bin`
+  - 代码提交: `41200eb7a3fd8418d8897cafa9f938950f4e182e`

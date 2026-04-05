@@ -104,3 +104,10 @@
 - Prevention: Keep `test_build_system.py::test_tle5012_uses_pa15_as_software_nss` in the repo, and whenever encoder SPI wiring, DMA callbacks, or GPIO ownership changes, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
 - Commit: b6a00c5e27c52c02b0a0f74cf9aec5c37a61f108
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-05 16:21] Bench boot path switched back to HSE
+- Problem: After the earlier fallback to `HSI`, the board needed a clean retest of the repaired external crystal path. Keeping firmware on the internal RC would have hidden whether the reworked `HSE 25MHz` network could now start reliably.
+- Resolution: Switched `SystemClock_Config()` and the CubeMX `.ioc` clock model back to `HSE + PLL1` while keeping `SYSCLK=480MHz`, updated the startup source-contract test from `HSI` to `HSE`, and refreshed `README.md` plus `Project_Architecture.md` to document that this bench build now re-tests the external crystal while still keeping `FOC_DEBUG_DISABLE_FDCAN_INIT` enabled to isolate the clock path.
+- Prevention: Keep `test_build_system.py::test_debug_boot_path_uses_hse_and_gates_fdcan_init` in the repo, and whenever the startup clock source or external crystal recovery path is changed, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
+- Commit: ea0ab41a3cbebceaa8ff3c9f3b79a463b4501f21
+- Recurrence policy: Not allowed to happen again.

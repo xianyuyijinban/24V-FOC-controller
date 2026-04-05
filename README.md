@@ -42,10 +42,10 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 
 ## Bench Bring-Up Note / 台架启动说明
 
-- 当前固件处于临时台架恢复配置：`SystemClock_Config()` 已从外部 `HSE 25MHz` 切换到内部 `HSI 64MHz + PLL1`，目标仍保持 `SYSCLK = 480MHz`。
-- 切换原因是当前硬件上 `HSE` 未就绪，固件如果继续依赖外部晶振会在时钟初始化阶段直接停在 `Error_Handler()`，后续外设根本起不来。
-- `FDCAN` 目前通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续依赖外部晶振；本轮台架调试保留 `TIM1 / ADC / SPI / UART / GPIO` 主链路。
-- 待外部晶振链路修复并重新验证 CAN 位时序后，再恢复 `HSE + FDCAN` 正常配置。
+- 当前固件已重新切回外部 `HSE 25MHz + PLL1`，目标保持 `SYSCLK = 480MHz`，用于验证你重新焊接后的晶振链路是否已经恢复。
+- 这次回切只恢复系统时钟来源；`FDCAN` 仍然通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免把 CAN 启动链一起混入晶振验证。
+- 如果 `HSE` 仍未就绪，固件会再次在 `SystemClock_Config()` 阶段停进 `Error_Handler()`；如果能正常越过这一步，就说明外部晶振链路至少已经具备启动条件。
+- 待 `HSE` 稳定后，再根据需要恢复 `FDCAN` 初始化并重新验证 CAN 位时序。
 - 当前推荐烧录/调试探头：`CMSIS-DAP`（SWD）。
 
 ---
@@ -318,11 +318,11 @@ Notes / 说明:
 - 采样故障策略落地：连续采样缺失会触发 `FOC_FAULT_ADC_SAMPLING`，避免闭环在不可信电流反馈上继续运行。
 - UART 诊断增强：正常/故障上传包新增采样触发源、采样时间、帧序号、原始 ADC 三相电流和换算后的 `Ia/Ib/Ic/Vbus`。
 
-### Bench Bring-Up Update / 台架启动更新 (2026-04-03)
+### Bench Bring-Up Update / 台架启动更新 (2026-04-05)
 
-- 时钟启动临时改为 `HSI 64MHz + PLL1`，保持 `SYSCLK 480MHz`，绕开当前 `HSE` 不起振导致的上电死停问题。
-- 新增 `FOC_DEBUG_DISABLE_FDCAN_INIT` 启动门控，在外部晶振恢复前跳过 `FDCAN` 初始化，避免无关外设拖垮 bench 启动链。
-- `test_build_system.py` 已新增源码契约，锁定 `HSI` 启动和 `FDCAN` 门控，防止后续改动把这条恢复路径悄悄回退。
+- 时钟启动已重新切回 `HSE 25MHz + PLL1`，用于验证重新焊接后的晶振链路是否恢复，同时保持 `SYSCLK 480MHz`。
+- `FOC_DEBUG_DISABLE_FDCAN_INIT` 继续保留，当前 bench 启动仍然只验证核心时钟与 `TIM1 / ADC / SPI / UART / GPIO` 主链路。
+- `test_build_system.py` 的启动契约已同步为 `HSE + FDCAN gate`，防止后续回归测试继续按旧的 `HSI` 路径判断。
 
 ### Recent Technical Updates / 近期技术更新 (2026-03-04)
 

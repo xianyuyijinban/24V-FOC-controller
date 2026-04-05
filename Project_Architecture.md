@@ -22,10 +22,10 @@
 - UART数据上传与监控
 - 三环控制：力矩/速度/位置模式
 
-### 当前台架启动策略（2026-04-03）
-- 当前 bench 恢复路径不再依赖外部 `HSE 25MHz`，而是使用 `HSI 64MHz + PLL1` 生成 `480MHz SYSCLK`，以绕开 `HSE` 未就绪导致 `SystemClock_Config()` 卡死的问题。
-- 本轮改动保持 `AHB=240MHz`、`APB1/2/3/4=120MHz`，因此 `TIM1 / ADC / SPI / UART` 的主控制链时序不变，重点只是让板子先稳定启动进入主循环。
-- `FDCAN` 当前通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续绑定外部晶振；待 `HSE` 硬件恢复并重新校准 CAN 位时序后，再恢复正常配置。
+### 当前台架启动策略（2026-04-05）
+- 当前 bench 已重新尝试依赖外部 `HSE 25MHz + PLL1` 生成 `480MHz SYSCLK`，用于验证重新返修后的晶振、电容和 MCU 焊接是否已经恢复时钟启动能力。
+- 本轮回切继续保持 `AHB=240MHz`、`APB1/2/3/4=120MHz`，因此 `TIM1 / ADC / SPI / UART` 主链路频率目标不变；变化点只在系统时钟源重新回到外部晶振。
+- `FDCAN` 当前仍通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续引入额外变量；待 `HSE` 稳定后，再恢复正常配置并重新校准 CAN 位时序。
 - 当前推荐调试接口为 `CMSIS-DAP`（SWD）；文档里旧的 `ST-Link V3` 表述不再作为当前台架默认方案。
 
 ---

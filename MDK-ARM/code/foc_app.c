@@ -265,7 +265,6 @@ static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0U);
     htim1.Instance->BDTR &= ~TIM_BDTR_MOE;
 
-    HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
     MI_RsOnlineEstimator_Enable(&handle->rs_est, 0U);
 
     handle->fault_code = fault;
@@ -445,7 +444,6 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
             handle->fault_code = FOC_FAULT_DRV8350S;
             handle->state = FOC_STATE_FAULT;
             handle->enable_pwm = 0;
-            HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
             return;
         }
 
@@ -485,9 +483,8 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
     HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
     HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
 
-    /* 关闭栅极驱动并关断DRV_EN，确保功率级下电 */
+    /* 关闭栅极驱动并保持DRV_EN上电，便于继续诊断且MOS仍保持Hi-Z */
     (void)DRV8350S_DisableGateDrivers(&drv8350s);
-    HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
     
     /* 禁用Rs在线估计 */
     MI_RsOnlineEstimator_Enable(&handle->rs_est, 0);
@@ -709,7 +706,6 @@ void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
                 handle->state = FOC_STATE_FAULT;
                 handle->enable_pwm = 0;
                 handle->enable_identify = 0;
-                HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);
                 return;
             }
 

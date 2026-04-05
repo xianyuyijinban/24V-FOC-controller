@@ -161,6 +161,10 @@ int main(void)
                       GPIO_PIN_4) != 0) {
         Error_Handler();
     }
+
+	/* 仅给DRV8350S芯片上电用于寄存器配置/故障诊断，栅极仍保持关闭。 */
+	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
+	HAL_Delay(1);
 											
 	DRV8350S_Config_t config;
 	DRV8350S_SetDefaultConfig(&config);
@@ -171,18 +175,18 @@ int main(void)
 	config.idriveN_hs = DRV8350S_IDRIVE_1000MA;      /* 1A sink */
 	config.tdrive = DRV8350S_TDRIVE_4000NS;          /* 4us */
 	config.ocpMode = DRV8350S_OCP_MODE_RETRY;        /* retry mode */
+	config.vdsLvl = 0x01;                            /* 0.07V typ */
 
 	if (DRV8350S_Configure(&drv8350s, &config) != 0) {
 			Error_Handler();
 	}
 	
 	/* 上电默认保持功率级关闭：
-	 * 1) 关闭栅极驱动
-	 * 2) 拉低DRV_EN
+	 * 1) 关闭栅极驱动，确保MOS不导通
+	 * 2) 保持DRV_EN上电，便于持续诊断和故障上传
 	 * 真正使能由 FOC_App_Enable() 统一管理
 	 */
 	(void)DRV8350S_DisableGateDrivers(&drv8350s);
-	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_RESET);
 
   __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
   __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);

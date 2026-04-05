@@ -654,8 +654,7 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
         DRV8350S_DMA_CompleteCallback(&drv8350s);
         
         uint8_t reg = drv8350s.readReq.registerAddr;
-        (void)drv8350s.rxBuf[0];  /* First received word (previous frame response) - for debug */
-        (void)drv8350s.rxBuf[1];  /* Second received word (actual data) - for debug */
+        (void)drv8350s.rxBuf[0];  /* Current frame response */
         
         switch (reg) {
             case DRV8350S_REG_FAULT_STATUS_1:
@@ -670,13 +669,21 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
                 break;
         }
     }
-    
+}
+
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi == &hspi3) {
+        TLE5012_HandleTxComplete();
+    }
+}
+
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
+{
     if (hspi == &hspi3) {
         TLE5012_ProcessData(tle5012_rx_buf);
     }
-    
 }
-
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
 {

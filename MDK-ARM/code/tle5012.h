@@ -44,6 +44,7 @@ typedef struct {
 
 void TLE5012_Init(void);
 void TLE5012_StartRead(void); // 触发异步读取
+void TLE5012_HandleTxComplete(void); // 发送命令完成，切换到接收阶段
 void TLE5012_ProcessData(uint16_t *rx_buf); // 处理接收到的数据
 void TLE5012_HandleTransferError(void); // SPI错误/启动失败恢复
 float TLE5012_GetAngle(void); // 获取角度值（0-360度）
@@ -55,7 +56,7 @@ void TLE5012_ClearCRCErrorCount(void);
 uint8_t TLE5012_IsDataValid(void);
 
 extern TLE5012_Data_t tle5012_sensor;
-extern uint16_t tle5012_rx_buf[3];  // SPI接收缓冲区
+extern uint16_t tle5012_rx_buf[2];  // SPI接收缓冲区：Data + Safety
 
 #ifdef __cplusplus
 }

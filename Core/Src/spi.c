@@ -86,7 +86,7 @@ void MX_SPI3_Init(void)
   /* USER CODE END SPI3_Init 1 */
   hspi3.Instance = SPI3;
   hspi3.Init.Mode = SPI_MODE_MASTER;
-  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi3.Init.Direction = SPI_DIRECTION_1LINE;
   hspi3.Init.DataSize = SPI_DATASIZE_16BIT;
   hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi3.Init.CLKPhase = SPI_PHASE_2EDGE;

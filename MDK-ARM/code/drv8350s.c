@@ -26,6 +26,7 @@ static int8_t DRV8350S_BusLock(DRV8350S_Handle_t* handle, uint32_t timeoutMs);
 static void DRV8350S_BusUnlock(DRV8350S_Handle_t* handle);
 static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t data);
 static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t* data);
+static void DRV8350S_FrameSpacingDelay(void);
 
 /* Public Functions ----------------------------------------------------------*/
 
@@ -276,19 +277,18 @@ int8_t DRV8350S_TriggerAsyncRead(DRV8350S_Handle_t* handle, uint8_t regAddr)
     handle->readReq.registerAddr = regAddr;
     handle->readReq.pending = 1;
 
-    /* Prepare TX buffer for read command */
+    /* DRV8350S 在当前 16-bit 帧内直接返回目标寄存器数据 */
     handle->txBuf[0] = DRV8350S_BuildReadFrame(regAddr);
-    handle->txBuf[1] = 0x0000;  /* NOP to get response */
 
     /* Assert chip select */
     NSCS_LOW(handle);
 
-    /* Start DMA transfer: 2 words (command + NOP) */
+    /* Start DMA transfer: single 16-bit command frame */
     HAL_StatusTypeDef status = HAL_SPI_TransmitReceive_DMA(
         handle->hspi,
         (uint8_t*)handle->txBuf,
         (uint8_t*)handle->rxBuf,
-        2  /* 2 x 16-bit transfers */
+        1
     );
 
     if (status == HAL_OK) {
@@ -400,14 +400,13 @@ void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle)
 
     /* Deassert chip select */
     NSCS_HIGH(handle);
+    DRV8350S_FrameSpacingDelay();
 
     /* Release SPI bus */
     handle->runtime.dmaBusy = 0;
 
-    /* Parse received data */
-    /* rxBuf[0] contains previous register data (don't care for first read) */
-    /* rxBuf[1] contains actual response data */
-    uint16_t response = DRV8350S_ParseResponse(handle->rxBuf[1]);
+    /* 当前帧即返回目标寄存器数据 */
+    uint16_t response = DRV8350S_ParseResponse(handle->rxBuf[0]);
 
     /* Store based on which register was read */
     switch (handle->readReq.registerAddr) {
@@ -712,10 +711,8 @@ static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t 
         1,
         DRV8350S_SPI_TIMEOUT_MS
     );
-
-    /* t_READY = 1ms (datasheet max) */
-    HAL_Delay(1);
     NSCS_HIGH(handle);
+    DRV8350S_FrameSpacingDelay();
 
     return (halStatus == HAL_OK) ? 0 : -1;
 }
@@ -743,21 +740,22 @@ static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t r
     );
 
     NSCS_HIGH(handle);
-    __NOP(); __NOP(); __NOP(); __NOP();
-
-    txFrame = 0x0000U;
-    NSCS_LOW(handle);
-    halStatus |= HAL_SPI_TransmitReceive(
-        handle->hspi,
-        (uint8_t*)&txFrame,
-        (uint8_t*)&rxFrame,
-        1,
-        DRV8350S_SPI_TIMEOUT_MS
-    );
-    NSCS_HIGH(handle);
+    DRV8350S_FrameSpacingDelay();
 
     *data = DRV8350S_ParseResponse(rxFrame);
     return (halStatus == HAL_OK) ? 0 : -1;
+}
+
+static void DRV8350S_FrameSpacingDelay(void)
+{
+    __NOP();
+    __NOP();
+    __NOP();
+    __NOP();
+    __NOP();
+    __NOP();
+    __NOP();
+    __NOP();
 }
 
 /**

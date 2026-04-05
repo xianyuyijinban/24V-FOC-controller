@@ -210,8 +210,8 @@ typedef struct {
     uint16_t            nscsPin;        /* Chip select pin */
 
     /* DMA Buffers */
-    uint16_t            txBuf[2];       /* TX buffer for SPI transaction */
-    uint16_t            rxBuf[2];       /* RX buffer for SPI transaction */
+    uint16_t            txBuf[1];       /* TX buffer for single 16-bit SPI transaction */
+    uint16_t            rxBuf[1];       /* RX buffer for single 16-bit SPI transaction */
 
     /* State */
     DRV8350S_Config_t   config;

@@ -31,6 +31,50 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("void TLE5012_HandleTransferError(void)", tle_c)
         self.assertIn("TLE5012_HandleTransferError();", it_c)
 
+    def test_tle5012_uses_three_wire_staged_transfer_and_command_crc(self):
+        spi_c = (ROOT / "Core" / "Src" / "spi.c").read_text(encoding="utf-8")
+        tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
+        tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("hspi3.Init.Direction = SPI_DIRECTION_1LINE;", spi_c)
+        self.assertIn("void TLE5012_HandleTxComplete(void);", tle_h)
+        self.assertIn("HAL_SPI_Transmit_DMA(&hspi3,", tle_c)
+        self.assertIn("HAL_SPI_Receive_DMA(&hspi3,", tle_c)
+        self.assertNotIn("HAL_SPI_TransmitReceive_DMA(&hspi3", tle_c)
+        self.assertIn("SPI_1LINE_TX(&hspi3);", tle_c)
+        self.assertIn("SPI_1LINE_RX(&hspi3);", tle_c)
+        self.assertIn("static void TLE5012_TwrDelay", tle_c)
+        self.assertIn("crc_words[0] = TLE5012_READ_CMD;", tle_c)
+        self.assertIn("crc_words[1] = raw_data;", tle_c)
+        self.assertIn("TLE5012_CalculateCRC8(crc_words, 2U);", tle_c)
+        self.assertIn("void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)", it_c)
+        self.assertIn("void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)", it_c)
+        self.assertIn("TLE5012_HandleTxComplete();", it_c)
+        self.assertIn("TLE5012_ProcessData(tle5012_rx_buf);", it_c)
+
+    def test_drv8350_uses_single_frame_reads_and_keeps_diagnostics_powered(self):
+        main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+        drv_c = (ROOT / "MDK-ARM" / "code" / "drv8350s.c").read_text(encoding="utf-8")
+
+        drv_en_high = main_c.find("HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);")
+        configure = main_c.find("DRV8350S_Configure(&drv8350s, &config)")
+        coast = main_c.find("DRV8350S_DisableGateDrivers(&drv8350s)")
+
+        self.assertNotEqual(drv_en_high, -1, "main.c should power DRV8350S before configuration")
+        self.assertNotEqual(configure, -1, "main.c should still configure DRV8350S")
+        self.assertNotEqual(coast, -1, "main.c should still force gate drivers off after configuration")
+        self.assertLess(drv_en_high, configure)
+        self.assertLess(configure, coast)
+        self.assertIn("config.vdsLvl = 0x01;", main_c)
+        self.assertIn("handle->txBuf[0] = DRV8350S_BuildReadFrame(regAddr);", drv_c)
+        self.assertIn("uint16_t response = DRV8350S_ParseResponse(handle->rxBuf[0]);", drv_c)
+        self.assertNotIn("handle->txBuf[1] = 0x0000", drv_c)
+        self.assertNotIn("handle->rxBuf[1]", drv_c)
+        self.assertNotIn("txFrame = 0x0000U;", drv_c)
+        self.assertNotIn("HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);", foc_c)
+
     def test_debug_boot_path_uses_hsi_and_gates_fdcan_init(self):
         main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
         fdcan_h = (ROOT / "Core" / "Inc" / "fdcan.h").read_text(encoding="utf-8")

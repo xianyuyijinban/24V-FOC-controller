@@ -111,3 +111,10 @@
 - Prevention: Keep `test_build_system.py::test_debug_boot_path_uses_hse_and_gates_fdcan_init` in the repo, and whenever the startup clock source or external crystal recovery path is changed, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1` before closing the task.
 - Commit: ea0ab41a3cbebceaa8ff3c9f3b79a463b4501f21
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-05 16:48] HSE retest still stalls in SystemClock_Config
+- Problem: After reflashing the new `HSE` bench build over SWD, the target still failed to boot. A reset-and-run capture showed `PC=0x0800820a`, which is the tight loop immediately after `HAL_RCC_OscConfig()` fails in `SystemClock_Config()`, and `RCC_CR=0x00014025`, meaning the firmware had enabled `HSE` but `HSERDY` still never asserted.
+- Resolution: Verified the new image by programming it with `pyocd commander`, then halted after reset and mapped the stopped PC back to the `SystemClock_Config()` failure loop. This confirms the current blocker is still the external crystal startup path, not `FDCAN`, encoder SPI, or later peripheral init.
+- Prevention: After any future crystal rework, always reflash the `HSE` bench image and capture both `PC` and `RCC_CR` over SWD before assuming the hardware fix worked; if `RCC_CR` again shows `HSEON=1` with `HSERDY=0`, stay focused on the oscillator network instead of moving on to downstream firmware modules.
+- Commit: ea0ab41a3cbebceaa8ff3c9f3b79a463b4501f21
+- Recurrence policy: Not allowed to happen again.

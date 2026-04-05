@@ -118,3 +118,10 @@
 - Prevention: After any future crystal rework, always reflash the `HSE` bench image and capture both `PC` and `RCC_CR` over SWD before assuming the hardware fix worked; if `RCC_CR` again shows `HSEON=1` with `HSERDY=0`, stay focused on the oscillator network instead of moving on to downstream firmware modules.
 - Commit: ea0ab41a3cbebceaa8ff3c9f3b79a463b4501f21
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-05 19:10] HSI台架恢复与故障上传加固
+- Problem: The repaired `HSE 25MHz` path still could not bring the board past `SystemClock_Config()`, so bench bring-up had to fall back to `HSI` first. After that fallback, firmware still had two runtime blockers: `ADC_Sampling_Calibrate()` could deadlock before `TIM1_TRGO2/OC4REF` was actually running, and worst-case UART fault snapshots could be truncated or delayed by a too-small buffer plus float-heavy fault formatting.
+- Resolution: Switched the bench startup path back to `HSI 64MHz + PLL1` while keeping the original target bus/peripheral frequencies, so `TIM1 PSC/ARR` and `SPI1/SPI3` prescalers stayed unchanged. Started `TIM1 base + CH4/OC4REF` before ADC zero calibration and later enabled only the `TIM1` update interrupt, enlarged `DRV_UART_BUF_SIZE` to `1536`, rewrote the fault formatter to avoid float `printf`, added source-contract tests for the startup and UART constraints, and recorded the remaining live SPI findings in `process.md`.
+- Prevention: Keep `test_debug_boot_path_uses_hsi_and_gates_fdcan_init`, `test_startup_primes_tim1_oc4_before_adc_zero_calibration`, `test_uart_fault_packet_buffer_covers_worst_case_fault_dump`, and `test_uart_fault_formatter_avoids_float_printf_in_fault_path` in `test_build_system.py`; after any future clock-source, TIM1/ADC startup, or UART fault-path change, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before closing the task.
+- Commit: a0ef1278ad23ceb64da6e2ad9838edf805741fd6
+- Recurrence policy: Not allowed to happen again.

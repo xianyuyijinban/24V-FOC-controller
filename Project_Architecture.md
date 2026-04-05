@@ -23,9 +23,9 @@
 - 三环控制：力矩/速度/位置模式
 
 ### 当前台架启动策略（2026-04-05）
-- 当前 bench 已重新尝试依赖外部 `HSE 25MHz + PLL1` 生成 `480MHz SYSCLK`，用于验证重新返修后的晶振、电容和 MCU 焊接是否已经恢复时钟启动能力。
-- 本轮回切继续保持 `AHB=240MHz`、`APB1/2/3/4=120MHz`，因此 `TIM1 / ADC / SPI / UART` 主链路频率目标不变；变化点只在系统时钟源重新回到外部晶振。
-- `FDCAN` 当前仍通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续引入额外变量；待 `HSE` 稳定后，再恢复正常配置并重新校准 CAN 位时序。
+- 当前 bench 暂时回到 `HSI 64MHz + PLL1` 生成 `480MHz SYSCLK`，目标是优先让板子稳定进入主循环，以便继续检查 `SPI1 / SPI3 / UART1` 外设链路。
+- 这套回退配置继续保持 `AHB=240MHz`、`APB1/2/3/4=120MHz`，因此 `TIM1 / ADC / SPI / UART` 的目标工作频率不变；`TIM1 PSC/ARR` 与 `SPI1/SPI3` 分频无需跟着调整。
+- `FDCAN` 当前仍通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续引入额外变量；待主链路跑通后，再单独回到 `HSE` 路径处理外部晶振。
 - 当前推荐调试接口为 `CMSIS-DAP`（SWD）；文档里旧的 `ST-Link V3` 表述不再作为当前台架默认方案。
 
 ---
@@ -541,6 +541,7 @@ float ADC_CalcVoltage(uint16_t raw, float divider);
 ```
 
 - `TIM1_CH4` 作为内部比较基准，`TIM1_TRGO2 = OC4REF`，`ADC1` 常规扫描由 `TIM1_TRGO2` 触发。
+- 启动顺序采用“先触发、后控制”：`ADC_Sampling_Init()` 后先启动 `TIM1 Base + TIM1_CH4`，给 `ADC_Sampling_Calibrate()` 提供真实触发源；校准完成后仅通过 `__HAL_TIM_ENABLE_IT(..., TIM_IT_UPDATE)` 打开控制中断，避免 `HAL_TIM_Base_Start()` 后再次 `HAL_TIM_Base_Start_IT()` 触发 HAL 状态机错误。
 - 三相电流采样时间为 `32.5 cycles`，母线电压采样时间为 `16.5 cycles`。
 - `adc_sampling` 维护 `frameSequence / frameAgeCycles / sampleMissCount / invalidWindowCount`，并通过控制周期窗口约束 DMA 帧只能在当前 PWM 周期内被消费。
 - NVIC 使用 `NVIC_PRIORITYGROUP_4`；`DMA1_Stream2_IRQn`（ADC DMA）优先级高于 `TIM1_UP_IRQn`，而 `SPI1/SPI3` 相关 DMA/IRQ 保持在 `TIM1_UP_IRQn` 之后，设计契约为“ADC DMA先提交，TIM1控制ISR后消费，其他外设中断不得抢在控制环前面阻塞电流环”。
@@ -636,6 +637,9 @@ void DrvUart_TxCpltCallback(UART_HandleTypeDef* huart);
 bool DrvUart_HasActiveFault(void);
 void DrvUart_GetLastFault(DrvUart_DataPacket_t* packet);
 ```
+
+- `DRV_UART_BUF_SIZE` 当前扩大到 `1536`，用于覆盖最坏情况故障文本。
+- `DrvUart_FormatFault()` 的故障快照路径避免浮点 `printf`，改用整数/固定文本格式优先把故障根因发给上位机，降低故障态格式化卡顿导致的首报丢失风险。
 
 ### 9. 上位机数据解析器 (data_parser.py)
 
@@ -1045,3 +1049,4 @@ State : 4
 | v1.6 | 2026-03-04 | FOC电压常数一致化、UART故障首报修复、命令复制告警修复、FOC接口导出补齐、单测入口兼容 |
 | v1.7 | 2026-03-04 | DRV8350S异步读失败路径清理pending，避免BusLock等待超时 |
 | v1.8 | 2026-04-02 | 低边分流ADC触发改为TIM1_CH4/TRGO2，新增ADC帧新鲜度校验、采样故障升级与UART诊断 |
+| v1.9 | 2026-04-05 | 台架回退HSI启动、ADC零点校准预触发顺序修复、UART故障快照缓冲与格式化加固 |

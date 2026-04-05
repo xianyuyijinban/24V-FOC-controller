@@ -133,6 +133,16 @@ int main(void)
 	
 	/* 初始化ADC采样模块 */
 	ADC_Sampling_Init(&hadc1);
+
+	/* 提前启动TIM1计数器和CH4内部比较输出，仅用于ADC触发。
+	 * 这里不启动PWM通道，也不使能更新中断，因此不会驱动功率级。
+	 */
+	if (HAL_TIM_Base_Start(&htim1) != HAL_OK) {
+		Error_Handler();
+	}
+	if (HAL_TIM_OC_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+		Error_Handler();
+	}
 	
 	/* 启动ADC DMA采样 */
 	if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_data, 4) != HAL_OK) {
@@ -174,7 +184,8 @@ int main(void)
 	(void)DRV8350S_DisableGateDrivers(&drv8350s);
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_RESET);
 
-  HAL_TIM_Base_Start_IT(&htim1);
+  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+  __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
   
   /* 注意：速度环/位置环已移至TIM1中断分频：
    * - 速度环: 2kHz (20kHz/10)
@@ -246,16 +257,17 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 5;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 60;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 5;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
   RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)

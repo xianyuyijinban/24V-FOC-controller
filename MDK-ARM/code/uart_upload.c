@@ -223,6 +223,8 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
 {
     int16_t len = 0;
     uint16_t fs1, vs2;
+    int32_t ia_mA, ib_mA, ic_mA;
+    uint32_t vbus_mV;
 #define APPEND_FMT(...) \
     do { \
         len = DrvUart_Append(buf, bufSize, len, __VA_ARGS__); \
@@ -237,6 +239,10 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     
     fs1 = packet->faultStatus1;
     vs2 = packet->vgsStatus2;
+    ia_mA = (int32_t)(packet->adcCurrentA * 1000.0f);
+    ib_mA = (int32_t)(packet->adcCurrentB * 1000.0f);
+    ic_mA = (int32_t)(packet->adcCurrentC * 1000.0f);
+    vbus_mV = (uint32_t)(packet->adcVbus * 1000.0f);
     
     /* 故障标题 */
     APPEND_FMT("\r\n========== !!! FAULT DETECTED !!! ==========\r\n");
@@ -244,11 +250,10 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     /* 时间戳 */
     APPEND_FMT("Time: %lu ms\r\n\r\n", packet->timestamp);
     
-    /* TLE5012 编码器数据 (故障时也显示) */
+    /* 故障路径避免浮点printf，优先保证尽快把根因送到上位机 */
     APPEND_FMT("[TLE5012 Encoder]\r\n");
-    APPEND_FMT("  Angle:  %7.2f deg\r\n", packet->angle);
-    APPEND_FMT("  Raw:    %5u (0x%04X)\r\n", packet->rawAngle, packet->rawAngle);
-    APPEND_FMT("  CRC:    %s\r\n\r\n", packet->crcError ? "ERROR!" : "OK");
+    APPEND_FMT("  AngleRaw: %5u (0x%04X)\r\n", packet->rawAngle, packet->rawAngle);
+    APPEND_FMT("  CRC:      %s\r\n\r\n", packet->crcError ? "ERROR!" : "OK");
     
     /* DRV8350S 故障详情 */
     APPEND_FMT("[DRV8350S Fault Details]\r\n");
@@ -297,9 +302,7 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
 
     APPEND_FMT("\r\n[ADC Sampling]\r\n");
     APPEND_FMT("  Trigger: %s\r\n", packet->adcTriggerSource);
-    APPEND_FMT("  Samp:    Iabc=%4.1f cyc | Vbus=%4.1f cyc\r\n",
-               packet->adcCurrentSampleTimeCycles,
-               packet->adcVbusSampleTimeCycles);
+    APPEND_FMT("  Samp:    Iabc=32.5 cyc | Vbus=16.5 cyc\r\n");
     APPEND_FMT("  Frame:   seq=%lu age=%lu miss=%lu invalid=%lu\r\n",
                packet->adcFrameSequence,
                packet->adcFrameAgeCycles,
@@ -309,11 +312,11 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                packet->adcRawCurrentA,
                packet->adcRawCurrentB,
                packet->adcRawCurrentC);
-    APPEND_FMT("  Curr:    Ia=%7.3f Ib=%7.3f Ic=%7.3f | Vbus=%7.2f V\r\n",
-               packet->adcCurrentA,
-               packet->adcCurrentB,
-               packet->adcCurrentC,
-               packet->adcVbus);
+    APPEND_FMT("  Curr:    Ia=%ld mA Ib=%ld mA Ic=%ld mA\r\n",
+               (long)ia_mA,
+               (long)ib_mA,
+               (long)ic_mA);
+    APPEND_FMT("  Vbus:    %lu mV\r\n", (unsigned long)vbus_mV);
     
     /* 建议操作 */
     APPEND_FMT("\r\n>>> ACTION REQUIRED <<<\r\n");

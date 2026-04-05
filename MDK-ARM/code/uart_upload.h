@@ -18,7 +18,7 @@ extern "C" {
 #include <stdbool.h>
 
 /* 配置宏 -------------------------------------------------------------------*/
-#define DRV_UART_BUF_SIZE           1024    /* 发送缓冲区大小 */
+#define DRV_UART_BUF_SIZE           1536    /* 发送缓冲区大小，需覆盖最坏故障文本 */
 #define DRV_UPLOAD_INTERVAL_MS      100     /* 正常数据上传间隔 (ms) */
 #define DRV_FAULT_HISTORY_SIZE      8       /* 故障历史记录数量 */
 

@@ -42,10 +42,10 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 
 ## Bench Bring-Up Note / 台架启动说明
 
-- 当前固件已重新切回外部 `HSE 25MHz + PLL1`，目标保持 `SYSCLK = 480MHz`，用于验证你重新焊接后的晶振链路是否已经恢复。
-- 这次回切只恢复系统时钟来源；`FDCAN` 仍然通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免把 CAN 启动链一起混入晶振验证。
-- 如果 `HSE` 仍未就绪，固件会再次在 `SystemClock_Config()` 阶段停进 `Error_Handler()`；如果能正常越过这一步，就说明外部晶振链路至少已经具备启动条件。
-- 待 `HSE` 稳定后，再根据需要恢复 `FDCAN` 初始化并重新验证 CAN 位时序。
+- 当前固件重新回到临时台架恢复配置：`SystemClock_Config()` 使用内部 `HSI 64MHz + PLL1`，目标仍保持 `SYSCLK = 480MHz`，优先保证板子先稳定启动进入主循环。
+- `FDCAN` 继续通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化；本轮台架重点只看 `SPI1 / SPI3 / UART1` 主链路，`I2C/CAN` 不参与联调。
+- 这套 `HSI` 配置保持 `TIM1` 输出时钟 `240MHz`、`SPI123` 时钟 `192MHz` 不变，因此 `TIM1 PSC/ARR` 和 `SPI1/SPI3` 分频保持现值，不额外修改。
+- 待板子跑通后，再单独回到 `HSE` 路径继续处理外部晶振问题。
 - 当前推荐烧录/调试探头：`CMSIS-DAP`（SWD）。
 
 ---
@@ -79,10 +79,12 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 
 - `TIM1_CH4` 仅作为内部采样参考，不驱动外部引脚。
 - `TIM1_TRGO2 = OC4REF`，`ADC1` 常规组触发源改为 `TIM1_TRGO2`，避免继续使用粗粒度 `UPDATE` 触发。
+- 上电启动顺序已改为：`ADC_Sampling_Init()` 后先启动 `TIM1 Base + CH4(OC4REF)` 供 ADC 零点校准取样，再在校准完成后单独打开 `TIM1 UPDATE IRQ`；整个预触发阶段不启动 PWM 输出，不会驱动功率级。
 - 三相电流通道采样时间为 `32.5 cycles`，母线电压通道采样时间为 `16.5 cycles`。
 - NVIC 使用 `NVIC_PRIORITYGROUP_4`，并保持 `DMA1_Stream2_IRQn < TIM1_UP_IRQn < SPI DMA/IRQ`，设计目标是 `TIM1_CH4 -> ADC DMA完成 -> TIM1控制ISR`。
 - `TIM1` 控制环现在只消费“当前控制周期内完成”的 ADC 帧；单次缺帧会计数并上报，连续缺帧会升级为 `FOC_FAULT_ADC_SAMPLING`。
 - UART 状态/故障上传现在包含 ADC 帧序号、帧年龄、缺帧计数、无效窗口计数、原始电流 ADC 值以及换算后的 `Ia/Ib/Ic/Vbus`。
+- UART 故障首报路径使用 `1536B` 发送缓冲区，且故障格式化改为整数快路径，避免故障态浮点 `printf` 把首个大故障快照卡在串口发送前。
 
 ---
 
@@ -320,9 +322,11 @@ Notes / 说明:
 
 ### Bench Bring-Up Update / 台架启动更新 (2026-04-05)
 
-- 时钟启动已重新切回 `HSE 25MHz + PLL1`，用于验证重新焊接后的晶振链路是否恢复，同时保持 `SYSCLK 480MHz`。
+- 时钟启动已重新切回 `HSI 64MHz + PLL1`，用于先让板子稳定运行并继续检查 `SPI1 / SPI3 / UART1`。
 - `FOC_DEBUG_DISABLE_FDCAN_INIT` 继续保留，当前 bench 启动仍然只验证核心时钟与 `TIM1 / ADC / SPI / UART / GPIO` 主链路。
-- `test_build_system.py` 的启动契约已同步为 `HSE + FDCAN gate`，防止后续回归测试继续按旧的 `HSI` 路径判断。
+- 由于 `SYSCLK/AHB/APB/TIM1/SPI123` 目标频率保持不变，`TIM1 PSC/ARR` 和 `SPI1/SPI3` 波特率分频保持原值，不做额外补偿修改。
+- `ADC` 零点校准前会先启动 `TIM1` 基计数器和 `CH4/OC4REF` 触发链，校准完成后再单独使能 `TIM1 UPDATE IRQ`；这样能让 ADC 先拿到采样帧，同时不提前驱动 PWM。
+- UART 故障上报路径已加大缓冲区并移除故障态浮点格式化，保证首次故障和最坏情况故障快照也能稳定送到上位机。
 
 ### Recent Technical Updates / 近期技术更新 (2026-03-04)
 

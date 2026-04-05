@@ -125,3 +125,10 @@
 - Prevention: Keep `test_debug_boot_path_uses_hsi_and_gates_fdcan_init`, `test_startup_primes_tim1_oc4_before_adc_zero_calibration`, `test_uart_fault_packet_buffer_covers_worst_case_fault_dump`, and `test_uart_fault_formatter_avoids_float_printf_in_fault_path` in `test_build_system.py`; after any future clock-source, TIM1/ADC startup, or UART fault-path change, rerun `python -m pytest test_build_system.py -q`, `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`, and `powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1` before closing the task.
 - Commit: a0ef1278ad23ceb64da6e2ad9838edf805741fd6
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-05 20:20] PCB网表确认SPI问题边界
+- Problem: The live SPI failures still had an unresolved hardware-vs-firmware split: `DRV8350S` kept returning `0x07ff`, and `TLE5012` kept producing CRC-invalid frames. Without checking the actual PCB netlists, it was still possible to chase the wrong side of the interface.
+- Resolution: Read both `Netlist_PCB1_2026-04-05.tel` and `Netlist_PCB2_2026-04-05.tel`. Confirmed the control board already provides the required `DRV8350S SDO` pull-up (`R34=4.7K`) and also holds `DRV_EN` low by default through `R11`, so the SPI1 issue remains in firmware sequencing/protocol. Also confirmed the encoder PCB ties `SPI3_MOSI` and `SPI3_MISO` through `R1/R2=100R` into the same TLE5012 `DATA` pin, proving the current `SPI3` full-duplex DMA implementation does not match the hardware's single-data-line SSC topology.
+- Prevention: Whenever a peripheral bring-up failure could plausibly be either wiring or firmware, check the board netlist before changing protocol code. For this project specifically, preserve the rule that `DRV8350S` SPI changes must be checked against the device frame timing, and `TLE5012` changes must be checked against the single-line `DATA` topology and `twr_delay` requirement before implementation.
+- Commit: 08af84a6b932e953bb2cb0816e33f7a24be82cd8
+- Recurrence policy: Not allowed to happen again.

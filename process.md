@@ -211,6 +211,13 @@
 - 额外观察: `drv8350s.runtime.commCount` 与 `errorCount` 近似相等，但 `hspi1.ErrorCode=0`。结合代码路径，这个 `errorCount` 现在主要由 `dmaBusy` 跨周期未清时在 `TIM1` 中断里重复累加，不能直接当作“真实 SPI 硬错误次数”解释。
 - 结论: 当前板级主阻塞点已经收敛为 `SPI1(DRV8350S)` 和 `SPI3(TLE5012)` 两条链路的原始回包全高，`UART1` 不是当前异常源；下一步应优先继续核查 DRV 的 `SDO` 实际驱动条件，以及 TLE5012 的 SSC 时序/数据线驱动，而不是继续怀疑主时钟或 UART 配置。
 
+## [2026-04-08 22:05] Simulink Task 6 observer/load architecture
+- Problem: The average-value FOC Simulink baseline still fed the position and speed loops from ideal plant outputs and hard-coded the mechanical load torque inside the plant, so the closed-loop behavior remained too ideal for the next realism step.
+- Resolution: Added a dedicated design document and execution plan for Task 6, defining an encoder-style observer layer (`theta_mech_fb`, filtered `speed_mech_fb`, projected electrical angle/speed) plus an external `Tload_cmd` plant input that starts at `0.2 N·m`. The implemented external MATLAB artifacts now follow that design in `D:\matlab`, and the repo tracks the approved architecture and verification contract.
+- Prevention: Keep the Task 6 design and implementation plan in version control before extending the Simulink model further, and require fresh MATLAB batch checks proving the plant exposes `Tload_cmd`, the loops read `feedback`, and the new model simulates before calling the realism upgrade complete.
+- Commit: f43ebd6a3f375e3d35cf3ca80804bbc83282d48d
+- Recurrence policy: Not allowed to happen again.
+
 ## [2026-04-08 21:54] TLE5012 ISR时序与Safety Reset可观测性修复
 - Problem: `TLE5012` 在 `TIM1` 高优先级路径里通过 `HAL_GPIO_Init()` 反复重配 `PC11/PC12`，把编码器数据线方向切换变成了高开销 HAL 路径；同时 `Safety Word bit15`（编码器复位/看门狗异常）在驱动里被掩掉，UART 也无法把这个故障原因上传给上位机。
 - Resolution: 将 `tle5012.c` 的命令/响应阶段切换改为直接修改 `GPIOC->MODER`，把方向切换收敛为常量级寄存器写；保留完整 `Safety Word` 高8位到 `tle5012_sensor.status`，新增 `reset_fault` 标志，并在 `uart_upload` 的正常/故障文本里追加 `Safety` 与 `Reset` 诊断字段。同步更新 `README.md`、`Project_Architecture.md` 和源码约束测试。

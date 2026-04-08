@@ -31,19 +31,28 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("void TLE5012_HandleTransferError(void)", tle_c)
         self.assertIn("TLE5012_HandleTransferError();", it_c)
 
-    def test_tle5012_uses_three_wire_staged_transfer_and_command_crc(self):
+    def test_tle5012_uses_three_wire_staged_transfer_with_constant_time_data_line_switching(self):
         spi_c = (ROOT / "Core" / "Src" / "spi.c").read_text(encoding="utf-8")
         tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
         tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")
         it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
 
-        self.assertIn("hspi3.Init.Direction = SPI_DIRECTION_1LINE;", spi_c)
+        self.assertIn("hspi3.Init.Direction = SPI_DIRECTION_2LINES;", spi_c)
         self.assertIn("void TLE5012_HandleTxComplete(void);", tle_h)
         self.assertIn("HAL_SPI_Transmit_DMA(&hspi3,", tle_c)
         self.assertIn("HAL_SPI_Receive_DMA(&hspi3,", tle_c)
         self.assertNotIn("HAL_SPI_TransmitReceive_DMA(&hspi3", tle_c)
-        self.assertIn("SPI_1LINE_TX(&hspi3);", tle_c)
-        self.assertIn("SPI_1LINE_RX(&hspi3);", tle_c)
+        self.assertNotIn("SPI_1LINE_TX(&hspi3);", tle_c)
+        self.assertNotIn("SPI_1LINE_RX(&hspi3);", tle_c)
+        self.assertIn("static void TLE5012_ConfigCommandPhasePins(void)", tle_c)
+        self.assertIn("static void TLE5012_ConfigResponsePhasePins(void)", tle_c)
+        self.assertIn("GPIOC->MODER", tle_c)
+        self.assertIn("TLE5012_GPIO_MODER_INPUT", tle_c)
+        self.assertIn("TLE5012_GPIO_MODER_AF", tle_c)
+        self.assertNotIn("HAL_GPIO_Init(GPIOC, &gpio_init);", tle_c)
+        self.assertNotIn("GPIO_InitTypeDef gpio_init", tle_c)
+        self.assertIn("TLE5012_ConfigCommandPhasePins();", tle_c)
+        self.assertIn("TLE5012_ConfigResponsePhasePins();", tle_c)
         self.assertIn("static void TLE5012_TwrDelay", tle_c)
         self.assertIn("crc_words[0] = TLE5012_READ_CMD;", tle_c)
         self.assertIn("crc_words[1] = raw_data;", tle_c)
@@ -74,6 +83,38 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertNotIn("handle->rxBuf[1]", drv_c)
         self.assertNotIn("txFrame = 0x0000U;", drv_c)
         self.assertNotIn("HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_RESET);", foc_c)
+        self.assertIn("#define DRV8350S_NSCS_HIGH_MIN_NS", drv_c)
+        self.assertIn("SystemCoreClock", drv_c)
+        self.assertIn("while (cycles-- > 0U)", drv_c)
+        self.assertNotIn("static void DRV8350S_FrameSpacingDelay(void)\n{\n    __NOP();", drv_c)
+
+    def test_spi_bringup_uses_bench_safe_prescaler(self):
+        spi_c = (ROOT / "Core" / "Src" / "spi.c").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            spi_c.count("SPI_BAUDRATEPRESCALER_128"),
+            2,
+            "SPI1 and SPI3 should both use the reduced bench prescaler",
+        )
+
+    def test_startup_waits_for_external_spi_peripherals_to_settle(self):
+        main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
+
+        settle = main_c.find("HAL_Delay(FOC_EXT_SPI_POWERUP_DELAY_MS);")
+        tle_init = main_c.find("TLE5012_Init();")
+        drv_init = main_c.find("DRV8350S_Init(&drv8350s, &hspi1, &htim1,")
+        drv_en_high = main_c.find("HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);")
+        drv_en_wait = main_c.find("HAL_Delay(2);")
+
+        self.assertIn("#define FOC_EXT_SPI_POWERUP_DELAY_MS 20U", main_c)
+        self.assertNotEqual(settle, -1, "main.c should wait for external SPI peripherals to power up")
+        self.assertNotEqual(tle_init, -1)
+        self.assertNotEqual(drv_init, -1)
+        self.assertNotEqual(drv_en_high, -1)
+        self.assertNotEqual(drv_en_wait, -1, "DRV_EN should be followed by the longer settle delay")
+        self.assertLess(settle, tle_init)
+        self.assertLess(settle, drv_init)
+        self.assertLess(drv_en_high, drv_en_wait)
 
     def test_debug_boot_path_uses_hsi_and_gates_fdcan_init(self):
         main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
@@ -168,6 +209,25 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("packet->adcFrameSequence", uart_c)
         self.assertIn("packet->adcRawCurrentA", uart_c)
         self.assertIn("packet->adcCurrentA", uart_c)
+
+    def test_tle5012_preserves_reset_watchdog_status_through_uart_fault_upload(self):
+        tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
+        tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")
+        uart_h = (ROOT / "MDK-ARM" / "code" / "uart_upload.h").read_text(encoding="utf-8")
+        uart_c = (ROOT / "MDK-ARM" / "code" / "uart_upload.c").read_text(encoding="utf-8")
+
+        self.assertIn("uint8_t status;", tle_h)
+        self.assertIn("uint8_t reset_fault;", tle_h)
+        self.assertIn("#define TLE5012_SAFETY_RESET_OK_MASK", tle_c)
+        self.assertIn("tle5012_sensor.status = (uint8_t)(safety_word >> 8);", tle_c)
+        self.assertIn("tle5012_sensor.reset_fault", tle_c)
+        self.assertIn("TLE5012_SAFETY_RESET_OK_MASK", tle_c)
+        self.assertIn("encoderSafetyStatus", uart_h)
+        self.assertIn("encoderResetFault", uart_h)
+        self.assertIn("packet->encoderSafetyStatus = tle5012_sensor.status;", uart_c)
+        self.assertIn("packet->encoderResetFault = tle5012_sensor.reset_fault;", uart_c)
+        self.assertIn("Reset:", uart_c)
+        self.assertIn("Safety:", uart_c)
 
     def test_startup_primes_tim1_oc4_before_adc_zero_calibration(self):
         main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")
@@ -385,6 +445,12 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertTrue(demo_module.exists())
         self.assertIn("power_unlocked", foc_h)
         self.assertIn('CMD:UNLOCK,%ld', it_c)
+
+    def test_keil_project_includes_demo_button_module(self):
+        uvprojx = (ROOT / "MDK-ARM" / "24V FOC Controller.uvprojx").read_text(encoding="utf-8")
+
+        self.assertIn("<FileName>demo_button_control.c</FileName>", uvprojx)
+        self.assertIn(r"<FilePath>.\code\demo_button_control.c</FilePath>", uvprojx)
 
     def test_local_demo_button_mode_behavior_contract(self):
         main_c = (ROOT / "Core" / "Src" / "main.c").read_text(encoding="utf-8")

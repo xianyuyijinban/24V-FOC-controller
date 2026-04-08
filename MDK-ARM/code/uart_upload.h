@@ -38,6 +38,8 @@ typedef struct {
     float    angle;             /* 角度值 (0.0 ~ 360.0 度) */
     uint16_t rawAngle;          /* 原始角度数据 */
     uint8_t  crcError;          /* CRC 错误标志 */
+    uint8_t  encoderSafetyStatus; /* Safety Word高8位 */
+    uint8_t  encoderResetFault; /* Safety Word bit15=0，表示复位/看门狗异常 */
 
     /* DRV8350S 驱动器数据 */
     uint16_t faultStatus1;      /* FAULT_STATUS_1 寄存器 */

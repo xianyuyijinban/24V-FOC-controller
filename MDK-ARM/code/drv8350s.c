@@ -13,6 +13,7 @@
 #define DRV8350S_WRITE_MASK             0x7FFFU
 #define DRV8350S_ADDR_SHIFT             11U
 #define DRV8350S_DATA_MASK              0x07FFU
+#define DRV8350S_NSCS_HIGH_MIN_NS       500U
 
 #define NSCS_LOW(handle)    HAL_GPIO_WritePin((handle)->nscsPort, (handle)->nscsPin, GPIO_PIN_RESET)
 #define NSCS_HIGH(handle)   HAL_GPIO_WritePin((handle)->nscsPort, (handle)->nscsPin, GPIO_PIN_SET)
@@ -748,14 +749,15 @@ static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t r
 
 static void DRV8350S_FrameSpacingDelay(void)
 {
-    __NOP();
-    __NOP();
-    __NOP();
-    __NOP();
-    __NOP();
-    __NOP();
-    __NOP();
-    __NOP();
+    uint32_t cycles = (((SystemCoreClock / 1000000U) * DRV8350S_NSCS_HIGH_MIN_NS) + 999U) / 1000U;
+
+    if (cycles == 0U) {
+        cycles = 1U;
+    }
+
+    while (cycles-- > 0U) {
+        __NOP();
+    }
 }
 
 /**

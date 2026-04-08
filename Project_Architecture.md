@@ -549,13 +549,16 @@ float ADC_CalcVoltage(uint16_t raw, float divider);
 ### 6. 编码器驱动模块 (tle5012.h)
 
 - `TLE5012B` 当前使用 `SPI3 + DMA + 软件NSS`；`PA15` 作为片选脚，驱动在每次读取前拉低、在 DMA 完成/错误/超时恢复时拉高，避免编码器总线长期被选通。
+- `SPI3` 的单线 `DATA` 方向切换不再在 `TIM1` 高优先级路径里调用 `HAL_GPIO_Init()`；当前实现只直接切换 `PC11/PC12` 的 `GPIOC->MODER`，把中断内开销收敛为常量级寄存器写。
+- `Safety Word` 的高 8 位会完整保留到 `tle5012_sensor.status`，其中 bit15 单独映射为 `reset_fault`，用于标记编码器复位/看门狗异常。
 
 ```c
 /* 数据结构 */
 TLE5012_Data_t      // 编码器数据结构
     float angle;            // 角度值 0.0 ~ 360.0
     uint16_t raw_angle;     // 原始角度数据
-    uint8_t status;         // 状态字节
+    uint8_t status;         // Safety Word高8位
+    uint8_t reset_fault;    // Safety Word bit15=0
     uint8_t crc_error;      // CRC错误标志
     uint8_t update_flag;    // 数据更新标志
 
@@ -567,7 +570,7 @@ float TLE5012_GetAngle(void);           // 获取角度值 (0-360度)
 
 /* 外部变量 */
 extern TLE5012_Data_t tle5012_sensor;
-extern uint16_t tle5012_rx_buf[3];  // SPI接收缓冲区
+extern uint16_t tle5012_rx_buf[2];  // SPI接收缓冲区: Data + Safety
 ```
 
 ### 7. 栅极驱动模块 (drv8350s.h)
@@ -603,6 +606,8 @@ DrvUart_DataPacket_t    // 数据包结构
     float    angle;         // 角度值 (0.0 ~ 360.0 度)
     uint16_t rawAngle;      // 原始角度数据
     uint8_t  crcError;      // CRC 错误标志
+    uint8_t  encoderSafetyStatus; // TLE5012 Safety Word高8位
+    uint8_t  encoderResetFault;  // TLE5012 bit15 reset/watchdog
     uint16_t faultStatus1;  // FAULT_STATUS_1 寄存器
     uint16_t vgsStatus2;    // VGS_STATUS_2 寄存器
     uint32_t faultFlags;    // 解析后的故障标志
@@ -640,6 +645,7 @@ void DrvUart_GetLastFault(DrvUart_DataPacket_t* packet);
 
 - `DRV_UART_BUF_SIZE` 当前扩大到 `1536`，用于覆盖最坏情况故障文本。
 - `DrvUart_FormatFault()` 的故障快照路径避免浮点 `printf`，改用整数/固定文本格式优先把故障根因发给上位机，降低故障态格式化卡顿导致的首报丢失风险。
+- UART 正常包和故障包都会额外输出编码器 `Safety` 字节与 `Reset` 状态，方便台架阶段区分“CRC错”与“编码器自身复位/看门狗异常”。
 
 ### 9. 上位机数据解析器 (data_parser.py)
 

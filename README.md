@@ -85,6 +85,8 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 - `TIM1` 控制环现在只消费“当前控制周期内完成”的 ADC 帧；单次缺帧会计数并上报，连续缺帧会升级为 `FOC_FAULT_ADC_SAMPLING`。
 - UART 状态/故障上传现在包含 ADC 帧序号、帧年龄、缺帧计数、无效窗口计数、原始电流 ADC 值以及换算后的 `Ia/Ib/Ic/Vbus`。
 - UART 故障首报路径使用 `1536B` 发送缓冲区，且故障格式化改为整数快路径，避免故障态浮点 `printf` 把首个大故障快照卡在串口发送前。
+- TLE5012 的 `DATA` 线方向切换现在通过直接修改 `PC11/PC12` 的 `MODER` 完成，不再在 `TIM1` 高优先级路径里调用 `HAL_GPIO_Init()`。
+- UART 正常/故障文本会额外输出编码器 `Safety` 字节和 `Reset` 状态，用来暴露 TLE5012 `Safety Word bit15` 的复位/看门狗异常。
 
 ---
 

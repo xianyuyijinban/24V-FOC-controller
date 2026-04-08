@@ -36,7 +36,8 @@ typedef void (*TLE5012_FaultCallback_t)(TLE5012_Fault_t fault);
 typedef struct {
     float angle;            // 角度值 0.0 ~ 360.0
     uint16_t raw_angle;     // 原始角度数据
-    uint8_t status;         // 状态字节 (Safety Word低8位)
+    uint8_t status;         // 状态字节 (Safety Word高8位，含bit15复位/看门狗状态)
+    uint8_t reset_fault;    // Safety Word bit15=0，表示芯片复位/看门狗异常
     uint8_t crc_error;      // CRC错误标志 (1=错误)
     uint8_t update_flag;    // 数据更新标志
     uint8_t data_valid;     // 【新增】数据有效标志

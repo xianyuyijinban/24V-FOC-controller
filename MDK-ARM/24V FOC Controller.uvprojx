@@ -138,7 +138,7 @@
           </Flash1>
           <bUseTDR>1</bUseTDR>
           <Flash2>BIN\UL2V8M.DLL</Flash2>
-          <Flash3></Flash3>
+          <Flash3>"" ()</Flash3>
           <Flash4></Flash4>
           <pFcarmOut></pFcarmOut>
           <pFcarmGrp></pFcarmGrp>
@@ -1265,6 +1265,16 @@
               <FileName>head.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\head.h</FilePath>
+            </File>
+            <File>
+              <FileName>demo_button_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\demo_button_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>demo_button_control.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\demo_button_control.h</FilePath>
             </File>
             <File>
               <FileName>tle5012.h</FileName>

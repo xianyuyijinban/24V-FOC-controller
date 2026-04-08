@@ -105,6 +105,8 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->angle = tle5012_sensor.angle;
     packet->rawAngle = tle5012_sensor.raw_angle;
     packet->crcError = tle5012_sensor.crc_error;
+    packet->encoderSafetyStatus = tle5012_sensor.status;
+    packet->encoderResetFault = tle5012_sensor.reset_fault;
 
     /* 从 DRV8350S 句柄获取数据 */
     packet->faultStatus1 = s_drvHandle->runtime.regFaultStatus1;
@@ -171,7 +173,9 @@ static int16_t DrvUart_FormatNormal(const DrvUart_DataPacket_t* packet, uint8_t*
     APPEND_FMT("[TLE5012 Encoder]\r\n");
     APPEND_FMT("  Angle:  %7.2f deg\r\n", packet->angle);
     APPEND_FMT("  Raw:    %5u (0x%04X)\r\n", packet->rawAngle, packet->rawAngle);
-    APPEND_FMT("  CRC:    %s\r\n\r\n", packet->crcError ? "ERROR!" : "OK");
+    APPEND_FMT("  CRC:    %s\r\n", packet->crcError ? "ERROR!" : "OK");
+    APPEND_FMT("  Safety: 0x%02X\r\n", packet->encoderSafetyStatus);
+    APPEND_FMT("  Reset:  %s\r\n\r\n", packet->encoderResetFault ? "FAULT!" : "OK");
     
     /* DRV8350S 驱动器数据 */
     APPEND_FMT("[DRV8350S Driver]\r\n");
@@ -253,7 +257,9 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     /* 故障路径避免浮点printf，优先保证尽快把根因送到上位机 */
     APPEND_FMT("[TLE5012 Encoder]\r\n");
     APPEND_FMT("  AngleRaw: %5u (0x%04X)\r\n", packet->rawAngle, packet->rawAngle);
-    APPEND_FMT("  CRC:      %s\r\n\r\n", packet->crcError ? "ERROR!" : "OK");
+    APPEND_FMT("  CRC:      %s\r\n", packet->crcError ? "ERROR!" : "OK");
+    APPEND_FMT("  Safety:   0x%02X\r\n", packet->encoderSafetyStatus);
+    APPEND_FMT("  Reset:    %s\r\n\r\n", packet->encoderResetFault ? "FAULT!" : "OK");
     
     /* DRV8350S 故障详情 */
     APPEND_FMT("[DRV8350S Fault Details]\r\n");

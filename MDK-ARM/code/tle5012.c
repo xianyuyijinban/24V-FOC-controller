@@ -19,6 +19,8 @@ static uint8_t TLE5012_CalculateCRC8(const uint16_t *words, uint8_t word_count);
 static void TLE5012_AssertCS(void);
 static void TLE5012_ReleaseCS(void);
 static void TLE5012_HandleCommFault(TLE5012_Fault_t fault);
+static void TLE5012_ConfigCommandPhasePins(void);
+static void TLE5012_ConfigResponsePhasePins(void);
 static void TLE5012_TwrDelay(void);
 static HAL_StatusTypeDef TLE5012_StartRxPhase(void);
 
@@ -35,6 +37,12 @@ static TLE5012_FaultCallback_t fault_callback = NULL;
 #define CRC_ERROR_THRESHOLD             3U
 #define SPI_TIMEOUT_MS                  10U
 #define TLE5012_TWR_DELAY_US           5U
+#define TLE5012_GPIO_MODER_INPUT(pin)  (0x0U << ((pin) * 2U))
+#define TLE5012_GPIO_MODER_AF(pin)     (0x2U << ((pin) * 2U))
+#define TLE5012_GPIO_MODER_MASK(pin)   (0x3U << ((pin) * 2U))
+#define TLE5012_DATA_MISO_PIN          11U
+#define TLE5012_DATA_MOSI_PIN          12U
+#define TLE5012_SAFETY_RESET_OK_MASK    0x8000U
 #define TLE5012_SAFETY_SYSTEM_OK_MASK   0x4000U
 #define TLE5012_SAFETY_INTERFACE_OK_MASK 0x2000U
 #define TLE5012_SAFETY_ANGLE_OK_MASK    0x1000U
@@ -55,12 +63,15 @@ static void TLE5012_ReleaseCS(void)
 static void TLE5012_HandleCommFault(TLE5012_Fault_t fault)
 {
     TLE5012_ReleaseCS();
+    TLE5012_ConfigCommandPhasePins();
 
     if (!is_busy) {
         return;
     }
 
     is_busy = 0U;
+    tle5012_sensor.status = 0U;
+    tle5012_sensor.reset_fault = 0U;
     tle5012_sensor.data_valid = 0U;
     tle5012_sensor.crc_error = 1U;
     tle5012_sensor.update_flag = 1U;
@@ -72,6 +83,30 @@ static void TLE5012_HandleCommFault(TLE5012_Fault_t fault)
     if ((fault_callback != NULL) && (crc_error_count >= CRC_ERROR_THRESHOLD)) {
         fault_callback(fault);
     }
+}
+
+static void TLE5012_ConfigCommandPhasePins(void)
+{
+    uint32_t moder = GPIOC->MODER;
+
+    moder &= ~(TLE5012_GPIO_MODER_MASK(TLE5012_DATA_MISO_PIN) |
+               TLE5012_GPIO_MODER_MASK(TLE5012_DATA_MOSI_PIN));
+    moder |= TLE5012_GPIO_MODER_INPUT(TLE5012_DATA_MISO_PIN) |
+             TLE5012_GPIO_MODER_AF(TLE5012_DATA_MOSI_PIN);
+    GPIOC->MODER = moder;
+    __DSB();
+}
+
+static void TLE5012_ConfigResponsePhasePins(void)
+{
+    uint32_t moder = GPIOC->MODER;
+
+    moder &= ~(TLE5012_GPIO_MODER_MASK(TLE5012_DATA_MISO_PIN) |
+               TLE5012_GPIO_MODER_MASK(TLE5012_DATA_MOSI_PIN));
+    moder |= TLE5012_GPIO_MODER_AF(TLE5012_DATA_MISO_PIN) |
+             TLE5012_GPIO_MODER_INPUT(TLE5012_DATA_MOSI_PIN);
+    GPIOC->MODER = moder;
+    __DSB();
 }
 
 static void TLE5012_TwrDelay(void)
@@ -90,8 +125,8 @@ static void TLE5012_TwrDelay(void)
 
 static HAL_StatusTypeDef TLE5012_StartRxPhase(void)
 {
+    TLE5012_ConfigResponsePhasePins();
     TLE5012_TwrDelay();
-    SPI_1LINE_RX(&hspi3);
     return HAL_SPI_Receive_DMA(&hspi3, (uint8_t *)tle5012_rx_buf, 2U);
 }
 
@@ -103,6 +138,7 @@ void TLE5012_Init(void)
     crc_error_count = 0U;
     is_busy = 0U;
 
+    TLE5012_ConfigCommandPhasePins();
     TLE5012_ReleaseCS();
 }
 
@@ -128,8 +164,8 @@ void TLE5012_StartRead(void)
     tle5012_tx_buf[0] = TLE5012_READ_CMD;
     memset(tle5012_rx_buf, 0, sizeof(tle5012_rx_buf));
 
+    TLE5012_ConfigCommandPhasePins();
     TLE5012_AssertCS();
-    SPI_1LINE_TX(&hspi3);
     status = HAL_SPI_Transmit_DMA(&hspi3, (uint8_t *)tle5012_tx_buf, 1U);
     if (status != HAL_OK) {
         TLE5012_HandleTransferError();
@@ -158,9 +194,12 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
     uint8_t safety_ok;
 
     TLE5012_ReleaseCS();
+    TLE5012_ConfigCommandPhasePins();
     is_busy = 0U;
 
     if (rx_buf == NULL) {
+        tle5012_sensor.status = 0U;
+        tle5012_sensor.reset_fault = 0U;
         tle5012_sensor.data_valid = 0U;
         tle5012_sensor.crc_error = 1U;
         tle5012_sensor.update_flag = 1U;
@@ -174,13 +213,15 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
 
     received_crc = (uint8_t)(safety_word & 0x00FFU);
     calculated_crc = TLE5012_CalculateCRC8(crc_words, 2U);
-    safety_ok = (((safety_word & TLE5012_SAFETY_SYSTEM_OK_MASK) != 0U) &&
+    tle5012_sensor.status = (uint8_t)(safety_word >> 8);
+    tle5012_sensor.reset_fault = ((safety_word & TLE5012_SAFETY_RESET_OK_MASK) == 0U) ? 1U : 0U;
+    safety_ok = (((safety_word & TLE5012_SAFETY_RESET_OK_MASK) != 0U) &&
+                 ((safety_word & TLE5012_SAFETY_SYSTEM_OK_MASK) != 0U) &&
                  ((safety_word & TLE5012_SAFETY_INTERFACE_OK_MASK) != 0U) &&
                  ((safety_word & TLE5012_SAFETY_ANGLE_OK_MASK) != 0U)) ? 1U : 0U;
 
     tle5012_sensor.raw_angle = raw_data & 0x7FFFU;
     tle5012_sensor.angle = (float)tle5012_sensor.raw_angle * (360.0f / 32768.0f);
-    tle5012_sensor.status = (uint8_t)((safety_word >> 8) & 0x7FU);
 
     if ((!safety_ok) || (received_crc != calculated_crc)) {
         tle5012_sensor.crc_error = 1U;

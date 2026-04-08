@@ -42,6 +42,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define FOC_EXT_SPI_POWERUP_DELAY_MS 20U
 
 /* USER CODE END PD */
 
@@ -111,6 +112,7 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
+  HAL_Delay(FOC_EXT_SPI_POWERUP_DELAY_MS);
   TLE5012_Init();
   
   /* 初始化FOC应用�? */
@@ -164,7 +166,7 @@ int main(void)
 
 	/* 仅给DRV8350S芯片上电用于寄存器配置/故障诊断，栅极仍保持关闭。 */
 	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
-	HAL_Delay(1);
+	HAL_Delay(2);
 											
 	DRV8350S_Config_t config;
 	DRV8350S_SetDefaultConfig(&config);

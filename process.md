@@ -224,3 +224,10 @@
 - Prevention: 保留 `test_build_system.py` 中关于 `GPIOC->MODER` 常量开销切换、禁止 `HAL_GPIO_Init()` 回到 `TIM1` 路径、以及 `Safety Word bit15` 必须进入 UART 上传的回归约束；后续若再改编码器 SPI/故障上报，必须重跑 `python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1` 和 `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`。
 - Commit: c8b7c0ba4d3be587121637e9d6d58a632a280415
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-08 23:40] Simulink Task 7 abc average-value plant
+- Problem: The Task 6 Simulink baseline still kept the motor electrical state entirely in dq coordinates, so the simulation could not expose real `ia/ib/ic` phase-current behavior even though the controller already had an observer and average-value bridge.
+- Resolution: Added Task 7 design and implementation docs plus red/green MATLAB verification scripts in the repo, then used the external `D:\matlab` upgrade flow to create `minimal_foc_controller_task7_abcplant.slx`. The new model rebuilds `plant` as an average-value SPMSM `abc` current model, rebuilds `feedback` to convert `ia/ib/ic` back into `id/iq` through Clarke/Park, keeps the existing observer and loop structure, and adds direct three-phase viewing/logging blocks.
+- Prevention: Before any future Simulink realism upgrade is called complete, run the red check proving the prior baseline lacks the new interface, then run `tools/simulink/check_task7_green.m` to verify ports, rewiring, successful batch simulation, and non-flat three-phase currents.
+- Commit: abab0238f0a8c3452d2da7e66c2000eec27cb443
+- Recurrence policy: Not allowed to happen again.

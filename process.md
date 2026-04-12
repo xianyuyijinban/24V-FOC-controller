@@ -259,3 +259,10 @@
 - Prevention: 之后每次上机验证都保留这条双快照流程：先用 `attach` 模式烧录，再抓一次复位后短延时快照和一次稳态快照；只有当两次快照都显示 `tle5012_rx_buf` 已脱离 `0x0000/0xffff` 异常模式，才能判定编码器链路真正修通。当前探针链路默认 `load` 的 reset 流程不稳定，后续继续台架调试时优先使用 `pyocd load -M attach`。
 - Commit: 21de43c9ea8c97de8373ca93f75f3efe42d2a7ce
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 17:16] 在线断点证实SPI软件时序已到位但两条总线都无人拉低回包
+- Problem: 仅凭稳态 `0xffff` 回包还不能排除“软件没有真正拉低片选/没有真正切换引脚模式”的可能性，特别是 `TLE5012` 的 3-wire DATA 线在 `PC11/PC12` 之间动态切换，`DRV8350S` 也需要同时满足 `DRV_EN` 高和 `nSCS` 低才能回数据。如果这些前提条件有任何一个没满足，继续怀疑板级会太早。
+- Resolution: 通过 `pyocd gdbserver + arm-none-eabi-gdb` 在函数入口打硬件断点，分别抓取 `TLE5012_HandleTxComplete()`、`TLE5012_ProcessData()` 和 `DRV8350S_DMA_CompleteCallback()` 时的 GPIO/SPI 寄存器状态。结果显示：`TLE5012` 命令相位时 `PA15(IDR/ODR)=0`、`PC11=input`、`PC12=AF`、`SPI3 CFG2=0x05420000`；响应相位时 `PA15` 仍保持低，`PC11=AF`、`PC12=input`、`SPI3 CFG2=0x05400000`，说明软件片选和 3-wire 方向切换都已实际生效。与此同时 `GPIOC IDR=0x00001c00`，即 `PC10/11/12` 全高，且 `tle5012_rx_buf=[0xffff,0xffff]`。`DRV8350S` 侧则确认 `PE14(DRV_EN)=1`、`PA4(nSCS)=0`、`txBuf=0x8000`、`rxBuf=0xffff`。这说明两条 SPI 链路在软件侧都已经把关键时序条件满足了，但外设侧仍没有把数据线拉出全高状态。
+- Prevention: 后续继续查 SPI 现场时，先抓函数入口寄存器证据，再决定是否改代码。对于本项目，若再遇到外设回包全高，必须先验证 `CS/EN` 电平、GPIO `MODER`、以及外设寄存器 `CFG2/SR` 是否已经进入预期事务相位；只有这些都正确后，才允许把问题归到器件供电、板级连线、焊接、时钟或外设自身状态上。
+- Commit: 01dae382516fae927bb0afb7023f8d9def8c70f2
+- Recurrence policy: Not allowed to happen again.

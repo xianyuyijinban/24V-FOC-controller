@@ -180,29 +180,45 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    if (sscanf(cmd, "CMD:VBUS_LIMIT,%f,%f", &f1, &f2) == 2) {
+        if ((g_foc_app.enable_pwm == 0U) &&
+            (g_foc_app.state != FOC_STATE_RUNNING) &&
+            (g_foc_app.state != FOC_STATE_PARAM_IDENTIFY)) {
+            FOC_App_SetVoltageThresholds(&g_foc_app, f1, f2);
+        }
+        return;
+    }
+
     if (strcmp(cmd, "CMD:CLEAR_FAULT") == 0) {
-        uint16_t fs1 = 0U, fs2 = 0U;
+        uint16_t fs1 = 0U, fs2 = 0U, ocp = 0U;
         uint8_t drv_fault_active = 1U;
         uint8_t encoder_ok;
         uint8_t vbus_ok;
 
         (void)DRV8350S_ClearFaults(&drv8350s);
 
+        FOC_App_RefreshTelemetry(&g_foc_app);
+
         if ((DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_FAULT_STATUS_1, &fs1) == 0) &&
-            (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) == 0)) {
+            (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) == 0) &&
+            (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_OCP_CTRL, &ocp) == 0)) {
             drv8350s.runtime.regFaultStatus1 = fs1;
             drv8350s.runtime.regVgsStatus2 = fs2;
+            drv8350s.runtime.regOcpCtrl = ocp;
+            drv8350s.runtime.spiError = 0U;
+            drv8350s.readReq.registerAddr = DRV8350S_REG_OCP_CTRL;
             DRV8350S_UpdateFaultState(&drv8350s);
             drv_fault_active = drv8350s.runtime.isFaultActive;
         } else {
             drv8350s.runtime.spiError = 1U;
+            drv8350s.readReq.registerAddr = DRV8350S_REG_OCP_CTRL;
             DRV8350S_UpdateFaultState(&drv8350s);
             drv_fault_active = drv8350s.runtime.isFaultActive;
         }
 
         encoder_ok = TLE5012_IsDataValid();
-        vbus_ok = (g_foc_app.Vbus >= FOC_UNDERVOLTAGE_THRESH) &&
-                  (g_foc_app.Vbus <= FOC_OVERVOLTAGE_THRESH);
+        vbus_ok = (g_foc_app.Vbus >= g_foc_app.protection.undervoltage_limit_v) &&
+                  (g_foc_app.Vbus <= g_foc_app.protection.overvoltage_limit_v);
 
         __disable_irq();
         if ((!drv_fault_active) && encoder_ok && vbus_ok) {
@@ -216,9 +232,9 @@ static void UART_CommandExecute(const char *cmd)
                 g_foc_app.fault_code = FOC_FAULT_DRV8350S;
             } else if (!encoder_ok) {
                 g_foc_app.fault_code = FOC_FAULT_ENCODER;
-            } else if (g_foc_app.Vbus > FOC_OVERVOLTAGE_THRESH) {
+            } else if (g_foc_app.Vbus > g_foc_app.protection.overvoltage_limit_v) {
                 g_foc_app.fault_code = FOC_FAULT_OVERVOLTAGE;
-            } else if (g_foc_app.Vbus < FOC_UNDERVOLTAGE_THRESH) {
+            } else if (g_foc_app.Vbus < g_foc_app.protection.undervoltage_limit_v) {
                 g_foc_app.fault_code = FOC_FAULT_UNDERVOLTAGE;
             }
         }

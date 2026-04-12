@@ -268,6 +268,7 @@ parser.feed_data(serial_data)
 | Set Speed | `CMD:SREF,speed` | Set speed target (rad/s) |
 | Set Position | `CMD:PREF,pos` | Set position target (rad) |
 | Identify | `CMD:IDENTIFY,1` | Start parameter identification |
+| Set Vbus Limits | `CMD:VBUS_LIMIT,uv,ov` | Update runtime undervoltage / overvoltage thresholds |
 | Clear Fault | `CMD:CLEAR_FAULT` | Clear fault status |
 | Set Current PI | `CMD:PI_CURRENT,kp,ki` | Set current loop PI |
 | Set Speed PI | `CMD:PI_SPEED,kp,ki` | Set speed loop PI |
@@ -280,6 +281,8 @@ Notes / 说明:
 - 上电后功率级默认锁定；需先发送 `CMD:UNLOCK,1`，再发送 `CMD:ENABLE,1` 或 `CMD:IDENTIFY,1`。
 - Before unlock, `CMD:ENABLE,1` and `CMD:IDENTIFY,1` are ignored by firmware.
 - 在解锁前，固件会忽略 `CMD:ENABLE,1` 与 `CMD:IDENTIFY,1`。
+- `CMD:VBUS_LIMIT,uv,ov` 仅允许在电机未运行、未处于参数识别、PWM 未使能时修改阈值。
+- `CMD:CLEAR_FAULT` 会先刷新实时 `Vbus`、编码器有效位和 `DRV8350S` 读回，再决定是否允许退出故障态。
 
 ### Local Demo Buttons / 板载演示按钮
 

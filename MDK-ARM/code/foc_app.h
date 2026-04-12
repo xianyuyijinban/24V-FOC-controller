@@ -38,10 +38,10 @@ extern "C" {
 /* 编码器 */
 #define FOC_ENCODER_RESOLUTION  65536       /* TLE5012 16位分辨率 */
 
-/* 保护阈值 */
-#define FOC_OVERCURRENT_THRESH      15.0f   /* 过流保护阈值 A */
-#define FOC_OVERVOLTAGE_THRESH      28.0f   /* 过压保护阈值 V */
-#define FOC_UNDERVOLTAGE_THRESH     18.0f   /* 欠压保护阈值 V */
+/* 保护阈值默认值 */
+#define FOC_DEFAULT_OVERCURRENT_LIMIT_A   15.0f   /* 过流保护阈值 A */
+#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   28.0f   /* 过压保护阈值 V */
+#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  18.0f   /* 欠压保护阈值 V */
 #define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */
 
@@ -76,6 +76,13 @@ typedef enum {
     FOC_MODE_POSITION,          /* 位置模式：位置环+速度环 */
 } FOC_ControlMode_t;
 
+/* 保护参数 */
+typedef struct {
+    float overcurrent_limit_a;
+    float overvoltage_limit_v;
+    float undervoltage_limit_v;
+} FOC_ProtectionConfig_t;
+
 /* FOC应用层句柄 */
 typedef struct {
     /* 核心FOC */
@@ -87,6 +94,7 @@ typedef struct {
     /* 参数识别 */
     MI_Handle_t mi_handle;
     RsOnlineEstimator_t rs_est;
+    FOC_ProtectionConfig_t protection;
     
     /* 状态 */
     FOC_AppState_t state;
@@ -144,10 +152,12 @@ void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);   /* 兼容接口：参
 void FOC_App_Enable(FOC_AppHandle_t *handle);
 void FOC_App_Disable(FOC_AppHandle_t *handle);
 void FOC_App_ResetMotionState(FOC_AppHandle_t *handle);
+void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
+void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
 
 /* 参数管理 */
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);

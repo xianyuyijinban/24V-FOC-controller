@@ -64,6 +64,7 @@ typedef enum {
     MI_ERR_J_NOT_CONVERGED,     /* J未收敛 */
     MI_ERR_CURRENT_TOO_LOW,     /* 测试电流太小 */
     MI_ERR_CURRENT_TOO_HIGH,    /* 测试电流太大 */
+    MI_ERR_ENCODER_INVALID,     /* 编码器反馈无效 */
     MI_ERR_TIMEOUT,             /* 超时 */
 } MI_ErrorCode_t;
 

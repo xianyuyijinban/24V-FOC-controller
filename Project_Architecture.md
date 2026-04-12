@@ -476,6 +476,12 @@ FOC_MODE_TORQUE = 0     // 力矩模式：直接控制Iq
 FOC_MODE_SPEED = 1      // 速度模式：速度环控制
 FOC_MODE_POSITION = 2   // 位置模式：位置环+速度环
 
+/* 运行时保护阈值 */
+FOC_ProtectionConfig_t
+    overcurrent_limit_a
+    overvoltage_limit_v
+    undervoltage_limit_v
+
 /* 故障代码 */
 FOC_FAULT_NONE, FOC_FAULT_OVERCURRENT, FOC_FAULT_OVERVOLTAGE,
 FOC_FAULT_UNDERVOLTAGE, FOC_FAULT_ENCODER, FOC_FAULT_DRV8350S, FOC_FAULT_PARAM_INVALID
@@ -491,10 +497,12 @@ void FOC_App_ParamIdentifyLoop(FOC_AppHandle_t *handle);// 兼容接口（识别
 /* 控制接口 */
 void FOC_App_Enable(FOC_AppHandle_t *handle);
 void FOC_App_Disable(FOC_AppHandle_t *handle);
+void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
+void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
 
 /* 参数管理 */
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);
@@ -572,6 +580,13 @@ float TLE5012_GetAngle(void);           // 获取角度值 (0-360度)
 extern TLE5012_Data_t tle5012_sensor;
 extern uint16_t tle5012_rx_buf[2];  // SPI接收缓冲区: Data + Safety
 ```
+
+- `FOC_App_Enable()` / `FOC_App_StartIdentify()` 在真正打开栅极前都会执行同一套功率级预检：
+  - 刷新实时 `Ia/Ib/Ic/Vbus`
+  - 检查运行时欠压/过压阈值
+  - 检查 `TLE5012_IsDataValid()`
+  - 阻塞读取 `DRV8350S` 的 `FAULT_STATUS_1 / VGS_STATUS_2 / OCP_CTRL`
+- 若识别状态机返回 `MI_ERR_ENCODER_INVALID`，应用层会把故障归类为 `FOC_FAULT_ENCODER`，而不是笼统的参数识别失败。
 
 ### 7. 栅极驱动模块 (drv8350s.h)
 
@@ -932,6 +947,7 @@ CMD:SREF,10.0         # 设置速度参考值 (rad/s)
 CMD:PREF,3.14159      # 设置位置参考值 (rad)
 CMD:IDENTIFY,1        # 启动参数识别
 CMD:IDENTIFY,0        # 中止参数识别
+CMD:VBUS_LIMIT,10.0,16.0  # 设置运行时欠压/过压阈值 (V)
 CMD:CLEAR_FAULT       # 清除故障
 CMD:PI_CURRENT,0.1,0.01   # 设置电流环PI
 CMD:PI_SPEED,0.5,0.1      # 设置速度环PI
@@ -940,6 +956,8 @@ CMD:PI_POS,1.0,0.01       # 设置位置环PI
 
 注：命令需以换行符结束（`\n` 或 `\r\n`），固件按行解析。
 上电默认关闭功率级，需下发 `CMD:ENABLE,1` 才会使能栅极驱动与PWM输出。
+- `CMD:VBUS_LIMIT` 仅允许在 `PWM` 未使能且状态不为 `RUNNING / PARAM_IDENTIFY` 时生效。
+- `CMD:CLEAR_FAULT` 先刷新实时 `Vbus`，再联合检查 `DRV8350S`、编码器有效位和运行时电压阈值，满足条件后才允许回到 `READY`。
 
 ### 上行数据 (MCU → PC)
 

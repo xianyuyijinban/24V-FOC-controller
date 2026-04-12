@@ -248,6 +248,61 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("Readback INVALID", uart_c)
         self.assertIn("DRV8350S_COMM_FAULT_BIT", uart_c)
 
+    def test_protection_thresholds_are_runtime_configurable(self):
+        foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("typedef struct {", foc_h)
+        self.assertIn("FOC_ProtectionConfig_t", foc_h)
+        self.assertIn("overcurrent_limit_a", foc_h)
+        self.assertIn("overvoltage_limit_v", foc_h)
+        self.assertIn("undervoltage_limit_v", foc_h)
+        self.assertIn("FOC_DEFAULT_OVERCURRENT_LIMIT_A", foc_h)
+        self.assertIn("FOC_DEFAULT_OVERVOLTAGE_LIMIT_V", foc_h)
+        self.assertIn("FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V", foc_h)
+        self.assertIn("FOC_ProtectionConfig_t protection;", foc_h)
+        self.assertIn("void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);", foc_h)
+        self.assertIn("handle->protection.overcurrent_limit_a", foc_c)
+        self.assertIn("handle->protection.overvoltage_limit_v", foc_c)
+        self.assertIn("handle->protection.undervoltage_limit_v", foc_c)
+        self.assertIn("CMD:VBUS_LIMIT,%f,%f", it_c)
+        self.assertIn("FOC_App_SetVoltageThresholds(&g_foc_app, f1, f2);", it_c)
+        self.assertNotIn("g_foc_app.Vbus >= FOC_UNDERVOLTAGE_THRESH", it_c)
+        self.assertNotIn("g_foc_app.Vbus <= FOC_OVERVOLTAGE_THRESH", it_c)
+
+    def test_precheck_refreshes_live_telemetry_before_enable_and_clear_fault(self):
+        foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);", foc_h)
+        self.assertIn("void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle)", foc_c)
+        self.assertIn("ADC_Sampling_GetData();", foc_c)
+        self.assertIn("handle->Vbus = adc->vbus;", foc_c)
+        self.assertIn("handle->Ia = adc->currentA;", foc_c)
+        self.assertIn("handle->Ib = adc->currentB;", foc_c)
+        self.assertIn("handle->Ic = adc->currentC;", foc_c)
+        self.assertIn("FOC_App_RefreshTelemetry(handle);", foc_c)
+        self.assertIn("static uint8_t FOC_App_PrecheckPowerStage", foc_c)
+        self.assertIn("FOC_App_PrecheckPowerStage(handle, &fault)", foc_c)
+        self.assertIn("FOC_App_RefreshTelemetry(&g_foc_app);", it_c)
+        self.assertNotIn("handle->Vbus = 24.0f;", foc_c)
+
+    def test_motor_identification_requires_valid_encoder_feedback(self):
+        mi_h = (ROOT / "MDK-ARM" / "code" / "motor_identify.h").read_text(encoding="utf-8")
+        mi_c = (ROOT / "MDK-ARM" / "code" / "motor_identify.c").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+
+        self.assertIn("MI_ERR_ENCODER_INVALID", mi_h)
+        self.assertIn('case MI_ERR_ENCODER_INVALID:    return "Encoder Invalid";', mi_c)
+        self.assertIn("static MI_ErrorCode_t MI_RequireValidEncoder(void)", mi_c)
+        self.assertGreaterEqual(mi_c.count("MI_RequireValidEncoder()"), 3)
+        self.assertIn("if (encoder_status != MI_ERR_NONE) {", mi_c)
+        self.assertIn("return encoder_status;", mi_c)
+        self.assertIn("mi_error == MI_ERR_ENCODER_INVALID", foc_c)
+        self.assertIn("handle->fault_code = FOC_FAULT_ENCODER;", foc_c)
+
     def test_tle5012_preserves_reset_watchdog_status_through_uart_fault_upload(self):
         tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
         tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")

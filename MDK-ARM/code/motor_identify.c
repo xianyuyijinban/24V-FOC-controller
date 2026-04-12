@@ -17,6 +17,7 @@
 /*==================== 私有函数声明 ====================*/
 static void MI_ResetStateData(MI_Handle_t *handle);
 static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state);
+static MI_ErrorCode_t MI_RequireValidEncoder(void);
 
 /**
  * @brief 初始化参数识别模块
@@ -170,9 +171,19 @@ const char* MI_GetErrorString(MI_ErrorCode_t error)
         case MI_ERR_J_NOT_CONVERGED:    return "J Not Converged";
         case MI_ERR_CURRENT_TOO_LOW:    return "Current Too Low";
         case MI_ERR_CURRENT_TOO_HIGH:   return "Current Too High";
+        case MI_ERR_ENCODER_INVALID:    return "Encoder Invalid";
         case MI_ERR_TIMEOUT:            return "Timeout";
         default:                        return "Unknown Error";
     }
+}
+
+static MI_ErrorCode_t MI_RequireValidEncoder(void)
+{
+    if (!TLE5012_IsDataValid()) {
+        return MI_ERR_ENCODER_INVALID;
+    }
+
+    return MI_ERR_NONE;
 }
 
 /**
@@ -349,6 +360,11 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
     float omega_e_target = MI_KE_TEST_SPEED_RPM * 2.0f * FOC_PI / 60.0f * pole_pairs;
     float elapsed = MI_GetElapsedTime(handle);
     float theta_mech_now, delta_theta, omega_mech, omega_e_meas;
+    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+
+    if (encoder_status != MI_ERR_NONE) {
+        return encoder_status;
+    }
 
     switch (*state) {
         case 0: /* 加速阶段 */
@@ -474,6 +490,11 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
     float *theta_mech_start = &handle->pn_theta_start;
     float *theta_elec_last = &handle->pn_elec_last;
     float elapsed = MI_GetElapsedTime(handle);
+    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+
+    if (encoder_status != MI_ERR_NONE) {
+        return encoder_status;
+    }
 
     switch (*state) {
         case 0: /* 初始化 */
@@ -579,6 +600,10 @@ MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle)
 
     /* 锁轴结束后读取机械角并反推出电角零位偏置 */
     {
+        MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+        if (encoder_status != MI_ERR_NONE) {
+            return encoder_status;
+        }
         float theta_mech = TLE5012_GetAngle() * MI_DEG2RAD;
         handle->param->theta_mech_zero = theta_mech;
         handle->param->theta_offset = FOC_AngleNormalize(-theta_mech * pole_pairs);

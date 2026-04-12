@@ -20,6 +20,7 @@ extern DRV8350S_Handle_t drv8350s;
 
 /* 私有函数前向声明 */
 static void FOC_App_UpdatePIParams(FOC_AppHandle_t *handle);
+static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault);
 static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 
 /**
@@ -34,9 +35,12 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->state = FOC_STATE_INIT;
     handle->fault_code = FOC_FAULT_NONE;
     handle->control_mode = FOC_MODE_SPEED;  /* 默认速度模式 */
+    handle->protection.overcurrent_limit_a = FOC_DEFAULT_OVERCURRENT_LIMIT_A;
+    handle->protection.overvoltage_limit_v = FOC_DEFAULT_OVERVOLTAGE_LIMIT_V;
+    handle->protection.undervoltage_limit_v = FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V;
     
     /* 初始化母线电压 */
-    handle->Vbus = 24.0f;
+    handle->Vbus = 0.0f;
     
     /* 初始化速度环PI控制器 */
     FOC_PI_Init(&handle->pi_speed, 0.1f, 0.01f, 10.0f, -10.0f);
@@ -70,10 +74,14 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
  */
 void FOC_App_MainLoop(FOC_AppHandle_t *handle)
 {
+    MI_ErrorCode_t mi_error = MI_ERR_NONE;
+
     if (handle->pending_disable) {
         handle->pending_disable = 0U;
         FOC_App_Disable(handle);
     }
+
+    FOC_App_RefreshTelemetry(handle);
 
     switch (handle->state) {
         case FOC_STATE_IDLE:
@@ -103,10 +111,18 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
                 handle->fault_code = FOC_FAULT_NONE;
                 handle->state = FOC_STATE_READY;
                 handle->enable_identify = 0;
-            } else if (MI_GetError(&handle->mi_handle) != MI_ERR_NONE) {
+            } else {
+                mi_error = MI_GetError(&handle->mi_handle);
+            }
+
+            if (mi_error != MI_ERR_NONE) {
                 /* 识别出错 */
                 FOC_App_Disable(handle);
-                handle->fault_code = FOC_FAULT_PARAM_INVALID;
+                if (mi_error == MI_ERR_ENCODER_INVALID) {
+                    handle->fault_code = FOC_FAULT_ENCODER;
+                } else {
+                    handle->fault_code = FOC_FAULT_PARAM_INVALID;
+                }
                 handle->state = FOC_STATE_FAULT;
                 handle->enable_identify = 0;
             }
@@ -115,17 +131,17 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
         case FOC_STATE_READY:
         case FOC_STATE_RUNNING:
             /* 检查故障 */
-            if (fabsf(handle->Ia) > FOC_OVERCURRENT_THRESH || 
-                fabsf(handle->Ib) > FOC_OVERCURRENT_THRESH ||
-                fabsf(handle->Ic) > FOC_OVERCURRENT_THRESH) {
+            if (fabsf(handle->Ia) > handle->protection.overcurrent_limit_a || 
+                fabsf(handle->Ib) > handle->protection.overcurrent_limit_a ||
+                fabsf(handle->Ic) > handle->protection.overcurrent_limit_a) {
                 handle->fault_code = FOC_FAULT_OVERCURRENT;
                 FOC_App_Disable(handle);
                 handle->state = FOC_STATE_FAULT;
-            } else if (handle->Vbus > FOC_OVERVOLTAGE_THRESH) {
+            } else if (handle->Vbus > handle->protection.overvoltage_limit_v) {
                 handle->fault_code = FOC_FAULT_OVERVOLTAGE;
                 FOC_App_Disable(handle);
                 handle->state = FOC_STATE_FAULT;
-            } else if (handle->Vbus < FOC_UNDERVOLTAGE_THRESH) {
+            } else if (handle->Vbus < handle->protection.undervoltage_limit_v) {
                 handle->fault_code = FOC_FAULT_UNDERVOLTAGE;
                 FOC_App_Disable(handle);
                 handle->state = FOC_STATE_FAULT;
@@ -434,7 +450,16 @@ void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle)
  */
 void FOC_App_Enable(FOC_AppHandle_t *handle)
 {
+    FOC_FaultCode_t fault = FOC_FAULT_NONE;
+
     if ((handle->state == FOC_STATE_READY) && handle->power_unlocked) {
+        if (!FOC_App_PrecheckPowerStage(handle, &fault)) {
+            handle->fault_code = fault;
+            handle->state = FOC_STATE_FAULT;
+            handle->enable_pwm = 0U;
+            return;
+        }
+
         /* 先上电驱动芯片，再开栅极，最后启动PWM */
         HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
         HAL_Delay(1);  /* 给DRV_EN上电留出稳定时间 */
@@ -492,6 +517,26 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
     if (handle->state == FOC_STATE_RUNNING || handle->state == FOC_STATE_PARAM_IDENTIFY) {
         handle->state = FOC_STATE_READY;
     }
+}
+
+void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle)
+{
+    ADC_Sampling_t *adc;
+
+    if (handle == NULL) {
+        return;
+    }
+
+    adc = ADC_Sampling_GetData();
+    if (adc == NULL) {
+        return;
+    }
+
+    handle->Ia = adc->currentA;
+    handle->Ib = adc->currentB;
+    handle->Ic = adc->currentC;
+    handle->Vbus = adc->vbus;
+    FOC_SetVbus(&handle->foc, handle->Vbus);
 }
 
 void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
@@ -562,6 +607,98 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
     /* 切换模式时清零积分，防止跳变 */
     handle->pi_pos.integral = 0.0f;
     handle->pi_speed.integral = 0.0f;
+}
+
+void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    if ((undervoltage <= 0.0f) || (overvoltage <= undervoltage)) {
+        return;
+    }
+
+    if ((handle->enable_pwm != 0U) ||
+        (handle->state == FOC_STATE_RUNNING) ||
+        (handle->state == FOC_STATE_PARAM_IDENTIFY)) {
+        return;
+    }
+
+    handle->protection.undervoltage_limit_v = undervoltage;
+    handle->protection.overvoltage_limit_v = overvoltage;
+}
+
+static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault)
+{
+    uint16_t fs1 = 0U;
+    uint16_t fs2 = 0U;
+    uint16_t ocp = 0U;
+
+    if (fault != NULL) {
+        *fault = FOC_FAULT_NONE;
+    }
+
+    if (handle == NULL) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_PARAM_INVALID;
+        }
+        return 0U;
+    }
+
+    FOC_App_RefreshTelemetry(handle);
+
+    if (handle->Vbus > handle->protection.overvoltage_limit_v) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_OVERVOLTAGE;
+        }
+        return 0U;
+    }
+
+    if (handle->Vbus < handle->protection.undervoltage_limit_v) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_UNDERVOLTAGE;
+        }
+        return 0U;
+    }
+
+    if (!TLE5012_IsDataValid()) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_ENCODER;
+        }
+        return 0U;
+    }
+
+    HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
+    HAL_Delay(1);
+
+    if ((DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_FAULT_STATUS_1, &fs1) != 0) ||
+        (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) != 0) ||
+        (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_OCP_CTRL, &ocp) != 0)) {
+        drv8350s.runtime.spiError = 1U;
+        drv8350s.readReq.registerAddr = DRV8350S_REG_OCP_CTRL;
+        DRV8350S_UpdateFaultState(&drv8350s);
+        if (fault != NULL) {
+            *fault = FOC_FAULT_DRV8350S;
+        }
+        return 0U;
+    }
+
+    drv8350s.runtime.regFaultStatus1 = fs1;
+    drv8350s.runtime.regVgsStatus2 = fs2;
+    drv8350s.runtime.regOcpCtrl = ocp;
+    drv8350s.runtime.spiError = 0U;
+    drv8350s.readReq.registerAddr = DRV8350S_REG_OCP_CTRL;
+    DRV8350S_UpdateFaultState(&drv8350s);
+
+    if (drv8350s.runtime.isFaultActive != 0U) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_DRV8350S;
+        }
+        return 0U;
+    }
+
+    return 1U;
 }
 
 /**
@@ -691,11 +828,21 @@ void FOC_App_SaveParam(FOC_AppHandle_t *handle)
  */
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
 {
+    FOC_FaultCode_t fault = FOC_FAULT_NONE;
+
     if (!handle->power_unlocked) {
         return;
     }
 
     if (handle->state == FOC_STATE_IDLE || handle->state == FOC_STATE_READY) {
+        if (!FOC_App_PrecheckPowerStage(handle, &fault)) {
+            handle->fault_code = fault;
+            handle->state = FOC_STATE_FAULT;
+            handle->enable_pwm = 0U;
+            handle->enable_identify = 0U;
+            return;
+        }
+
         /* 参数识别需要实际激励：确保功率级已上电并允许PWM输出 */
         if (!handle->enable_pwm) {
             HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);

@@ -238,3 +238,10 @@
 - Prevention: For every future bench session, preserve the `pyocd commander` snapshot routine against the exact runtime addresses/offsets before changing control logic, and require one reset-immediate plus one delayed snapshot so "instant fault" vs "fault after running" is not guessed from symptoms.
 - Commit: 88445e46352fb5182168faba5e5903d4bd86ec6d
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 16:26] TLE5012响应阶段事务模型与官方3-wire参考实现不一致
+- Problem: After narrowing the live failure to `SPI3/TLE5012`, the staged firmware flow was still using `HAL_SPI_Transmit_DMA(command)` followed by `HAL_SPI_Receive_DMA(data+safety)`. The Infineon reference library for 3-wire SSC does not do a receive-only second stage: it keeps `CS` low, waits `5 us`, flips the data-line drive direction, then clocks out the response by sending `0x0000` dummy words while receiving `Data + Safety`. On STM32H7, `HAL_SPI_Receive_DMA()` switches the peripheral to `2LINES_RXONLY`, which does not match that reference transaction model and is the most likely software root cause for the stable `0xffff/0xffff` replies.
+- Resolution: Pulled the Infineon `TLE5012-Magnetic-Angle-Sensor` reference library, traced `readFromSensor()` and the Arduino `spi3w` PAL, and confirmed that the command word/CRC assumptions in the current firmware are fine (`READ_SENSOR | REG_AVAL | SAFE_high = 0x8021`), while the response phase must be modeled as dummy-clocked transfer rather than pure receive-only DMA.
+- Prevention: Before changing the encoder transport again, keep the rule that any future `TLE5012` SSC refactor must be checked against the official 3-wire `sendReceive(command, 1, received, 2)` behavior, including the `5 us` trigger delay, data-line direction swap, and explicit dummy clocks for every returned word.
+- Commit: 56037dfc3776f870448f386381facc01c01249f8
+- Recurrence policy: Not allowed to happen again.

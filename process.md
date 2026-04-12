@@ -266,3 +266,10 @@
 - Prevention: 后续继续查 SPI 现场时，先抓函数入口寄存器证据，再决定是否改代码。对于本项目，若再遇到外设回包全高，必须先验证 `CS/EN` 电平、GPIO `MODER`、以及外设寄存器 `CFG2/SR` 是否已经进入预期事务相位；只有这些都正确后，才允许把问题归到器件供电、板级连线、焊接、时钟或外设自身状态上。
 - Commit: 01dae382516fae927bb0afb7023f8d9def8c70f2
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 19:24] 硬件返修后复测：TLE快照窗口改变但TLE/DRV断点回包仍为全高
+- Problem: 你反馈已经对硬件做了 debug，需要确认返修后现场是否真的改善。仅靠普通定时快照很容易把“缓冲区被清零等待下一次 DMA”误判成“总线读到 0x0000”，所以必须同时看稳态快照和函数入口断点。
+- Resolution: 重新用 `pyocd load -M attach` 验证当前固件仍在板上，然后重复了两组抓取。普通时间窗快照里，`tle5012_rx_buf` 从以前的稳态 `[0xffff, 0xffff]` 变成了两次都看到 `[0x0000, 0x0000]`，说明硬件调整确实改变了空闲窗口里的总线行为；但在 `TLE5012_ProcessData()` 入口重新下断点后，实际传给驱动处理的数据仍是 `tle5012_rx_buf=[0xffff,0xffff]`，而 `TLE5012_HandleTxComplete()` 时的 GPIO/SPI 状态与之前一致。`DRV8350S_DMA_CompleteCallback()` 断点也再次确认 `PE14(DRV_EN)=1`、`PA4(nSCS)=0`、`txBuf=0x8000`、`rxBuf=0xffff`。结论是：这次硬件返修改变了采样到的“窗口外观”，但没有改变两条 SPI 在有效回包时刻仍然读全高这一事实，尤其 `DRV8350S` 侧问题完全未改善。
+- Prevention: 后续台架复测不能只看定时快照，必须把“普通时间窗快照”和“驱动处理入口断点快照”配对保存；只有当入口断点处的 `tle5012_rx_buf` / `drv8350s.rxBuf[0]` 真正脱离 `0xffff`，才算外围器件开始有效驱动总线。对 `DRV8350S`，继续排查时优先验证 `EP/GND`、`VM/VDRAIN`、`VCP/CPH/CPL` 与 `DVDD` 电源链，而不是再先改 SPI 软件。
+- Commit: 34ede6f744fcda4cf7e5a89bcd4897e92673c8e9
+- Recurrence policy: Not allowed to happen again.

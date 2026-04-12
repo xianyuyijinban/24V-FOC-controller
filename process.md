@@ -260,6 +260,13 @@
 - Commit: 21de43c9ea8c97de8373ca93f75f3efe42d2a7ce
 - Recurrence policy: Not allowed to happen again.
 
+## [2026-04-12 20:18] DRV8350S无效SPI回包被误判为真实驱动故障
+- Problem: 基于当前台架固件 `a3e2c35fb05d71c9302b097add7ad1f61ace57a0` 的在线快照，系统运行时 `SPI1/DRV8350S` 仍稳定读回 `rxBuf=0xffff`、`regFaultStatus1=0x07ff`、`regVgsStatus2=0x07ff`、`regDriverCtrl=0x07ff`，且 `drv8350s.runtime.isFaultActive=1`、`faultFlags=0x00ff07ff`、`errorCount=0`。同时 `g_foc_app` 已处于 `FOC_STATE_FAULT + FOC_FAULT_DRV8350S`，说明当前主阻塞点不是 HAL SPI 报错，而是软件把明显无效的全高回包按真实 DRV 故障位解析，随后在 `main.c` 主循环里强制打进整机故障态。
+- Resolution: 重新核对了 [MDK-ARM/code/drv8350s.c](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\MDK-ARM\code\drv8350s.c) 与 [Core/Src/main.c](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\Core\Src\main.c) 的故障链路，并用 `pyocd commander` 在线读取 `g_foc_app` 与 `drv8350s.runtime` 的关键地址，确认当前路径是“无效 SPI 回包 -> `DRV8350S_ParseFaultStatus()` 置位 `isFaultActive` -> `main()` 把 `fault_code/state` 强制切到 `DRV8350S/FAULT`”。这次结论不涉及功能代码改动，只是把故障边界收敛到 `DRV8350S` 通信有效性判定模型。
+- Prevention: 后续处理 `DRV8350S` 故障链路时，必须先把“SPI 传输有效”与“DRV 自身故障位有效”分离，至少增加源码/回归约束，禁止 `0xffff` / `0x07ff` 这类明显无效读回直接映射成 `isFaultActive=1`；同时继续保留 `pyocd` 在线快照例程，先验证原始寄存器回包是否合法，再根据故障位讨论功率级保护。
+- Commit: a3e2c35fb05d71c9302b097add7ad1f61ace57a0
+- Recurrence policy: Not allowed to happen again.
+
 ## [2026-04-12 17:16] 在线断点证实SPI软件时序已到位但两条总线都无人拉低回包
 - Problem: 仅凭稳态 `0xffff` 回包还不能排除“软件没有真正拉低片选/没有真正切换引脚模式”的可能性，特别是 `TLE5012` 的 3-wire DATA 线在 `PC11/PC12` 之间动态切换，`DRV8350S` 也需要同时满足 `DRV_EN` 高和 `nSCS` 低才能回数据。如果这些前提条件有任何一个没满足，继续怀疑板级会太早。
 - Resolution: 通过 `pyocd gdbserver + arm-none-eabi-gdb` 在函数入口打硬件断点，分别抓取 `TLE5012_HandleTxComplete()`、`TLE5012_ProcessData()` 和 `DRV8350S_DMA_CompleteCallback()` 时的 GPIO/SPI 寄存器状态。结果显示：`TLE5012` 命令相位时 `PA15(IDR/ODR)=0`、`PC11=input`、`PC12=AF`、`SPI3 CFG2=0x05420000`；响应相位时 `PA15` 仍保持低，`PC11=AF`、`PC12=input`、`SPI3 CFG2=0x05400000`，说明软件片选和 3-wire 方向切换都已实际生效。与此同时 `GPIOC IDR=0x00001c00`，即 `PC10/11/12` 全高，且 `tle5012_rx_buf=[0xffff,0xffff]`。`DRV8350S` 侧则确认 `PE14(DRV_EN)=1`、`PA4(nSCS)=0`、`txBuf=0x8000`、`rxBuf=0xffff`。这说明两条 SPI 链路在软件侧都已经把关键时序条件满足了，但外设侧仍没有把数据线拉出全高状态。
@@ -272,4 +279,11 @@
 - Resolution: 重新用 `pyocd load -M attach` 验证当前固件仍在板上，然后重复了两组抓取。普通时间窗快照里，`tle5012_rx_buf` 从以前的稳态 `[0xffff, 0xffff]` 变成了两次都看到 `[0x0000, 0x0000]`，说明硬件调整确实改变了空闲窗口里的总线行为；但在 `TLE5012_ProcessData()` 入口重新下断点后，实际传给驱动处理的数据仍是 `tle5012_rx_buf=[0xffff,0xffff]`，而 `TLE5012_HandleTxComplete()` 时的 GPIO/SPI 状态与之前一致。`DRV8350S_DMA_CompleteCallback()` 断点也再次确认 `PE14(DRV_EN)=1`、`PA4(nSCS)=0`、`txBuf=0x8000`、`rxBuf=0xffff`。结论是：这次硬件返修改变了采样到的“窗口外观”，但没有改变两条 SPI 在有效回包时刻仍然读全高这一事实，尤其 `DRV8350S` 侧问题完全未改善。
 - Prevention: 后续台架复测不能只看定时快照，必须把“普通时间窗快照”和“驱动处理入口断点快照”配对保存；只有当入口断点处的 `tle5012_rx_buf` / `drv8350s.rxBuf[0]` 真正脱离 `0xffff`，才算外围器件开始有效驱动总线。对 `DRV8350S`，继续排查时优先验证 `EP/GND`、`VM/VDRAIN`、`VCP/CPH/CPL` 与 `DVDD` 电源链，而不是再先改 SPI 软件。
 - Commit: 34ede6f744fcda4cf7e5a89bcd4897e92673c8e9
+- Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 21:08] DRV8350S全高回包改为通信故障归因并完成板上复测
+- Problem: `DRV8350S` 的 `SPI1` 回包在台架上仍然稳定为 `0xffff/0x07ff`，但固件之前会把这些全高值展开成“VDS过流 + VGS故障”等真实驱动故障位，导致上位机看到误导性故障原因，`CMD:CLEAR_FAULT` 也会继续按假故障位复位失败。
+- Resolution: 在 [MDK-ARM/code/drv8350s.h](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\MDK-ARM\code\drv8350s.h) / [MDK-ARM/code/drv8350s.c](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\MDK-ARM\code\drv8350s.c) 中新增 `DRV8350S_COMM_FAULT_BIT`、`commFaultActive/commValidated/lastRxFrame` 和统一的 `DRV8350S_UpdateFaultState()`，把原始 `0xffff` 读回与 `OCP_CTRL` 配置回读校验一起作为“通信无效”判断，只有通信已验证通过时才解析真实 DRV 故障位；同步更新 [Core/Src/stm32h7xx_it.c](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\Core\Src\stm32h7xx_it.c) 的 `CMD:CLEAR_FAULT` 路径，以及 [MDK-ARM/code/uart_upload.h](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\MDK-ARM\code\uart_upload.h) / [MDK-ARM/code/uart_upload.c](C:\Users\xiangyu\24V_FOC_Controller_audit_20260222\MDK-ARM\code\uart_upload.c) 的上传文本，让上位机明确看到 `DRV SPI readback invalid` 和最后一帧原始回读。新固件烧录后，复位 `150 ms / 1500 ms` 双快照都显示 `faultFlags=0x80000000`、`isFaultActive=1`、`commFaultActive=1`、`commValidated=0`、`lastRxFrame=0xffff`，不再出现旧的 `0x00ff07ff` 假功率级故障展开。
+- Prevention: 保留 `test_build_system.py` 中新增的通信归因与 UART 上传契约，并在每次修改 `drv8350s*`、`stm32h7xx_it.c` 或 `uart_upload*` 后重跑 `python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1`，再用 `pyocd` 做一次复位后短延时和稳态双快照，确认全高回包只落成 `DRV8350S_COMM_FAULT_BIT`，不再回归成假过流/假栅极故障。
+- Commit: b821d58bf7c9a361db24f79be376123984c12332
 - Recurrence policy: Not allowed to happen again.

@@ -31,7 +31,7 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("void TLE5012_HandleTransferError(void)", tle_c)
         self.assertIn("TLE5012_HandleTransferError();", it_c)
 
-    def test_tle5012_uses_three_wire_staged_transfer_with_constant_time_data_line_switching(self):
+    def test_tle5012_uses_three_wire_staged_transfer_with_dummy_clocked_response(self):
         spi_c = (ROOT / "Core" / "Src" / "spi.c").read_text(encoding="utf-8")
         tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")
         tle_c = (ROOT / "MDK-ARM" / "code" / "tle5012.c").read_text(encoding="utf-8")
@@ -39,9 +39,10 @@ class TestBuildSystemConsistency(unittest.TestCase):
 
         self.assertIn("hspi3.Init.Direction = SPI_DIRECTION_2LINES;", spi_c)
         self.assertIn("void TLE5012_HandleTxComplete(void);", tle_h)
+        self.assertIn("static uint16_t tle5012_rx_dummy_buf[2];", tle_c)
         self.assertIn("HAL_SPI_Transmit_DMA(&hspi3,", tle_c)
-        self.assertIn("HAL_SPI_Receive_DMA(&hspi3,", tle_c)
-        self.assertNotIn("HAL_SPI_TransmitReceive_DMA(&hspi3", tle_c)
+        self.assertNotIn("HAL_SPI_Receive_DMA(&hspi3,", tle_c)
+        self.assertIn("HAL_SPI_TransmitReceive_DMA(&hspi3,", tle_c)
         self.assertNotIn("SPI_1LINE_TX(&hspi3);", tle_c)
         self.assertNotIn("SPI_1LINE_RX(&hspi3);", tle_c)
         self.assertIn("static void TLE5012_ConfigCommandPhasePins(void)", tle_c)
@@ -58,8 +59,8 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("crc_words[1] = raw_data;", tle_c)
         self.assertIn("TLE5012_CalculateCRC8(crc_words, 2U);", tle_c)
         self.assertIn("void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)", it_c)
-        self.assertIn("void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)", it_c)
         self.assertIn("TLE5012_HandleTxComplete();", it_c)
+        self.assertIn("if (hspi == &hspi3) {", it_c)
         self.assertIn("TLE5012_ProcessData(tle5012_rx_buf);", it_c)
 
     def test_drv8350_uses_single_frame_reads_and_keeps_diagnostics_powered(self):

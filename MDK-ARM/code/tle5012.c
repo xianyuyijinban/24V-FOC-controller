@@ -27,6 +27,7 @@ static HAL_StatusTypeDef TLE5012_StartRxPhase(void);
 /* 私有变量 */
 static uint8_t is_busy = 0U;
 static uint16_t tle5012_tx_buf[1];
+static uint16_t tle5012_rx_dummy_buf[2];
 uint16_t tle5012_rx_buf[2];
 
 /* CRC错误计数和超时保护 */
@@ -127,12 +128,16 @@ static HAL_StatusTypeDef TLE5012_StartRxPhase(void)
 {
     TLE5012_ConfigResponsePhasePins();
     TLE5012_TwrDelay();
-    return HAL_SPI_Receive_DMA(&hspi3, (uint8_t *)tle5012_rx_buf, 2U);
+    return HAL_SPI_TransmitReceive_DMA(&hspi3,
+                                       (uint8_t *)tle5012_rx_dummy_buf,
+                                       (uint8_t *)tle5012_rx_buf,
+                                       2U);
 }
 
 void TLE5012_Init(void)
 {
     memset(tle5012_tx_buf, 0, sizeof(tle5012_tx_buf));
+    memset(tle5012_rx_dummy_buf, 0, sizeof(tle5012_rx_dummy_buf));
     memset(tle5012_rx_buf, 0, sizeof(tle5012_rx_buf));
     memset(&tle5012_sensor, 0, sizeof(tle5012_sensor));
     crc_error_count = 0U;
@@ -162,6 +167,7 @@ void TLE5012_StartRead(void)
     is_busy = 1U;
     busy_start_time = HAL_GetTick();
     tle5012_tx_buf[0] = TLE5012_READ_CMD;
+    memset(tle5012_rx_dummy_buf, 0, sizeof(tle5012_rx_dummy_buf));
     memset(tle5012_rx_buf, 0, sizeof(tle5012_rx_buf));
 
     TLE5012_ConfigCommandPhasePins();

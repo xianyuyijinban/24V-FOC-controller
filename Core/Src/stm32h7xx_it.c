@@ -668,6 +668,8 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
             default:
                 break;
         }
+    } else if (hspi == &hspi3) {
+        TLE5012_ProcessData(tle5012_rx_buf);
     }
 }
 
@@ -680,9 +682,7 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi == &hspi3) {
-        TLE5012_ProcessData(tle5012_rx_buf);
-    }
+    (void)hspi;
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)

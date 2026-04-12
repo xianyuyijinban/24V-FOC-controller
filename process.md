@@ -287,3 +287,10 @@
 - Prevention: 保留 `test_build_system.py` 中新增的通信归因与 UART 上传契约，并在每次修改 `drv8350s*`、`stm32h7xx_it.c` 或 `uart_upload*` 后重跑 `python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\\build_test.ps1`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\\build.ps1`，再用 `pyocd` 做一次复位后短延时和稳态双快照，确认全高回包只落成 `DRV8350S_COMM_FAULT_BIT`，不再回归成假过流/假栅极故障。
 - Commit: b821d58bf7c9a361db24f79be376123984c12332
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 21:12] 运行时保护阈值与识别前预检闭环
+- Problem: 固件仍把欠压/过压/过流阈值写死在 `foc_app.h` 宏里，`IDLE/READY/FAULT` 阶段也不会刷新实时 `Vbus`，导致上位机无法按 12V 台架条件调整阈值，且使能/清故障可能基于占位电压 `24.0V` 做出错误判断。与此同时，电机识别阶段直接使用 `TLE5012_GetAngle()`，在编码器数据无效时仍可能继续计算极对数、Ke 和零位偏置。
+- Resolution: 在 `foc_app` 中新增运行时 `FOC_ProtectionConfig_t`、`FOC_App_RefreshTelemetry()` 和 `FOC_App_PrecheckPowerStage()`，让 `Enable/StartIdentify/CLEAR_FAULT` 都先刷新实时 `Ia/Ib/Ic/Vbus` 并联合检查欠压/过压、编码器有效位和 `DRV8350S` 阻塞读回；新增 `CMD:VBUS_LIMIT,uv,ov` 仅在电机未工作时修改欠压/过压阈值；识别状态机新增 `MI_ERR_ENCODER_INVALID` 并在应用层映射为 `FOC_FAULT_ENCODER`。同步更新 `README.md`、`Project_Architecture.md` 和 `test_build_system.py`，并完成 `pytest + build_test + build` 验证。
+- Prevention: 保留 `test_protection_thresholds_are_runtime_configurable`、`test_precheck_refreshes_live_telemetry_before_enable_and_clear_fault`、`test_motor_identification_requires_valid_encoder_feedback` 三条源码约束；后续凡是改 `foc_app*`、`motor_identify*`、`stm32h7xx_it.c` 或上位机命令表，必须重跑 `python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，并确保 `Enable/Identify/CLEAR_FAULT` 仍只基于实时遥测做决策。
+- Commit: 201fd79662289f9c32cb42648f1713f20df2e040
+- Recurrence policy: Not allowed to happen again.

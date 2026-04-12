@@ -218,6 +218,13 @@
 - Commit: f43ebd6a3f375e3d35cf3ca80804bbc83282d48d
 - Recurrence policy: Not allowed to happen again.
 
+## [2026-04-12 21:54] CMSIS-DAP台架复核确认两路SPI仍为全高回包
+- Problem: 继续烧录调试时，板上没有接 UART/USB 数据链路，必须改走 SWD 观测。此前如果只看“无串口输出”，容易误判为固件没跑起来；同时需要重新确认当前板上是否真的是最新镜像，以及 SPI1/SPI3 的现场故障是否仍然存在。
+- Resolution: 使用 `CMSIS-DAP + pyOCD` 重新识别探针、用当前 `24V FOC Controller.axf` 重新烧录，并在无 `nRESET` 条件下改用 `attach` 模式附着调试。软件复位后分时读取 `g_foc_app`、`drv8350s`、`tle5012_sensor` 的实时值，确认固件稳定运行但持续停在 `FOC_STATE_FAULT + FOC_FAULT_DRV8350S`，`Vbus≈11.73V`。同时再次抓到 `DRV8350S` 读回 `FAULT1/VGS2/OCP = 0x07FF`、`lastRx=0xFFFF`、`commFault=1`，以及 `TLE5012` 读回 `raw=0x7FFF`、`status=0xFF`、`crc_error=1`、`data_valid=0`。结合控制板网表中 `MISO` 由 `R34=4.7K` 上拉到 `VCC` 的事实，可确认当前两条 SPI 链路都仍然表现为“外设未有效驱动回包，总线只读到高电平”，而不是 UART 或主时钟问题。
+- Prevention: 今后在没有串口链路的台架调试里，先用 SWD 重新烧录当前镜像，再用 `attach` 采样 `g_foc_app/drv8350s/tle5012_sensor`，不要把“无串口输出”等同于“固件未启动”。如果再次看到 `DRV8350S=0x07FF/0xFFFF` 或 `TLE5012=0x7FFF/0xFF`，优先回到片外供电、连线、片选、连接器/编码器板，而不是先怀疑 UART 或控制环软件。
+- Commit: 627242bcd4ca1d655f01a92635a0abbfd0595ec3
+- Recurrence policy: Not allowed to happen again.
+
 ## [2026-04-08 21:54] TLE5012 ISR时序与Safety Reset可观测性修复
 - Problem: `TLE5012` 在 `TIM1` 高优先级路径里通过 `HAL_GPIO_Init()` 反复重配 `PC11/PC12`，把编码器数据线方向切换变成了高开销 HAL 路径；同时 `Safety Word bit15`（编码器复位/看门狗异常）在驱动里被掩掉，UART 也无法把这个故障原因上传给上位机。
 - Resolution: 将 `tle5012.c` 的命令/响应阶段切换改为直接修改 `GPIOC->MODER`，把方向切换收敛为常量级寄存器写；保留完整 `Safety Word` 高8位到 `tle5012_sensor.status`，新增 `reset_fault` 标志，并在 `uart_upload` 的正常/故障文本里追加 `Safety` 与 `Reset` 诊断字段。同步更新 `README.md`、`Project_Architecture.md` 和源码约束测试。

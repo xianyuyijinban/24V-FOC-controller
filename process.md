@@ -231,3 +231,10 @@
 - Prevention: Before any future Simulink realism upgrade is called complete, run the red check proving the prior baseline lacks the new interface, then run `tools/simulink/check_task7_green.m` to verify ports, rewiring, successful batch simulation, and non-flat three-phase currents.
 - Commit: abab0238f0a8c3452d2da7e66c2000eec27cb443
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 16:12] Live encoder bench snapshot still shows all-high SSC replies
+- Problem: With `CMSIS-DAP` attached and the current firmware baseline running on hardware, live SWD snapshots still show the encoder SSC path returning invalid all-high data. At both `150 ms` and `1500 ms` after reset, `tle5012_rx_buf = [0xffff, 0xffff]`, `tle5012_sensor.raw_angle = 0x7fff`, `status = 0x7f`, `reset_fault = 1`, `crc_error = 1`, and `data_valid = 0`. In the same snapshots the application is already in `FOC_STATE_FAULT + FOC_FAULT_DRV8350S`, while `DRV8350S` runtime registers remain `0x07ff` and `faultFlags = 0x00ff07ff`.
+- Resolution: Rebuilt the Keil project, reattached over `CMSIS-DAP`, brought up `pyocd` for scripted SWD access, and captured repeatable runtime snapshots from `tle5012_rx_buf`, `tle5012_sensor`, `drv8350s.runtime`, and `g_foc_app` without changing firmware. This confirms the bench blocker is still the live `SPI3/TLE5012` and `SPI1/DRV8350S` data path, not a host-side UART visibility issue.
+- Prevention: For every future bench session, preserve the `pyocd commander` snapshot routine against the exact runtime addresses/offsets before changing control logic, and require one reset-immediate plus one delayed snapshot so "instant fault" vs "fault after running" is not guessed from symptoms.
+- Commit: 88445e46352fb5182168faba5e5903d4bd86ec6d
+- Recurrence policy: Not allowed to happen again.

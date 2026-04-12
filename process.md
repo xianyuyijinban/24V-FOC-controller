@@ -252,3 +252,10 @@
 - Prevention: 保留 `test_tle5012_uses_three_wire_staged_transfer_with_dummy_clocked_response`，并在每次修改 `tle5012.c` / `stm32h7xx_it.c` 后至少重跑 `python -m pytest test_build_system.py -q -k tle5012`、`python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1` 和 `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，避免再把 TLE5012 响应相位退回纯接收模式或挂错 DMA 完成回调。
 - Commit: 63b265ccf6f8a6ed408a3d3bb0c9dc57440048d8
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 17:05] Dummy-clock修复已上板但TLE5012稳态仍回全高
+- Problem: 新的 dummy-clock `SPI3/TLE5012` 固件已经重新编译并成功烧录到板上，但上机快照显示问题没有完全消失。复位后约 `150 ms` 抓到 CPU 停在 `HAL_SPI_IRQHandler`，此时 `tle5012_rx_buf = [0x0000, 0x0000]`，说明编码器事务正处在早期处理中；继续运行到约 `1500 ms` 后再次抓取，`tle5012_rx_buf = [0xffff, 0xffff]`，`tle5012_sensor = { angle≈359.99°, raw_angle=0x7fff, status=0xff, reset_fault=0, crc_error=1, update_flag=1, data_valid=0 }`。同时 `g_foc_app.state=5`、`fault_code=5`、`power_unlocked=1`、`Vbus=24.0V`，以及 `DRV8350S regFaultStatus1/regVgsStatus2=0x07ff`、`faultFlags=0x00ff07ff`，说明这次修复已经真实运行在板上，但编码器和驱动两条 SPI 链路在稳态仍然都表现为“读到高电平”。
+- Resolution: 使用 `pyocd load -M attach -t stm32h743xx` 成功烧录 [build/gcc/24V_FOC_Controller.elf](C:/Users/xiangyu/24V_FOC_Controller_audit_20260222/build/gcc/24V_FOC_Controller.elf)，避开了当前探针上 `safe_reset_and_halt` 的断言失败；随后通过两次 `pyocd commander` 复位/运行/暂停快照，确认“dummy-clock 代码已上板”与“稳态回包仍全高”这两个事实同时成立，排除了“只是没烧进去旧固件”的可能性。
+- Prevention: 之后每次上机验证都保留这条双快照流程：先用 `attach` 模式烧录，再抓一次复位后短延时快照和一次稳态快照；只有当两次快照都显示 `tle5012_rx_buf` 已脱离 `0x0000/0xffff` 异常模式，才能判定编码器链路真正修通。当前探针链路默认 `load` 的 reset 流程不稳定，后续继续台架调试时优先使用 `pyocd load -M attach`。
+- Commit: 21de43c9ea8c97de8373ca93f75f3efe42d2a7ce
+- Recurrence policy: Not allowed to happen again.

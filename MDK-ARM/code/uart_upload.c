@@ -115,6 +115,9 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->ocpCtrl = s_drvHandle->runtime.regOcpCtrl;
     packet->faultFlags = s_drvHandle->runtime.faultFlags;
     packet->isFaultActive = s_drvHandle->runtime.isFaultActive;
+    packet->drvCommFaultActive = s_drvHandle->runtime.commFaultActive;
+    packet->drvCommValidated = s_drvHandle->runtime.commValidated;
+    packet->drvLastRxFrame = s_drvHandle->runtime.lastRxFrame;
 
     /* 从 FOC 应用层获取数据 - 新增 */
     packet->Id = g_foc_app.foc.Idq.d;
@@ -182,6 +185,10 @@ static int16_t DrvUart_FormatNormal(const DrvUart_DataPacket_t* packet, uint8_t*
     APPEND_FMT("  FAULT1: 0x%04X\r\n", packet->faultStatus1);
     APPEND_FMT("  VGS2:   0x%04X\r\n", packet->vgsStatus2);
     APPEND_FMT("  Status: %s\r\n", packet->isFaultActive ? ">>> FAULT <<<" : "Normal");
+    APPEND_FMT("  Comm:   %s\r\n",
+               packet->drvCommFaultActive ? "Readback INVALID" :
+               (packet->drvCommValidated ? "Validated" : "Checking"));
+    APPEND_FMT("  RawSPI: 0x%04X\r\n", packet->drvLastRxFrame);
 
     /* FOC 控制数据 - 新增 */
     APPEND_FMT("\r\n[FOC Control]\r\n");
@@ -261,49 +268,61 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     APPEND_FMT("  Safety:   0x%02X\r\n", packet->encoderSafetyStatus);
     APPEND_FMT("  Reset:    %s\r\n\r\n", packet->encoderResetFault ? "FAULT!" : "OK");
     
-    /* DRV8350S 故障详情 */
-    APPEND_FMT("[DRV8350S Fault Details]\r\n");
-    APPEND_FMT("  FAULT1: 0x%04X | VGS2: 0x%04X\r\n\r\n", fs1, vs2);
-    
-    /* FAULT_STATUS_1 故障 */
-    if (fs1 & (1U << 10))
-        APPEND_FMT("  [FAULT] General Fault\r\n");
-    if (fs1 & (1U << 9))
-        APPEND_FMT("  [CRIT]  VDS Overcurrent!\r\n");
-    if (fs1 & (1U << 8))
-        APPEND_FMT("  [CRIT]  Gate Drive Fault!\r\n");
-    if (fs1 & (1U << 7))
-        APPEND_FMT("  [CRIT]  Undervoltage Lockout!\r\n");
-    if (fs1 & (1U << 6))
-        APPEND_FMT("  [CRIT]  Overtemperature Shutdown!\r\n");
-    
-    /* VDS 过流相别 */
-    if (fs1 & 0x003F) {
-        APPEND_FMT("\r\n  VDS OCP Phase:\r\n");
-        if (fs1 & (1U << 5)) APPEND_FMT("    - A High-Side\r\n");
-        if (fs1 & (1U << 4)) APPEND_FMT("    - A Low-Side\r\n");
-        if (fs1 & (1U << 3)) APPEND_FMT("    - B High-Side\r\n");
-        if (fs1 & (1U << 2)) APPEND_FMT("    - B Low-Side\r\n");
-        if (fs1 & (1U << 1)) APPEND_FMT("    - C High-Side\r\n");
-        if (fs1 & (1U << 0)) APPEND_FMT("    - C Low-Side\r\n");
-    }
-    
-    /* VGS_STATUS_2 故障 */
-    /* Note: DRV8350S does NOT have CSA, Bit 10-8 are Reserved */
-    if (vs2 & (1U << 7))
-        APPEND_FMT("  [WARN]  Overtemperature Warning\r\n");
-    if (vs2 & (1U << 6))
-        APPEND_FMT("  [WARN]  Gate Drive UVLO\r\n");
-    
-    /* VGS 故障相别 */
-    if (vs2 & 0x003F) {
-        APPEND_FMT("\r\n  VGS Fault Phase:\r\n");
-        if (vs2 & (1U << 5)) APPEND_FMT("    - A High-Side\r\n");
-        if (vs2 & (1U << 4)) APPEND_FMT("    - A Low-Side\r\n");
-        if (vs2 & (1U << 3)) APPEND_FMT("    - B High-Side\r\n");
-        if (vs2 & (1U << 2)) APPEND_FMT("    - B Low-Side\r\n");
-        if (vs2 & (1U << 1)) APPEND_FMT("    - C High-Side\r\n");
-        if (vs2 & (1U << 0)) APPEND_FMT("    - C Low-Side\r\n");
+    APPEND_FMT("[DRV8350S Communication]\r\n");
+    APPEND_FMT("  Comm:   %s\r\n",
+               packet->drvCommFaultActive ? "Readback INVALID" :
+               (packet->drvCommValidated ? "Validated" : "Checking"));
+    APPEND_FMT("  RawSPI: 0x%04X\r\n", packet->drvLastRxFrame);
+    APPEND_FMT("  CTRL:   0x%04X | OCP: 0x%04X\r\n\r\n", packet->driverCtrl, packet->ocpCtrl);
+
+    if (packet->faultFlags & DRV8350S_COMM_FAULT_BIT) {
+        APPEND_FMT("  [COMM]  SPI readback invalid; DRV SDO may be Hi-Z or bus timing is still wrong.\r\n");
+        APPEND_FMT("  FAULT1: 0x%04X | VGS2: 0x%04X\r\n\r\n", fs1, vs2);
+    } else {
+        /* DRV8350S 故障详情 */
+        APPEND_FMT("[DRV8350S Fault Details]\r\n");
+        APPEND_FMT("  FAULT1: 0x%04X | VGS2: 0x%04X\r\n\r\n", fs1, vs2);
+        
+        /* FAULT_STATUS_1 故障 */
+        if (fs1 & (1U << 10))
+            APPEND_FMT("  [FAULT] General Fault\r\n");
+        if (fs1 & (1U << 9))
+            APPEND_FMT("  [CRIT]  VDS Overcurrent!\r\n");
+        if (fs1 & (1U << 8))
+            APPEND_FMT("  [CRIT]  Gate Drive Fault!\r\n");
+        if (fs1 & (1U << 7))
+            APPEND_FMT("  [CRIT]  Undervoltage Lockout!\r\n");
+        if (fs1 & (1U << 6))
+            APPEND_FMT("  [CRIT]  Overtemperature Shutdown!\r\n");
+        
+        /* VDS 过流相别 */
+        if (fs1 & 0x003F) {
+            APPEND_FMT("\r\n  VDS OCP Phase:\r\n");
+            if (fs1 & (1U << 5)) APPEND_FMT("    - A High-Side\r\n");
+            if (fs1 & (1U << 4)) APPEND_FMT("    - A Low-Side\r\n");
+            if (fs1 & (1U << 3)) APPEND_FMT("    - B High-Side\r\n");
+            if (fs1 & (1U << 2)) APPEND_FMT("    - B Low-Side\r\n");
+            if (fs1 & (1U << 1)) APPEND_FMT("    - C High-Side\r\n");
+            if (fs1 & (1U << 0)) APPEND_FMT("    - C Low-Side\r\n");
+        }
+        
+        /* VGS_STATUS_2 故障 */
+        /* Note: DRV8350S does NOT have CSA, Bit 10-8 are Reserved */
+        if (vs2 & (1U << 7))
+            APPEND_FMT("  [WARN]  Overtemperature Warning\r\n");
+        if (vs2 & (1U << 6))
+            APPEND_FMT("  [WARN]  Gate Drive UVLO\r\n");
+        
+        /* VGS 故障相别 */
+        if (vs2 & 0x003F) {
+            APPEND_FMT("\r\n  VGS Fault Phase:\r\n");
+            if (vs2 & (1U << 5)) APPEND_FMT("    - A High-Side\r\n");
+            if (vs2 & (1U << 4)) APPEND_FMT("    - A Low-Side\r\n");
+            if (vs2 & (1U << 3)) APPEND_FMT("    - B High-Side\r\n");
+            if (vs2 & (1U << 2)) APPEND_FMT("    - B Low-Side\r\n");
+            if (vs2 & (1U << 1)) APPEND_FMT("    - C High-Side\r\n");
+            if (vs2 & (1U << 0)) APPEND_FMT("    - C Low-Side\r\n");
+        }
     }
 
     APPEND_FMT("\r\n[ADC Sampling]\r\n");

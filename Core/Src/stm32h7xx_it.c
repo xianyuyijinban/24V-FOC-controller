@@ -190,10 +190,14 @@ static void UART_CommandExecute(const char *cmd)
 
         if ((DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_FAULT_STATUS_1, &fs1) == 0) &&
             (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) == 0)) {
-            drv_fault_active = (((fs1 & 0x07FFU) != 0U) || ((fs2 & 0x00FFU) != 0U)) ? 1U : 0U;
             drv8350s.runtime.regFaultStatus1 = fs1;
             drv8350s.runtime.regVgsStatus2 = fs2;
-            drv8350s.runtime.isFaultActive = drv_fault_active;
+            DRV8350S_UpdateFaultState(&drv8350s);
+            drv_fault_active = drv8350s.runtime.isFaultActive;
+        } else {
+            drv8350s.runtime.spiError = 1U;
+            DRV8350S_UpdateFaultState(&drv8350s);
+            drv_fault_active = drv8350s.runtime.isFaultActive;
         }
 
         encoder_ok = TLE5012_IsDataValid();

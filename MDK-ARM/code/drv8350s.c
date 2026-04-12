@@ -23,6 +23,8 @@ static inline uint16_t DRV8350S_BuildWriteFrame(uint8_t addr, uint16_t data);
 static inline uint16_t DRV8350S_BuildReadFrame(uint8_t addr);
 static inline uint16_t DRV8350S_ParseResponse(uint16_t rxData);
 static void DRV8350S_ParseFaultStatus(DRV8350S_Handle_t* handle);
+static uint8_t DRV8350S_IsReadbackInvalid(uint16_t rawFrame);
+static uint16_t DRV8350S_BuildExpectedOcpCtrl(const DRV8350S_Handle_t* handle);
 static int8_t DRV8350S_BusLock(DRV8350S_Handle_t* handle, uint32_t timeoutMs);
 static void DRV8350S_BusUnlock(DRV8350S_Handle_t* handle);
 static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t regAddr, uint16_t data);
@@ -57,6 +59,9 @@ int8_t DRV8350S_Init(DRV8350S_Handle_t* handle,
     /* Clear DMA busy flag */
     handle->runtime.dmaBusy = 0;
     handle->runtime.syncBusy = 0;
+    handle->runtime.lastRxFrame = 0U;
+    handle->runtime.commFaultActive = 0U;
+    handle->runtime.commValidated = 0U;
 
     return 0;
 }
@@ -129,6 +134,11 @@ int8_t DRV8350S_Configure(DRV8350S_Handle_t* handle, const DRV8350S_Config_t* co
 
     /* Save configuration */
     memcpy(&handle->config, config, sizeof(DRV8350S_Config_t));
+    handle->runtime.commFaultActive = 0U;
+    handle->runtime.commValidated = 0U;
+    handle->runtime.lastRxFrame = 0U;
+    handle->runtime.faultFlags = 0U;
+    handle->runtime.isFaultActive = 0U;
 
     /* First, unlock registers */
     status |= DRV8350S_UnlockRegisters(handle);
@@ -405,6 +415,8 @@ void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle)
 
     /* Release SPI bus */
     handle->runtime.dmaBusy = 0;
+    handle->runtime.spiError = 0U;
+    handle->runtime.lastRxFrame = handle->rxBuf[0];
 
     /* 当前帧即返回目标寄存器数据 */
     uint16_t response = DRV8350S_ParseResponse(handle->rxBuf[0]);
@@ -413,8 +425,6 @@ void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle)
     switch (handle->readReq.registerAddr) {
         case DRV8350S_REG_FAULT_STATUS_1:
             handle->runtime.regFaultStatus1 = response;
-            /* Parse faults immediately */
-            DRV8350S_ParseFaultStatus(handle);
             break;
         case DRV8350S_REG_VGS_STATUS_2:
             handle->runtime.regVgsStatus2 = response;
@@ -434,6 +444,8 @@ void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle)
         default:
             break;
     }
+
+    DRV8350S_UpdateFaultState(handle);
 
     /* Invoke callback if registered */
     if (handle->readCompleteCallback != NULL) {
@@ -466,6 +478,7 @@ void DRV8350S_DMA_ErrorCallback(DRV8350S_Handle_t* handle)
 
     /* Abort DMA to clean state */
     HAL_SPI_DMAStop(handle->hspi);
+    DRV8350S_UpdateFaultState(handle);
 }
 
 /**
@@ -593,6 +606,50 @@ uint32_t DRV8350S_GetFaultFlags(DRV8350S_Handle_t* handle)
     return handle->runtime.faultFlags;
 }
 
+void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle)
+{
+    uint32_t faults = 0U;
+    uint8_t commFaultActive = 0U;
+    uint16_t expectedOcpCtrl;
+
+    if (handle == NULL) {
+        return;
+    }
+
+    expectedOcpCtrl = DRV8350S_BuildExpectedOcpCtrl(handle);
+
+    if (handle->runtime.regOcpCtrl == expectedOcpCtrl) {
+        handle->runtime.commValidated = 1U;
+    }
+
+    if (handle->runtime.spiError != 0U) {
+        commFaultActive = 1U;
+    }
+
+    if (DRV8350S_IsReadbackInvalid(handle->runtime.lastRxFrame)) {
+        commFaultActive = 1U;
+    }
+
+    if ((handle->readReq.registerAddr == DRV8350S_REG_OCP_CTRL) &&
+        (handle->runtime.regOcpCtrl != expectedOcpCtrl)) {
+        commFaultActive = 1U;
+    }
+
+    if (commFaultActive != 0U) {
+        faults |= DRV8350S_COMM_FAULT_BIT;
+        handle->runtime.commFaultActive = 1U;
+    } else if (handle->runtime.commValidated != 0U) {
+        DRV8350S_ParseFaultStatus(handle);
+        faults |= handle->runtime.faultFlags;
+        handle->runtime.commFaultActive = 0U;
+    } else {
+        handle->runtime.commFaultActive = 0U;
+    }
+
+    handle->runtime.faultFlags = faults;
+    handle->runtime.isFaultActive = (faults != 0U) ? 1U : 0U;
+}
+
 /**
  * @brief Convert fault bit to string description
  */
@@ -621,6 +678,7 @@ const char* DRV8350S_FaultToString(uint32_t faultBit)
         case (uint32_t)DRV8350S_VGS_LB_BIT:       return "VGS Fault Phase B Low";
         case (uint32_t)DRV8350S_VGS_HC_BIT:       return "VGS Fault Phase C High";
         case (uint32_t)DRV8350S_VGS_LC_BIT:       return "VGS Fault Phase C Low";
+        case DRV8350S_COMM_FAULT_BIT:             return "SPI Communication Invalid";
         
         default:                        return "Unknown Fault";
     }
@@ -715,6 +773,11 @@ static int8_t DRV8350S_WriteRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t 
     NSCS_HIGH(handle);
     DRV8350S_FrameSpacingDelay();
 
+    handle->runtime.lastRxFrame = rxDummy;
+    if (halStatus == HAL_OK) {
+        handle->runtime.spiError = 0U;
+    }
+
     return (halStatus == HAL_OK) ? 0 : -1;
 }
 
@@ -742,6 +805,11 @@ static int8_t DRV8350S_ReadRegisterUnlocked(DRV8350S_Handle_t* handle, uint8_t r
 
     NSCS_HIGH(handle);
     DRV8350S_FrameSpacingDelay();
+
+    handle->runtime.lastRxFrame = rxFrame;
+    if (halStatus == HAL_OK) {
+        handle->runtime.spiError = 0U;
+    }
 
     *data = DRV8350S_ParseResponse(rxFrame);
     return (halStatus == HAL_OK) ? 0 : -1;
@@ -785,6 +853,24 @@ static inline uint16_t DRV8350S_ParseResponse(uint16_t rxData)
 {
     /* Response: Don't care[15:11], Data[10:0] */
     return rxData & DRV8350S_DATA_MASK;
+}
+
+static uint8_t DRV8350S_IsReadbackInvalid(uint16_t rawFrame)
+{
+    return (rawFrame == 0xFFFFU) ? 1U : 0U;
+}
+
+static uint16_t DRV8350S_BuildExpectedOcpCtrl(const DRV8350S_Handle_t* handle)
+{
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    return (uint16_t)((((uint16_t)handle->config.tretry & 0x01U) << DRV8350S_TRETRY_POS) |
+                      (((uint16_t)handle->config.deadTime & 0x03U) << DRV8350S_DEAD_TIME_POS) |
+                      (((uint16_t)handle->config.ocpMode & 0x03U) << DRV8350S_OCP_MODE_POS) |
+                      (((uint16_t)handle->config.ocpDeglitch & 0x03U) << DRV8350S_OCP_DEG_POS) |
+                      (((uint16_t)handle->config.vdsLvl & 0x0FU) << DRV8350S_VDS_LVL_POS));
 }
 
 /**

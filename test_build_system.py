@@ -89,6 +89,29 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("while (cycles-- > 0U)", drv_c)
         self.assertNotIn("static void DRV8350S_FrameSpacingDelay(void)\n{\n    __NOP();", drv_c)
 
+    def test_drv8350_distinguishes_comm_fault_from_real_driver_fault_bits(self):
+        drv_h = (ROOT / "MDK-ARM" / "code" / "drv8350s.h").read_text(encoding="utf-8")
+        drv_c = (ROOT / "MDK-ARM" / "code" / "drv8350s.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("#define DRV8350S_COMM_FAULT_BIT", drv_h)
+        self.assertIn("volatile uint8_t  commFaultActive;", drv_h)
+        self.assertIn("volatile uint8_t  commValidated;", drv_h)
+        self.assertIn("volatile uint16_t lastRxFrame;", drv_h)
+        self.assertIn("void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle);", drv_h)
+        self.assertIn("static uint8_t DRV8350S_IsReadbackInvalid", drv_c)
+        self.assertIn("rawFrame == 0xFFFFU", drv_c)
+        self.assertIn("faults |= DRV8350S_COMM_FAULT_BIT;", drv_c)
+        self.assertIn("handle->runtime.commFaultActive = 1U;", drv_c)
+        self.assertIn("handle->runtime.commValidated = 1U;", drv_c)
+        self.assertIn("handle->runtime.lastRxFrame = handle->rxBuf[0];", drv_c)
+        self.assertIn("void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle)", drv_c)
+        self.assertIn("DRV8350S_UpdateFaultState(&drv8350s);", it_c)
+        self.assertNotIn(
+            "drv_fault_active = (((fs1 & 0x07FFU) != 0U) || ((fs2 & 0x00FFU) != 0U)) ? 1U : 0U;",
+            it_c,
+        )
+
     def test_spi_bringup_uses_bench_safe_prescaler(self):
         spi_c = (ROOT / "Core" / "Src" / "spi.c").read_text(encoding="utf-8")
 
@@ -210,6 +233,20 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("packet->adcFrameSequence", uart_c)
         self.assertIn("packet->adcRawCurrentA", uart_c)
         self.assertIn("packet->adcCurrentA", uart_c)
+
+    def test_uart_upload_reports_drv_comm_fault_separately(self):
+        uart_h = (ROOT / "MDK-ARM" / "code" / "uart_upload.h").read_text(encoding="utf-8")
+        uart_c = (ROOT / "MDK-ARM" / "code" / "uart_upload.c").read_text(encoding="utf-8")
+
+        self.assertIn("drvCommFaultActive", uart_h)
+        self.assertIn("drvCommValidated", uart_h)
+        self.assertIn("drvLastRxFrame", uart_h)
+        self.assertIn("packet->drvCommFaultActive = s_drvHandle->runtime.commFaultActive;", uart_c)
+        self.assertIn("packet->drvCommValidated = s_drvHandle->runtime.commValidated;", uart_c)
+        self.assertIn("packet->drvLastRxFrame = s_drvHandle->runtime.lastRxFrame;", uart_c)
+        self.assertIn("[DRV8350S Communication]", uart_c)
+        self.assertIn("Readback INVALID", uart_c)
+        self.assertIn("DRV8350S_COMM_FAULT_BIT", uart_c)
 
     def test_tle5012_preserves_reset_watchdog_status_through_uart_fault_upload(self):
         tle_h = (ROOT / "MDK-ARM" / "code" / "tle5012.h").read_text(encoding="utf-8")

@@ -54,6 +54,7 @@ extern "C" {
 #define DRV8350S_VGS_LB_BIT             ((uint32_t)(1U << 2)  << DRV8350S_VGS_STATUS_SHIFT)
 #define DRV8350S_VGS_HC_BIT             ((uint32_t)(1U << 1)  << DRV8350S_VGS_STATUS_SHIFT)
 #define DRV8350S_VGS_LC_BIT             ((uint32_t)(1U << 0)  << DRV8350S_VGS_STATUS_SHIFT)
+#define DRV8350S_COMM_FAULT_BIT         (1UL << 31)
 
 /* Raw register bit masks for parsing (without shift) */
 /* DRV8350S: Bit 10-8 are Reserved, not CSA Overcurrent */
@@ -186,6 +187,9 @@ typedef struct {
     /* Parsed fault status */
     volatile uint32_t faultFlags;
     volatile uint8_t  isFaultActive;
+    volatile uint8_t  commFaultActive;
+    volatile uint8_t  commValidated;
+    volatile uint16_t lastRxFrame;
 
     /* Communication status */
     volatile uint8_t  dmaBusy;
@@ -260,6 +264,7 @@ int8_t DRV8350S_SetBrake(DRV8350S_Handle_t* handle);
 /* Status & Diagnostics */
 uint32_t DRV8350S_GetFaultFlags(DRV8350S_Handle_t* handle);
 const char* DRV8350S_FaultToString(uint32_t faultBit);
+void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle);
 
 /* DMA Callbacks (call from HAL_SPI_TxRxCpltCallback) */
 void DRV8350S_DMA_CompleteCallback(DRV8350S_Handle_t* handle);

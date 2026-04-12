@@ -48,6 +48,9 @@ typedef struct {
     uint16_t ocpCtrl;           /* OCP_CTRL 寄存器 */
     uint32_t faultFlags;        /* 解析后的故障标志 */
     uint8_t  isFaultActive;     /* 是否有故障 */
+    uint8_t  drvCommFaultActive;/* DRV SPI通信是否无效 */
+    uint8_t  drvCommValidated;  /* DRV配置寄存器回读是否已验证 */
+    uint16_t drvLastRxFrame;    /* 最近一次SPI原始回读帧 */
 
     /* FOC控制数据 - 新增 */
     float    Id;                /* D轴电流 */

@@ -245,3 +245,10 @@
 - Prevention: Before changing the encoder transport again, keep the rule that any future `TLE5012` SSC refactor must be checked against the official 3-wire `sendReceive(command, 1, received, 2)` behavior, including the `5 us` trigger delay, data-line direction swap, and explicit dummy clocks for every returned word.
 - Commit: 56037dfc3776f870448f386381facc01c01249f8
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 16:52] TLE5012三线响应阶段改为dummy-clock DMA收发
+- Problem: `tle5012.c` 仍在响应阶段调用 `HAL_SPI_Receive_DMA()`，即使前面的根因调查已经确认 STM32H7 上这会切入 `2LINES_RXONLY`，与 TLE5012 官方 3-wire SSC 的“dummy word 打时钟 + 同步接收 Data/Safety”模型不一致。对应地，`stm32h7xx_it.c` 仍把 `SPI3` 的完成处理挂在 `HAL_SPI_RxCpltCallback()`，也和新的事务模型不匹配。
+- Resolution: 在 `tle5012.c` 中新增两字 `dummy` 发包缓冲区，把响应阶段改成保持 `CS` 有效、`PC11=AF`/`PC12=Input` 后调用 `HAL_SPI_TransmitReceive_DMA()`，用两个 `0x0000` dummy word 为 TLE5012 回包提供时钟；同时把 `SPI3` 的收尾处理迁移到 `HAL_SPI_TxRxCpltCallback()`，保留命令阶段的 `HAL_SPI_TxCpltCallback()` 只负责进入响应相位。同步更新 `test_build_system.py`，将源码契约固定为 dummy-clocked 3-wire 事务。
+- Prevention: 保留 `test_tle5012_uses_three_wire_staged_transfer_with_dummy_clocked_response`，并在每次修改 `tle5012.c` / `stm32h7xx_it.c` 后至少重跑 `python -m pytest test_build_system.py -q -k tle5012`、`python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1` 和 `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，避免再把 TLE5012 响应相位退回纯接收模式或挂错 DMA 完成回调。
+- Commit: 63b265ccf6f8a6ed408a3d3bb0c9dc57440048d8
+- Recurrence policy: Not allowed to happen again.

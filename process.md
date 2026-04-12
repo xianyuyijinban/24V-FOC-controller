@@ -294,3 +294,10 @@
 - Prevention: 保留 `test_protection_thresholds_are_runtime_configurable`、`test_precheck_refreshes_live_telemetry_before_enable_and_clear_fault`、`test_motor_identification_requires_valid_encoder_feedback` 三条源码约束；后续凡是改 `foc_app*`、`motor_identify*`、`stm32h7xx_it.c` 或上位机命令表，必须重跑 `python -m pytest test_build_system.py -q`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build_test.ps1`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，并确保 `Enable/Identify/CLEAR_FAULT` 仍只基于实时遥测做决策。
 - Commit: 201fd79662289f9c32cb42648f1713f20df2e040
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-12 21:22] 清理工作区生成物并补齐遗漏计划文档
+- Problem: 仓库长期把 `MDK-ARM/24V FOC Controller` 下的 `Keil` 生成物纳入版本控制，近期 bench 调试又在根目录留下大量 `.tmp_*` 和 `Simulink` 缓存，导致工作区持续处于脏状态；同时有 3 份实际的计划文档只留在本地未入库。
+- Resolution: 更新 `.gitignore`，新增 `Keil` 生成物、`.tmp*`、`*.slxc` 和 `slprj/` 忽略规则；从版本控制中移除 `axf/build_log/htm/lnp/dep/crf` 等 `Keil` 生成物并删除本地缓存；补提 `docs/plans/2026-04-03-complete-simulink-average-foc-plan.md`、`docs/plans/2026-04-03-host-computer-gui-full-plan.md`、`docs/plans/2026-04-05-constant-speed-three-phase-view.md`；同时把 `PROGRESS.md` 固化为指向 `PROCESS.md` 的兼容入口。
+- Prevention: 后续 `Keil`、`pyocd/gdb`、`Simulink` 运行产生的临时文件默认应落入忽略规则；提交前先看一次 `git status --short`，若再次出现生成物污染，优先修 `.gitignore` 或把误跟踪的生成物从索引中摘掉，不再让它们长期留在仓库历史里。
+- Commit: 6c624939de194a487ce40fa714fc4dcf4a4921d8
+- Recurrence policy: Not allowed to happen again.

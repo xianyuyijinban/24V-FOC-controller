@@ -639,6 +639,30 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("24V_FOC_Host.exe", readme)
         self.assertIn("PyInstaller", readme)
 
+    def test_standalone_hse_led_test_project_contract(self):
+        test_dir = ROOT / "BenchTests" / "HSE_LED_Test"
+        main_c = test_dir / "main.c"
+        build_ps1 = test_dir / "build.ps1"
+
+        self.assertTrue(main_c.exists())
+        self.assertTrue(build_ps1.exists())
+
+        main_text = main_c.read_text(encoding="utf-8")
+        build_text = build_ps1.read_text(encoding="utf-8")
+
+        self.assertIn("GPIO_PIN_8|GPIO_PIN_9", main_text)
+        self.assertIn("RCC_OSCILLATORTYPE_HSE", main_text)
+        self.assertIn("RCC_HSE_ON", main_text)
+        self.assertIn("RCC_PLLSOURCE_HSE", main_text)
+        self.assertIn("static void LedTest_SuccessLoop(void)", main_text)
+        self.assertIn("static void LedTest_FailureLoop(void)", main_text)
+        self.assertIn("HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_SET);", main_text)
+        self.assertIn("HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);", main_text)
+        self.assertIn("SystemClock_Config()", main_text)
+        self.assertIn("startup_stm32h743xx.s", build_text)
+        self.assertIn("STM32H743VITX_FLASH.ld", build_text)
+        self.assertIn("hse_led_test.elf", build_text)
+
 
 if __name__ == "__main__":
     unittest.main()

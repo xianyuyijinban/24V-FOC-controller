@@ -308,3 +308,10 @@
 - Prevention: 后续 `Keil`、`pyocd/gdb`、`Simulink` 运行产生的临时文件默认应落入忽略规则；提交前先看一次 `git status --short`，若再次出现生成物污染，优先修 `.gitignore` 或把误跟踪的生成物从索引中摘掉，不再让它们长期留在仓库历史里。
 - Commit: 6c624939de194a487ce40fa714fc4dcf4a4921d8
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-13 16:22] Standalone HSE LED bench clock isolation
+- Problem: The board had conflicting bench evidence around the external 25MHz HSE path. Previous main-firmware bring-up had stalled in `SystemClock_Config()` with `HSEON=1` and `HSERDY=0`, but hardware rework later changed the board condition and we needed a low-risk way to prove whether the crystal path itself could now boot without the full FOC stack.
+- Resolution: Added a standalone `BenchTests/HSE_LED_Test` project plus build script, two plan docs, and a source-contract test. The bench image initializes `PB8/PB9` before clock setup, uses `HSE + PLL1`, routes all clock/init failures into a `PB9` fast-blink loop, and leaves success in a `PB8` slow-blink loop. After building and loading the image over `pyocd load -M attach`, live SWD evidence showed `PC=0x08000510`, `RCC_CR=0x03034025`, and `GPIOB ODR=0x00000100`, proving the minimal HSE path now reaches the success loop with `HSERDY=1`. The implementation commit is `4ae9956b8798a1613b8f4f279cad98af66cefee9`.
+- Prevention: Keep the standalone HSE bench project and `test_standalone_hse_led_test_project_contract` in the repo, and whenever future hardware rework reopens the clock question, verify with the minimal image first and capture both `PC` and `RCC_CR` over SWD before blaming downstream firmware modules.
+- Commit: 4ae9956b8798a1613b8f4f279cad98af66cefee9
+- Recurrence policy: Not allowed to happen again.

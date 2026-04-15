@@ -315,3 +315,10 @@
 - Prevention: Keep the standalone HSE bench project and `test_standalone_hse_led_test_project_contract` in the repo, and whenever future hardware rework reopens the clock question, verify with the minimal image first and capture both `PC` and `RCC_CR` over SWD before blaming downstream firmware modules.
 - Commit: 4ae9956b8798a1613b8f4f279cad98af66cefee9
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-04-15 20:29] Task8顶层三环参数外置并完成官方PMSM模型整理
+- Problem: `task8` 的官方 PMSM 模型虽然已经能仿真，但三环 PI 增益仍埋在各子系统内部，顶层不方便直接调参；同时升级脚本把顶层参考源块名写死成 `command source`，而实际模型里该块名是 `commend sorse`，导致顶层重连线和布局对现有模型不稳。
+- Resolution: 新增 Task8 顶层 PI 外置设计/实现文档，更新 [tools/simulink/upgrade_add_official_pmsm.m](C:/Users/xiangyu/24V_FOC_Controller_audit_20260222/tools/simulink/upgrade_add_official_pmsm.m) 以在顶层创建 `Kp_pos`、`Ki_pos`、`Kp_speed`、`Ki_speed`、`Kp_iq`、`Ki_iq` 六个真实调参块，并重建 `position loop`、`speed loop`、`current loop` 使这些参数从顶层输入进入控制环。顶层重连线改成自动解析真实参考源与可选观察块，不再依赖固定块名，同时恢复 `pos_ref`、`speed_ref`、`Iq_ref` 和 `foc_debug_scope` 观察线。再用 [tools/simulink/check_task8_green.m](C:/Users/xiangyu/24V_FOC_Controller_audit_20260222/tools/simulink/check_task8_green.m) 校验新接口；用户在本机 MATLAB 上实际跑通升级与绿灯检查，得到 `TASK8_POSITION_LOOP_IN=4 OUT=1`、`TASK8_SPEED_LOOP_IN=4 OUT=1`、`TASK8_CURRENT_LOOP_IN=6 OUT=2`，并最终输出 `SIM_OK_TASK8`。
+- Prevention: 后续任何 Simulink 顶层整理都不要再写死块名，必须优先从现有连线或实际存在的顶层块解析信号来源；同时保留像 `check_task8_green.m` 这样的结构+连线+仿真联合校验，至少验证端口数、顶层参数源、关键观察信号和一次真实仿真绿灯后，才能声称模型升级完成。
+- Commit: 150cda0cfdd8e555a0f773d218ceacbdd88a184e
+- Recurrence policy: Not allowed to happen again.

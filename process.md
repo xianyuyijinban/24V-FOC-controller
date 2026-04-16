@@ -322,3 +322,9 @@
 - Prevention: 后续任何 Simulink 顶层整理都不要再写死块名，必须优先从现有连线或实际存在的顶层块解析信号来源；同时保留像 `check_task8_green.m` 这样的结构+连线+仿真联合校验，至少验证端口数、顶层参数源、关键观察信号和一次真实仿真绿灯后，才能声称模型升级完成。
 - Commit: 150cda0cfdd8e555a0f773d218ceacbdd88a184e
 - Recurrence policy: Not allowed to happen again.
+## [2026-04-16 00:53] 位置环从PI语义切换为显式PD
+- Problem: 位置模式此前仍沿用 `PI` 形态的接口，固件默认虽然把 `Ki` 设为 `0`，但结构体、UART命令、上位机 GUI 和文档仍把位置环表述为 `PI`，导致用户可以继续下发 `CMD:PI_POS`，并把第二个参数当积分项使用。这会让控制语义和实际实现脱节，也增加关节电机上机整定时的误判风险。
+- Resolution: 将固件位置环改为显式 `FOC_PositionPD_t`，在 `FOC_App_PositionLoop()` 中使用 `speed_ref = Kp * pos_error - Kd * speed_mech`，新增 `FOC_App_SetPositionPDGains()`，UART 命令改为 `CMD:PD_POS`；同步更新 Host GUI 的命令构建、preset 持久化、页签文案和位置环输入标签；补充 `test_build_system.py` 与 HostComputer 单测，验证位置环 PD 语义、旧 `position_pi` 本地配置兼容路径、GUI 标签和命令接口；更新 `README.md`、`Project_Architecture.md` 与实施计划文档。
+- Prevention: 后续凡是修改位置环、上位机命令或控制模式文档，必须同时检查固件结构体命名、UART 命令名、GUI 标签和文档是否一致，并重跑 `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_main_window -v`、`python -m unittest -v test_build_system.py`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，禁止再次出现“名字还是PI、实际已经不是PI”的语义漂移。
+- Commit: 09ad81d961e1e3b808360e38a6456b38fee74f95
+- Recurrence policy: Not allowed to happen again.

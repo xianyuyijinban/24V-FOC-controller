@@ -714,14 +714,14 @@ class CommandBuilder:
     @staticmethod
     def set_speed_pi(kp: float, ki: float) -> str
     @staticmethod
-    def set_position_pi(kp: float, ki: float) -> str
+    def set_position_pd(kp: float, kd: float) -> str
 ```
 
 ### 10. 本地Host GUI (HostComputer/*.py)
 
 ```python
 class HostMainWindow(QMainWindow):
-    tabs                  # Debug Panel / Identify / Advanced Control / PI Parameters
+    tabs                  # Debug Panel / Identify / Advanced Control / Loop Parameters
     def set_serial_worker(self, worker) -> None
     def apply_mode_selection(self, mode: int) -> None
     def apply_packet(self, packet: FOCDataPacket) -> None
@@ -736,7 +736,7 @@ class SerialWorker(QObject):
 当前本地 GUI 架构采用 `gui_app.py -> HostMainWindow -> SerialWorker -> FOCDataParser/CommandBuilder` 的分层关系：
 
 - `gui_app.py` 创建 `QApplication`、`QThread` 和 `SerialWorker`
-- `HostMainWindow` 现在提供 `Debug Panel / Identify / Advanced Control / PI Parameters` 四个功能页签
+- `HostMainWindow` 现在提供 `Debug Panel / Identify / Advanced Control / Loop Parameters` 四个功能页签
 - `SerialWorker` 在后台线程内处理串口枚举、连接、读写和 parser 回调
 - `gui_logic.py` 保持应用状态、输入校验、命令路由、plot 缓冲、CSV 导出和本地 preset 持久化为纯 Python 逻辑，便于单测
 
@@ -748,8 +748,10 @@ class SerialWorker(QObject):
   - 识别状态总览、开始/停止/清故障入口、识别事件日志
 - `Advanced Control`
   - 力矩/速度/位置三类独立下发控件，并高亮当前活动模式
-- `PI Parameters`
-  - 三套 PI 参数编辑、本地默认值加载与 preset 持久化入口
+- `Loop Parameters`
+  - 电流环/速度环 PI 参数编辑
+  - `Position Loop PD` 参数编辑
+  - 本地默认值加载与 preset 持久化入口
 
 ---
 
@@ -789,7 +791,7 @@ sequenceDiagram
     loop 每0.5ms / 每5ms
         LOOP->>LOOP: 计算电机转速（2kHz）
         LOOP->>LOOP: 速度环PI控制（2kHz）
-        LOOP->>LOOP: 位置环PI控制（200Hz）
+        LOOP->>LOOP: 位置环PD控制（200Hz）
     end
 
     UART-->>MAIN: DMA发送完成
@@ -812,7 +814,7 @@ sequenceDiagram
 | PWM更新 | 20kHz | 50μs | TIM1中断 | 电流采样、FOC计算、PWM更新 |
 | 电流环 | 20kHz | 50μs | TIM1中断 | Id/Iq PI控制、SVPWM生成 |
 | 速度环 | 2kHz | 0.5ms | TIM1中断(10分频) | 转速计算、速度PI控制 |
-| 位置环 | 200Hz | 5ms | TIM1中断(100分频) | 位置PI控制、输出速度给定 |
+| 位置环 | 200Hz | 5ms | TIM1中断(100分频) | 位置PD控制、输出速度给定 |
 | 参数识别 | 20kHz | 50μs | TIM1中断(每周期) | 识别状态机处理（与采样/PWM同步） |
 | 状态上传 | 10Hz | 100ms | Main循环 | UART数据上传、故障监控 |
 | Rs在线估计 | 1kHz | 1ms | TIM1中断(分频) | 低速时估计Rs并补偿 |
@@ -832,7 +834,7 @@ sequenceDiagram
 - 适用于需要精确速度控制的应用
 
 ### 位置模式 (FOC_MODE_POSITION)
-- 位置环PI控制器输出速度给定
+- 位置环PD控制器输出速度给定
 - 速度环PI控制器输出 Iq_ref
 - 位置反馈来自编码器角度
 - 适用于伺服定位应用
@@ -951,7 +953,7 @@ CMD:VBUS_LIMIT,10.0,16.0  # 设置运行时欠压/过压阈值 (V)
 CMD:CLEAR_FAULT       # 清除故障
 CMD:PI_CURRENT,0.1,0.01   # 设置电流环PI
 CMD:PI_SPEED,0.5,0.1      # 设置速度环PI
-CMD:PI_POS,1.0,0.01       # 设置位置环PI
+CMD:PD_POS,1.0,0.10       # 设置位置环PD
 ```
 
 注：命令需以换行符结束（`\n` 或 `\r\n`），固件按行解析。

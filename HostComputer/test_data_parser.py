@@ -123,7 +123,7 @@ class TestCommandBuilder(unittest.TestCase):
         self.assertEqual(CommandBuilder.clear_fault(), "CMD:CLEAR_FAULT\n")
         self.assertEqual(CommandBuilder.set_current_pi(0.2, 0.01), "CMD:PI_CURRENT,0.200000,0.010000\n")
         self.assertEqual(CommandBuilder.set_speed_pi(1.0, 0.1), "CMD:PI_SPEED,1.000000,0.100000\n")
-        self.assertEqual(CommandBuilder.set_position_pi(3.0, 0.5), "CMD:PI_POS,3.000000,0.500000\n")
+        self.assertEqual(CommandBuilder.set_position_pd(3.0, 0.5), "CMD:PD_POS,3.000000,0.500000\n")
 
 
 if __name__ == "__main__":

@@ -261,10 +261,10 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
-    if (sscanf(cmd, "CMD:PI_POS,%f,%f", &f1, &f2) == 2) {
+    if (sscanf(cmd, "CMD:PD_POS,%f,%f", &f1, &f2) == 2) {
         if (f1 > 0.0f && f2 >= 0.0f) {
             __disable_irq();
-            FOC_PI_Init(&g_foc_app.pi_pos, f1, f2, g_foc_app.pi_pos.output_max, g_foc_app.pi_pos.output_min);
+            FOC_App_SetPositionPDGains(&g_foc_app, f1, f2);
             __enable_irq();
         }
         return;

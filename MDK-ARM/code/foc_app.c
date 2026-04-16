@@ -19,9 +19,11 @@ extern DRV8350S_Handle_t drv8350s;
 #define DRV_EN_Pin       GPIO_PIN_14
 
 /* 私有函数前向声明 */
-static void FOC_App_UpdatePIParams(FOC_AppHandle_t *handle);
+static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle);
 static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault);
 static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
+static void FOC_PositionPD_Init(FOC_PositionPD_t *pd, float kp, float kd, float output_max, float output_min);
+static float FOC_PositionPD_Update(const FOC_PositionPD_t *pd, float pos_error, float speed_feedback);
 
 /**
  * @brief FOC应用层初始化
@@ -45,9 +47,8 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     /* 初始化速度环PI控制器 */
     FOC_PI_Init(&handle->pi_speed, 0.1f, 0.01f, 10.0f, -10.0f);
     
-    /* 初始化位置环PI控制器 - 位置环输出作为速度给定 */
-    /* Kp_pos: 位置误差(rad) -> 速度给定(rad/s), 比如1rad误差对应10rad/s速度 */
-    FOC_PI_Init(&handle->pi_pos, 10.0f, 0.0f, 50.0f, -50.0f);  /* 纯P控制或弱I控制 */
+    /* 初始化位置环PD控制器 - 输出速度给定 */
+    FOC_PositionPD_Init(&handle->pos_pd, 10.0f, 0.10f, 50.0f, -50.0f);
     
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
@@ -58,9 +59,9 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     /* 初始化FOC核心（使用默认PI参数，识别后会更新） */
     FOC_Init(&handle->foc, 1.0f, 0.1f, 1.0f, 0.1f);
     
-    /* 如果参数有效，更新三环PI参数 */
+    /* 如果参数有效，更新控制环参数 */
     if (Param_IsValid(&handle->motor_param)) {
-        FOC_App_UpdatePIParams(handle);
+        FOC_App_UpdateLoopParams(handle);
         handle->state = FOC_STATE_READY;
     } else {
         /* 参数无效，需要识别 */
@@ -105,8 +106,8 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
                 /* 识别完成，保存参数 */
                 FOC_App_SaveParam(handle);
                 
-                /* 更新三环PI参数 */
-                FOC_App_UpdatePIParams(handle);
+                /* 更新控制环参数 */
+                FOC_App_UpdateLoopParams(handle);
                 
                 handle->fault_code = FOC_FAULT_NONE;
                 handle->state = FOC_STATE_READY;
@@ -383,7 +384,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
  * 执行频率：20kHz / 100 = 200Hz
  * 
  * 处理内容：
- * - 位置环PI控制（仅在位置模式）
+ * - 位置环PD控制（仅在位置模式）
  * - 输出速度给定到handle->speed_ref
  * - 速度环在FOC_App_SpeedLoop中单独执行（2kHz）
  */
@@ -397,15 +398,10 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         float pos_error = handle->pos_ref - handle->theta_mech;
         
         /* 处理角度环绕（最短路径） */
-        while (pos_error > FOC_PI) pos_error -= 2.0f * FOC_PI;
-        while (pos_error < -FOC_PI) pos_error += 2.0f * FOC_PI;
-        
-        /* 位置环PI：输出为速度给定 */
-        handle->speed_ref = FOC_PI_Update(&handle->pi_pos, pos_error);
-        
-        /* 速度限幅（保护） */
-        if (handle->speed_ref > 50.0f) handle->speed_ref = 50.0f;
-        if (handle->speed_ref < -50.0f) handle->speed_ref = -50.0f;
+        pos_error = FOC_AngleNormalize(pos_error);
+
+        /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
+        handle->speed_ref = FOC_PositionPD_Update(&handle->pos_pd, pos_error, handle->speed_mech);
     }
 }
 
@@ -560,7 +556,6 @@ void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
     handle->foc.pi_d.integral = 0.0f;
     handle->foc.pi_q.integral = 0.0f;
     handle->pi_speed.integral = 0.0f;
-    handle->pi_pos.integral = 0.0f;
 }
 
 /**
@@ -596,6 +591,15 @@ void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
     handle->pos_ref = pos_ref;
 }
 
+void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    FOC_PositionPD_Init(&handle->pos_pd, kp, kd, handle->pos_pd.output_max, handle->pos_pd.output_min);
+}
+
 /**
  * @brief 设置控制模式
  * @param handle FOC应用层句柄指针
@@ -605,7 +609,6 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 {
     handle->control_mode = mode;
     /* 切换模式时清零积分，防止跳变 */
-    handle->pi_pos.integral = 0.0f;
     handle->pi_speed.integral = 0.0f;
 }
 
@@ -702,7 +705,7 @@ static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode
 }
 
 /**
- * @brief 根据电机参数计算三环PI参数
+ * @brief 根据电机参数计算控制环参数
  * @param handle FOC应用层句柄指针
  * 
  * 三环带宽分配原则（从外到内，带宽依次增加5-10倍）：
@@ -713,9 +716,9 @@ static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode
  * 计算公式（典型工程整定）：
  * - 电流环 Kp = Ld * 2π * fc, Ki = Rs * 2π * fc * T
  * - 速度环 Kp = J * 2π * fs / Kt, Ki = Kp * Rs / Ld (或根据机械时间常数)
- * - 位置环 Kp = 2π * fp (纯P控制) 或 Kp = 2π * fp, Ki = Kp / τ
+ * - 位置环 Kp = 2π * fp，Kd 用于速度反馈阻尼
  */
-static void FOC_App_UpdatePIParams(FOC_AppHandle_t *handle)
+static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
 {
     MotorParam_t *mp = &handle->motor_param;
     
@@ -765,39 +768,57 @@ static void FOC_App_UpdatePIParams(FOC_AppHandle_t *handle)
     /* 更新速度环PI */
     FOC_PI_Init(&handle->pi_speed, Kp_s, Ki_s, 50.0f, -50.0f);
     
-    /* 位置环参数计算 - 带宽 10Hz (速度环的1/10)
-     * 位置环PI整定 (纯P控制或弱I控制)
+    /* 位置环参数计算 - 显式PD
      * Kp_pos: 位置误差(rad) -> 速度给定(rad/s)
-     * 对于10Hz带宽，希望位置误差0.1rad时产生约6rad/s速度 (约1转/秒)
-     * 因此 Kp_pos ≈ 6 / 0.1 = 60，但通常保守设置，设为20-50
-     * 
-     * 或者使用: Kp_pos = 2π * fp * 安全系数
+     * Kd_pos: 实际速度反馈阻尼系数
      */
-    float Kp_p = 20.0f;  /* 位置环Kp: 1rad误差 -> 20rad/s速度给定 */
-    float Ki_p = 0.0f;   /* 位置环通常用纯P控制，或用很小的Ki */
-    
-    /* 也可以根据速度环参数来整定位置环
-     * 位置环带宽应低于速度环，通常 wp = ws / 10 ~ ws / 20
-     */
+    float Kp_p = 20.0f;
+    float Kd_p = 0.10f;
+
     if (Kp_s > 0.0f) {
-        /* 基于速度环Kp来估算位置环Kp
-         * 经验: Kp_pos = sqrt(Kp_speed) * 5 到 10
-         */
         Kp_p = sqrtf(Kp_s) * 8.0f;
         if (Kp_p < 10.0f) Kp_p = 10.0f;
         if (Kp_p > 100.0f) Kp_p = 100.0f;
+
+        Kd_p = 0.01f * Kp_p;
+        if (Kd_p < 0.05f) Kd_p = 0.05f;
+        if (Kd_p > 0.25f) Kd_p = 0.25f;
     }
-    
-    /* 更新位置环PI */
-    FOC_PI_Init(&handle->pi_pos, Kp_p, Ki_p, 50.0f, -50.0f);
+
+    /* 更新位置环PD */
+    FOC_PositionPD_Init(&handle->pos_pd, Kp_p, Kd_p, 50.0f, -50.0f);
     
     /* 可选: 打印调试信息 */
     /*
-    printf("PI Params Updated:\r\n");
+    printf("Loop Params Updated:\r\n");
     printf("  Current: Kp=%.4f, Ki=%.4f\r\n", Kp_i, Ki_i);
     printf("  Speed:   Kp=%.4f, Ki=%.4f\r\n", Kp_s, Ki_s);
-    printf("  Position:Kp=%.4f, Ki=%.4f\r\n", Kp_p, Ki_p);
+    printf("  Position:Kp=%.4f, Kd=%.4f\r\n", Kp_p, Kd_p);
     */
+}
+
+static void FOC_PositionPD_Init(FOC_PositionPD_t *pd, float kp, float kd, float output_max, float output_min)
+{
+    if (pd == NULL) {
+        return;
+    }
+
+    pd->kp = kp;
+    pd->kd = kd;
+    pd->output_max = output_max;
+    pd->output_min = output_min;
+}
+
+static float FOC_PositionPD_Update(const FOC_PositionPD_t *pd, float pos_error, float speed_feedback)
+{
+    float output;
+
+    if (pd == NULL) {
+        return 0.0f;
+    }
+
+    output = (pd->kp * pos_error) - (pd->kd * speed_feedback);
+    return FOC_Saturate(output, pd->output_max, pd->output_min);
 }
 
 /**

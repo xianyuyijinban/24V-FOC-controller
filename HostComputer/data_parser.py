@@ -247,6 +247,6 @@ class CommandBuilder:
         return f"CMD:PI_SPEED,{kp:.6f},{ki:.6f}\n"
     
     @staticmethod
-    def set_position_pi(kp: float, ki: float) -> str:
-        """设置位置环PI参数"""
-        return f"CMD:PI_POS,{kp:.6f},{ki:.6f}\n"
+    def set_position_pd(kp: float, kd: float) -> str:
+        """设置位置环PD参数"""
+        return f"CMD:PD_POS,{kp:.6f},{kd:.6f}\n"

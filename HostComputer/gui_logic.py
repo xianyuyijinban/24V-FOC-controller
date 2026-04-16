@@ -45,6 +45,12 @@ class LoopTuning:
     ki: float = 0.0
 
 
+@dataclass
+class PositionLoopTuning:
+    kp: float = 0.0
+    kd: float = 0.0
+
+
 def _default_current_tuning() -> LoopTuning:
     return LoopTuning(kp=0.2, ki=0.01)
 
@@ -53,8 +59,8 @@ def _default_speed_tuning() -> LoopTuning:
     return LoopTuning(kp=1.0, ki=0.1)
 
 
-def _default_position_tuning() -> LoopTuning:
-    return LoopTuning(kp=2.0, ki=0.2)
+def _default_position_tuning() -> PositionLoopTuning:
+    return PositionLoopTuning(kp=10.0, kd=0.10)
 
 
 @dataclass
@@ -68,7 +74,7 @@ class GuiProfile:
     position_target: float = 0.0
     current_pi: LoopTuning = field(default_factory=_default_current_tuning)
     speed_pi: LoopTuning = field(default_factory=_default_speed_tuning)
-    position_pi: LoopTuning = field(default_factory=_default_position_tuning)
+    position_pd: PositionLoopTuning = field(default_factory=_default_position_tuning)
 
     def to_dict(self) -> dict:
         return {
@@ -81,7 +87,7 @@ class GuiProfile:
             "position_target": self.position_target,
             "current_pi": {"kp": self.current_pi.kp, "ki": self.current_pi.ki},
             "speed_pi": {"kp": self.speed_pi.kp, "ki": self.speed_pi.ki},
-            "position_pi": {"kp": self.position_pi.kp, "ki": self.position_pi.ki},
+            "position_pd": {"kp": self.position_pd.kp, "kd": self.position_pd.kd},
         }
 
     @classmethod
@@ -102,7 +108,7 @@ class GuiProfile:
         profile.speed_target = float(payload.get("speed_target", profile.speed_target))
         profile.position_target = float(payload.get("position_target", profile.position_target))
 
-        for key in ("current_pi", "speed_pi", "position_pi"):
+        for key in ("current_pi", "speed_pi"):
             raw_loop = payload.get(key, {})
             if not isinstance(raw_loop, dict):
                 continue
@@ -111,6 +117,20 @@ class GuiProfile:
                 ki=float(raw_loop.get("ki", getattr(profile, key).ki)),
             )
             setattr(profile, key, tuning)
+
+        raw_position_pd = payload.get("position_pd")
+        if isinstance(raw_position_pd, dict):
+            profile.position_pd = PositionLoopTuning(
+                kp=float(raw_position_pd.get("kp", profile.position_pd.kp)),
+                kd=float(raw_position_pd.get("kd", profile.position_pd.kd)),
+            )
+        else:
+            legacy_position_pi = payload.get("position_pi", {})
+            if isinstance(legacy_position_pi, dict):
+                profile.position_pd = PositionLoopTuning(
+                    kp=float(legacy_position_pi.get("kp", profile.position_pd.kp)),
+                    kd=profile.position_pd.kd,
+                )
         return profile
 
 
@@ -216,17 +236,18 @@ def build_position_ref_command(position_raw: str) -> str:
     return CommandBuilder.set_position_ref(position)
 
 
-def build_pi_command(loop_name: str, kp_raw: str, ki_raw: str) -> str:
+def build_loop_gain_command(loop_name: str, kp_raw: str, gain2_raw: str) -> str:
     kp = parse_float_field(kp_raw, f"{loop_name.title()} Kp", minimum=0.0)
-    ki = parse_float_field(ki_raw, f"{loop_name.title()} Ki", minimum=0.0)
+    gain2_name = "Kd" if loop_name == "position" else "Ki"
+    gain2 = parse_float_field(gain2_raw, f"{loop_name.title()} {gain2_name}", minimum=0.0)
     builders = {
         "current": CommandBuilder.set_current_pi,
         "speed": CommandBuilder.set_speed_pi,
-        "position": CommandBuilder.set_position_pi,
+        "position": CommandBuilder.set_position_pd,
     }
     if loop_name not in builders:
-        raise ValueError(f"Unsupported PI loop: {loop_name}")
-    return builders[loop_name](kp, ki)
+        raise ValueError(f"Unsupported loop gains: {loop_name}")
+    return builders[loop_name](kp, gain2)
 
 
 def button_enable_state(state: HostAppState) -> dict[str, bool]:

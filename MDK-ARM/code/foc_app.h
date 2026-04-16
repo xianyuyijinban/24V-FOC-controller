@@ -83,6 +83,14 @@ typedef struct {
     float undervoltage_limit_v;
 } FOC_ProtectionConfig_t;
 
+/* 位置环 PD 参数 */
+typedef struct {
+    float kp;
+    float kd;
+    float output_max;
+    float output_min;
+} FOC_PositionPD_t;
+
 /* FOC应用层句柄 */
 typedef struct {
     /* 核心FOC */
@@ -116,9 +124,9 @@ typedef struct {
     float speed_ref;
     float pos_ref;              /* 位置给定 (rad) */
     
-    /* PI控制器 */
+    /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
-    FOC_PI_Controller_t pi_pos;     /* 位置环PI */
+    FOC_PositionPD_t pos_pd;        /* 位置环PD */
     
     /* 运行时计数 */
     uint32_t control_count;
@@ -156,6 +164,7 @@ void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
+void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
 

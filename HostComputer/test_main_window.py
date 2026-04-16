@@ -35,10 +35,11 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(window.tabs.tabText(0), "Debug Panel")
         self.assertEqual(window.tabs.tabText(1), "Identify")
         self.assertEqual(window.tabs.tabText(2), "Advanced Control")
-        self.assertEqual(window.tabs.tabText(3), "PI Parameters")
+        self.assertEqual(window.tabs.tabText(3), "Loop Parameters")
         self.assertFalse(window.plot_group.isChecked())
         self.assertEqual(window.current_apply_button.text(), "Apply Current Refs")
         self.assertEqual(window.current_pi_apply_button.text(), "Apply Current PI")
+        self.assertEqual(window.position_pd_apply_button.text(), "Apply Position PD")
 
     def test_mode_change_updates_target_label(self):
         window = self._window()

@@ -198,14 +198,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1
   - 速度模式 `speed`
   - 位置模式 `position`
   - 本地 preset 保存/加载
-- `PI Parameters`
-  - 电流环 / 速度环 / 位置环 `Kp / Ki`
+- `Loop Parameters`
+  - 电流环 / 速度环 `Kp / Ki`
+  - `Position Loop PD`: 位置环 `Kp / Kd`
   - 本地默认参数加载与 preset 保存/加载
 
 当前 GUI 使用用户本地 JSON 配置文件保存：
 - 最近使用的串口、波特率、模式
 - 常用目标值
-- PI 参数默认值
+- 电流/速度 PI 与位置 PD 默认值
 
 默认配置文件路径：
 - Windows: `%USERPROFILE%\\.24v_foc_host_gui.json`
@@ -272,7 +273,7 @@ parser.feed_data(serial_data)
 | Clear Fault | `CMD:CLEAR_FAULT` | Clear fault status |
 | Set Current PI | `CMD:PI_CURRENT,kp,ki` | Set current loop PI |
 | Set Speed PI | `CMD:PI_SPEED,kp,ki` | Set speed loop PI |
-| Set Position PI | `CMD:PI_POS,kp,ki` | Set position loop PI |
+| Set Position PD | `CMD:PD_POS,kp,kd` | Set position loop PD |
 
 Notes / 说明:
 - Each command must end with newline (`\n` or `\r\n`) for parsing.

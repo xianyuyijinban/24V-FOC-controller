@@ -210,6 +210,24 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("ADC_Sampling_EndControlCycle();", foc_c)
         self.assertIn("ADC_Sampling_ResetTimingState();", foc_c)
 
+    def test_position_loop_uses_explicit_pd_damping_contract(self):
+        foc_h = (ROOT / "MDK-ARM" / "code" / "foc_app.h").read_text(encoding="utf-8")
+        foc_c = (ROOT / "MDK-ARM" / "code" / "foc_app.c").read_text(encoding="utf-8")
+        it_c = (ROOT / "Core" / "Src" / "stm32h7xx_it.c").read_text(encoding="utf-8")
+
+        self.assertIn("typedef struct {", foc_h)
+        self.assertIn("float kp;", foc_h)
+        self.assertIn("float kd;", foc_h)
+        self.assertIn("} FOC_PositionPD_t;", foc_h)
+        self.assertIn("FOC_PositionPD_t pos_pd;", foc_h)
+        self.assertIn("FOC_PositionPD_Init(&handle->pos_pd", foc_c)
+        self.assertIn("FOC_PositionPD_Update(&handle->pos_pd", foc_c)
+        self.assertIn("handle->speed_mech", foc_c)
+        self.assertIn("FOC_AngleNormalize(pos_error)", foc_c)
+        self.assertNotIn("FOC_PI_Update(&handle->pi_pos", foc_c)
+        self.assertIn('CMD:PD_POS,%f,%f', it_c)
+        self.assertNotIn('CMD:PI_POS,%f,%f', it_c)
+
     def test_uart_upload_includes_adc_sampling_diagnostics(self):
         uart_h = (ROOT / "MDK-ARM" / "code" / "uart_upload.h").read_text(encoding="utf-8")
         uart_c = (ROOT / "MDK-ARM" / "code" / "uart_upload.c").read_text(encoding="utf-8")
@@ -607,11 +625,14 @@ class TestBuildSystemConsistency(unittest.TestCase):
         self.assertIn("python -m HostComputer.gui_app", readme)
         self.assertIn("HostComputer/main_window.py", readme)
         self.assertIn("Advanced Control", readme)
-        self.assertIn("PI Parameters", readme)
+        self.assertIn("Loop Parameters", readme)
+        self.assertIn("Position Loop PD", readme)
         self.assertIn("Identify", readme)
         self.assertIn("HostMainWindow", architecture)
         self.assertIn("gui_logic.py", architecture)
         self.assertIn("Debug Panel", architecture)
+        self.assertIn("Loop Parameters", architecture)
+        self.assertIn("Position Loop PD", architecture)
 
     def test_host_gui_packaging_contract(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -16,11 +16,12 @@ from gui_logic import (
     GuiProfile,
     HostAppState,
     LoopTuning,
+    PositionLoopTuning,
     RollingPlotBuffer,
     apply_command_effects,
     apply_packet_effects,
     build_current_ref_command,
-    build_pi_command,
+    build_loop_gain_command,
     build_position_ref_command,
     build_speed_ref_command,
     button_enable_state,
@@ -51,9 +52,9 @@ class TestGuiLogic(unittest.TestCase):
         self.assertEqual(build_position_ref_command("-3.0"), "CMD:PREF,-3.000\n")
 
     def test_pi_dispatch_routes_to_expected_commands(self):
-        self.assertEqual(build_pi_command("current", "0.100", "0.002"), "CMD:PI_CURRENT,0.100000,0.002000\n")
-        self.assertEqual(build_pi_command("speed", "1.250", "0.015"), "CMD:PI_SPEED,1.250000,0.015000\n")
-        self.assertEqual(build_pi_command("position", "3.000", "0.250"), "CMD:PI_POS,3.000000,0.250000\n")
+        self.assertEqual(build_loop_gain_command("current", "0.100", "0.002"), "CMD:PI_CURRENT,0.100000,0.002000\n")
+        self.assertEqual(build_loop_gain_command("speed", "1.250", "0.015"), "CMD:PI_SPEED,1.250000,0.015000\n")
+        self.assertEqual(build_loop_gain_command("position", "3.000", "0.250"), "CMD:PD_POS,3.000000,0.250000\n")
 
     def test_button_enable_state_tracks_connection_and_power_workflow(self):
         disconnected = button_enable_state(HostAppState(is_connected=False))
@@ -178,7 +179,7 @@ class TestGuiLogic(unittest.TestCase):
                 position_target=1.57,
                 current_pi=LoopTuning(kp=0.2, ki=0.01),
                 speed_pi=LoopTuning(kp=1.0, ki=0.1),
-                position_pi=LoopTuning(kp=2.0, ki=0.2),
+                position_pd=PositionLoopTuning(kp=2.0, kd=0.2),
             )
             save_gui_profile(profile_path, profile)
             loaded = load_gui_profile(profile_path)
@@ -189,6 +190,20 @@ class TestGuiLogic(unittest.TestCase):
         self.assertEqual(loaded.log_filters, ["ERROR", "TX"])
         self.assertEqual(loaded.current_target, (0.1, 0.8))
         self.assertEqual(loaded.speed_pi.kp, 1.0)
+        self.assertEqual(loaded.position_pd.kd, 0.2)
+
+    def test_legacy_position_pi_profile_keeps_safe_default_kd(self):
+        legacy_payload = {
+            "position_pi": {
+                "kp": 6.0,
+                "ki": 0.8,
+            }
+        }
+
+        loaded = GuiProfile.from_dict(legacy_payload)
+
+        self.assertEqual(loaded.position_pd.kp, 6.0)
+        self.assertEqual(loaded.position_pd.kd, 0.10)
 
     def test_stale_data_detection_uses_threshold(self):
         self.assertFalse(is_data_stale(last_packet_received_at_ms=1500, now_ms=2200, threshold_ms=1000))

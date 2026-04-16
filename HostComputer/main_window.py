@@ -40,11 +40,12 @@ try:
         GuiProfile,
         HostAppState,
         LoopTuning,
+        PositionLoopTuning,
         RollingPlotBuffer,
         apply_command_effects,
         apply_packet_effects,
         build_current_ref_command,
-        build_pi_command,
+        build_loop_gain_command,
         build_position_ref_command,
         build_speed_ref_command,
         button_enable_state,
@@ -67,11 +68,12 @@ except ImportError:
         GuiProfile,
         HostAppState,
         LoopTuning,
+        PositionLoopTuning,
         RollingPlotBuffer,
         apply_command_effects,
         apply_packet_effects,
         build_current_ref_command,
-        build_pi_command,
+        build_loop_gain_command,
         build_position_ref_command,
         build_speed_ref_command,
         button_enable_state,
@@ -121,7 +123,7 @@ class HostMainWindow(QMainWindow):
         self.tabs.addTab(self._build_debug_panel(), "Debug Panel")
         self.tabs.addTab(self._build_identify_tab(), "Identify")
         self.tabs.addTab(self._build_advanced_control_tab(), "Advanced Control")
-        self.tabs.addTab(self._build_pi_tab(), "PI Parameters")
+        self.tabs.addTab(self._build_pi_tab(), "Loop Parameters")
 
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(250)
@@ -520,7 +522,7 @@ class HostMainWindow(QMainWindow):
         self.current_pi_defaults_button = QPushButton("Load Defaults")
         self.current_pi_defaults_button.clicked.connect(lambda: self._apply_loop_defaults("current"))
         self.current_pi_apply_button = QPushButton("Apply Current PI")
-        self.current_pi_apply_button.clicked.connect(lambda: self._apply_pi("current"))
+        self.current_pi_apply_button.clicked.connect(lambda: self._apply_loop_gains("current"))
         current_layout.addRow("Kp", self.current_pi_kp_input)
         current_layout.addRow("Ki", self.current_pi_ki_input)
         current_layout.addRow(self.current_pi_defaults_button, self.current_pi_apply_button)
@@ -533,24 +535,24 @@ class HostMainWindow(QMainWindow):
         self.speed_pi_defaults_button = QPushButton("Load Defaults")
         self.speed_pi_defaults_button.clicked.connect(lambda: self._apply_loop_defaults("speed"))
         self.speed_pi_apply_button = QPushButton("Apply Speed PI")
-        self.speed_pi_apply_button.clicked.connect(lambda: self._apply_pi("speed"))
+        self.speed_pi_apply_button.clicked.connect(lambda: self._apply_loop_gains("speed"))
         speed_layout.addRow("Kp", self.speed_pi_kp_input)
         speed_layout.addRow("Ki", self.speed_pi_ki_input)
         speed_layout.addRow(self.speed_pi_defaults_button, self.speed_pi_apply_button)
         layout.addWidget(self.speed_pi_group)
 
-        self.position_pi_group = QGroupBox("Position Loop PI")
-        position_layout = QFormLayout(self.position_pi_group)
-        self.position_pi_kp_input = QLineEdit()
-        self.position_pi_ki_input = QLineEdit()
-        self.position_pi_defaults_button = QPushButton("Load Defaults")
-        self.position_pi_defaults_button.clicked.connect(lambda: self._apply_loop_defaults("position"))
-        self.position_pi_apply_button = QPushButton("Apply Position PI")
-        self.position_pi_apply_button.clicked.connect(lambda: self._apply_pi("position"))
-        position_layout.addRow("Kp", self.position_pi_kp_input)
-        position_layout.addRow("Ki", self.position_pi_ki_input)
-        position_layout.addRow(self.position_pi_defaults_button, self.position_pi_apply_button)
-        layout.addWidget(self.position_pi_group)
+        self.position_pd_group = QGroupBox("Position Loop PD")
+        position_layout = QFormLayout(self.position_pd_group)
+        self.position_pd_kp_input = QLineEdit()
+        self.position_pd_kd_input = QLineEdit()
+        self.position_pd_defaults_button = QPushButton("Load Defaults")
+        self.position_pd_defaults_button.clicked.connect(lambda: self._apply_loop_defaults("position"))
+        self.position_pd_apply_button = QPushButton("Apply Position PD")
+        self.position_pd_apply_button.clicked.connect(lambda: self._apply_loop_gains("position"))
+        position_layout.addRow("Kp", self.position_pd_kp_input)
+        position_layout.addRow("Kd", self.position_pd_kd_input)
+        position_layout.addRow(self.position_pd_defaults_button, self.position_pd_apply_button)
+        layout.addWidget(self.position_pd_group)
 
         layout.addStretch(1)
         return widget
@@ -570,18 +572,19 @@ class HostMainWindow(QMainWindow):
         self.position_ref_input.setText(f"{self._profile.position_target:.3f}")
         self._set_loop_inputs("current", self._profile.current_pi)
         self._set_loop_inputs("speed", self._profile.speed_pi)
-        self._set_loop_inputs("position", self._profile.position_pi)
+        self._set_loop_inputs("position", self._profile.position_pd)
         self._loading_profile = False
 
-    def _set_loop_inputs(self, loop_name: str, tuning: LoopTuning):
+    def _set_loop_inputs(self, loop_name: str, tuning: LoopTuning | PositionLoopTuning):
         widgets = {
             "current": (self.current_pi_kp_input, self.current_pi_ki_input),
             "speed": (self.speed_pi_kp_input, self.speed_pi_ki_input),
-            "position": (self.position_pi_kp_input, self.position_pi_ki_input),
+            "position": (self.position_pd_kp_input, self.position_pd_kd_input),
         }
-        kp_widget, ki_widget = widgets[loop_name]
+        kp_widget, gain2_widget = widgets[loop_name]
+        gain2_value = tuning.ki if hasattr(tuning, "ki") else tuning.kd
         kp_widget.setText(f"{tuning.kp:.6f}")
-        ki_widget.setText(f"{tuning.ki:.6f}")
+        gain2_widget.setText(f"{gain2_value:.6f}")
 
     def set_serial_worker(self, worker):
         self._serial_worker = worker
@@ -651,7 +654,7 @@ class HostMainWindow(QMainWindow):
             self.position_apply_button,
             self.current_pi_apply_button,
             self.speed_pi_apply_button,
-            self.position_pi_apply_button,
+            self.position_pd_apply_button,
             self.quick_arm_button,
             self.quick_clear_rearm_button,
         ):
@@ -758,9 +761,9 @@ class HostMainWindow(QMainWindow):
             kp=self._float_or_default(self.speed_pi_kp_input.text()),
             ki=self._float_or_default(self.speed_pi_ki_input.text()),
         )
-        self._profile.position_pi = LoopTuning(
-            kp=self._float_or_default(self.position_pi_kp_input.text()),
-            ki=self._float_or_default(self.position_pi_ki_input.text()),
+        self._profile.position_pd = PositionLoopTuning(
+            kp=self._float_or_default(self.position_pd_kp_input.text()),
+            kd=self._float_or_default(self.position_pd_kd_input.text()),
         )
         save_gui_profile(self._profile_path, self._profile)
 
@@ -819,30 +822,31 @@ class HostMainWindow(QMainWindow):
             self.apply_mode_selection(2)
         self._dispatch_command(command)
 
-    def _apply_pi(self, loop_name: str):
+    def _apply_loop_gains(self, loop_name: str):
         inputs = {
             "current": (self.current_pi_kp_input, self.current_pi_ki_input),
             "speed": (self.speed_pi_kp_input, self.speed_pi_ki_input),
-            "position": (self.position_pi_kp_input, self.position_pi_ki_input),
+            "position": (self.position_pd_kp_input, self.position_pd_kd_input),
         }
-        kp_widget, ki_widget = inputs[loop_name]
+        kp_widget, gain2_widget = inputs[loop_name]
         try:
-            command = build_pi_command(loop_name, kp_widget.text(), ki_widget.text())
+            command = build_loop_gain_command(loop_name, kp_widget.text(), gain2_widget.text())
         except ValueError as exc:
             self._show_notification("ERROR", str(exc))
             return
         kp_widget.setText(f"{self._float_or_default(kp_widget.text()):.6f}")
-        ki_widget.setText(f"{self._float_or_default(ki_widget.text()):.6f}")
+        gain2_widget.setText(f"{self._float_or_default(gain2_widget.text()):.6f}")
         self._dispatch_command(command)
 
     def _apply_loop_defaults(self, loop_name: str):
         defaults = {
             "current": self._profile.current_pi,
             "speed": self._profile.speed_pi,
-            "position": self._profile.position_pi,
+            "position": self._profile.position_pd,
         }
         self._set_loop_inputs(loop_name, defaults[loop_name])
-        self._show_notification("INFO", f"Loaded {loop_name} PI defaults from local preset.")
+        gain_kind = "PD" if loop_name == "position" else "PI"
+        self._show_notification("INFO", f"Loaded {loop_name} {gain_kind} defaults from local preset.")
 
     def _save_local_preset(self):
         self._persist_profile_from_widgets(force=True)

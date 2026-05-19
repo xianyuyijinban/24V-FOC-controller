@@ -16,15 +16,21 @@ from gui_logic import (
     GuiProfile,
     HostAppState,
     LoopTuning,
+    PLOT_CHANNELS,
     PositionLoopTuning,
     RollingPlotBuffer,
     apply_command_effects,
     apply_packet_effects,
     build_current_ref_command,
     build_loop_gain_command,
+    build_motor_pn_command,
     build_position_ref_command,
     build_speed_ref_command,
+    build_vbus_limit_command,
     button_enable_state,
+    can_edit_vbus_limits,
+    fault_error_log_entry,
+    fault_packet_log_entry,
     fault_summary_text,
     format_plot_csv,
     is_data_stale,
@@ -33,23 +39,48 @@ from gui_logic import (
     packet_snapshot,
     parse_float_field,
     save_gui_profile,
+    stall_mode_confirmation_text,
+    should_confirm_stall_mode_enable,
 )
 
 
 class TestGuiLogic(unittest.TestCase):
+    def test_gui_profile_defaults_to_230400_baud(self):
+        profile = GuiProfile()
+        self.assertEqual(profile.baud_rate, 230400)
+        self.assertEqual(profile.undervoltage_limit, 18.0)
+        self.assertEqual(profile.overvoltage_limit, 30.0)
+        self.assertEqual(profile.motor_pn, 11)
+
     def test_mode_target_label_matches_control_mode(self):
         self.assertEqual(mode_target_label(0), "Iq_ref (A)")
-        self.assertEqual(mode_target_label(1), "Speed (rad/s)")
-        self.assertEqual(mode_target_label(2), "Position (rad)")
+        self.assertEqual(mode_target_label(1), "速度 (rad/s)")
+        self.assertEqual(mode_target_label(2), "位置 (deg)")
 
     def test_parse_float_field_rejects_empty_input(self):
-        with self.assertRaisesRegex(ValueError, "Speed is required"):
-            parse_float_field("", "Speed")
+        with self.assertRaisesRegex(ValueError, "速度.*必填"):
+            parse_float_field("", "速度")
 
     def test_reference_dispatch_routes_to_expected_commands(self):
         self.assertEqual(build_current_ref_command("0.25", "1.5"), "CMD:IREF,0.250,1.500\n")
         self.assertEqual(build_speed_ref_command("12.5"), "CMD:SREF,12.500\n")
-        self.assertEqual(build_position_ref_command("-3.0"), "CMD:PREF,-3.000\n")
+        self.assertEqual(build_position_ref_command("180"), "CMD:PREF,3.142\n")
+        self.assertEqual(build_vbus_limit_command("9.0", "15.5"), "CMD:VBUS_LIMIT,9.000,15.500\n")
+        self.assertEqual(build_motor_pn_command("7"), "CMD:MOTOR_PN,7\n")
+
+    def test_position_ref_rejects_out_of_single_turn_degree_range(self):
+        with self.assertRaisesRegex(ValueError, "位置.*>= 0"):
+            build_position_ref_command("-1")
+        with self.assertRaisesRegex(ValueError, "位置.*<= 360"):
+            build_position_ref_command("361")
+
+    def test_motor_pn_command_validates_integer_range(self):
+        with self.assertRaisesRegex(ValueError, "极对数.*整数"):
+            build_motor_pn_command("7.5")
+        with self.assertRaisesRegex(ValueError, "极对数.*>= 1"):
+            build_motor_pn_command("0")
+        with self.assertRaisesRegex(ValueError, "极对数.*<= 50"):
+            build_motor_pn_command("51")
 
     def test_pi_dispatch_routes_to_expected_commands(self):
         self.assertEqual(build_loop_gain_command("current", "0.100", "0.002"), "CMD:PI_CURRENT,0.100000,0.002000\n")
@@ -85,6 +116,10 @@ class TestGuiLogic(unittest.TestCase):
         self.assertTrue(state.motor_enabled)
         apply_command_effects(state, "CMD:IDENTIFY,1")
         self.assertTrue(state.identify_active)
+        apply_command_effects(state, "CMD:STALL_MODE,1")
+        self.assertTrue(state.stall_mode_armed)
+        apply_command_effects(state, "CMD:STALL_MODE,0")
+        self.assertFalse(state.stall_mode_armed)
         apply_command_effects(state, "CMD:UNLOCK,0")
         self.assertFalse(state.power_unlocked)
         self.assertFalse(state.motor_enabled)
@@ -102,10 +137,20 @@ class TestGuiLogic(unittest.TestCase):
         self.assertTrue(state.identify_active)
         self.assertEqual(state.foc_state, FOC_STATE_PARAM_IDENTIFY)
 
-        apply_packet_effects(state, FOCDataPacket(foc_state=FOC_STATE_RUNNING, is_fault_active=False))
+        apply_packet_effects(
+            state,
+            FOCDataPacket(
+                foc_state=FOC_STATE_RUNNING,
+                is_fault_active=False,
+                motor_identified=True,
+                stall_mode_armed=True,
+            ),
+        )
         self.assertTrue(state.motor_enabled)
         self.assertFalse(state.identify_active)
         self.assertEqual(state.foc_state, FOC_STATE_RUNNING)
+        self.assertTrue(state.motor_identified)
+        self.assertTrue(state.stall_mode_armed)
 
     def test_button_enable_state_blocks_start_and_enable_when_fault_is_active(self):
         state = HostAppState(
@@ -148,23 +193,326 @@ class TestGuiLogic(unittest.TestCase):
             vgs_status2=0x00C0,
         )
         summary = fault_summary_text(packet)
-        self.assertIn("ACTIVE", summary["state"])
+        self.assertIn("故障激活", summary["state"])
         self.assertIn("0x0640", summary["fault1"])
         self.assertIn("0x00C0", summary["vgs2"])
 
+    def test_fault_summary_text_marks_application_fault_without_drv_flags(self):
+        packet = FOCDataPacket(
+            timestamp=456,
+            foc_state=FOC_STATE_FAULT,
+            is_fault_active=False,
+            app_fault_code=3,
+        )
+
+        summary = fault_summary_text(packet)
+
+        self.assertIn("故障激活", summary["state"])
+        self.assertIn("欠压", summary["state"])
+        self.assertIn("应用故障", summary["fault1"])
+
+    def test_fault_summary_text_surfaces_voltage_warning_without_fault_gating(self):
+        packet = FOCDataPacket(
+            timestamp=456,
+            foc_state=FOC_STATE_READY,
+            is_fault_active=False,
+            app_warning_flags=1,
+            app_fault_code=0,
+        )
+
+        summary = fault_summary_text(packet)
+
+        self.assertIn("告警激活", summary["state"])
+        self.assertIn("欠压", summary["state"])
+        self.assertIn("应用告警", summary["fault1"])
+
+    def test_button_enable_state_keeps_enable_available_when_only_warning_is_present(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_enabled=False,
+            foc_state=FOC_STATE_READY,
+            fault_active=False,
+        )
+
+        button_state = button_enable_state(state)
+
+        self.assertTrue(button_state["can_enable"])
+
+    def test_fault_packet_log_entry_builds_summary_for_compact_fault_frame(self):
+        packet = FOCDataPacket(
+            timestamp=3456,
+            foc_state=FOC_STATE_FAULT,
+            fault_flags=0x00000020,
+            fault_status1=0x0640,
+            vgs_status2=0x00C0,
+            encoder_detected=False,
+            is_fault_active=True,
+            raw_text="F,3456,5,0x00000020,1,0,0x0640,0x00C0,0xFFFF",
+        )
+
+        entry = fault_packet_log_entry(packet)
+
+        self.assertIsNotNone(entry)
+        signature, text = entry
+        self.assertIn("summary", signature)
+        self.assertIn("故障摘要", text)
+        self.assertIn("0x0640", text)
+        self.assertIn("未检测到", text)
+
+    def test_fault_packet_log_entry_logs_application_fault_without_drv_fault_bits(self):
+        packet = FOCDataPacket(
+            timestamp=3456,
+            foc_state=FOC_STATE_FAULT,
+            fault_flags=0x00000000,
+            fault_status1=0x0000,
+            vgs_status2=0x0000,
+            encoder_detected=True,
+            is_fault_active=False,
+            app_fault_code=4,
+            raw_text="N,3456,5,12.34,0.00,0.000,0.000,11.90,0x00000000,1,1,0,0,4,18.00,28.00",
+        )
+
+        entry = fault_packet_log_entry(packet)
+
+        self.assertIsNotNone(entry)
+        signature, text = entry
+        self.assertIn("summary", signature)
+        self.assertIn("应用故障", text)
+        self.assertIn("编码器", text)
+
+    def test_fault_packet_log_entry_keeps_detailed_fault_text(self):
+        detail = (
+            "========== !!! FAULT DETECTED !!! ==========\n"
+            "Time: 3456 ms\n"
+            "FAULT1: 0x0640 | VGS2: 0x00C0\n"
+            "[CRIT] VDS Overcurrent!\n"
+            "============================================="
+        )
+        packet = FOCDataPacket(
+            timestamp=3456,
+            foc_state=FOC_STATE_FAULT,
+            fault_status1=0x0640,
+            vgs_status2=0x00C0,
+            is_fault_active=True,
+            raw_text=detail,
+        )
+
+        entry = fault_packet_log_entry(packet)
+
+        self.assertIsNotNone(entry)
+        signature, text = entry
+        self.assertIn("detail", signature)
+        self.assertEqual(text, detail)
+
+    def test_fault_packet_log_entry_ignores_non_fault_diagnostic_snapshot(self):
+        detail = (
+            "========== !!! FAULT DETECTED !!! ==========\n"
+            "Time: 2338354 ms\n"
+            "[TLE5012 Encoder]\n"
+            "  Detected: YES\n"
+            "  Reset:    FAULT!\n"
+            "[FOC Application]\n"
+            "  State:    RUNNING\n"
+            "  AppFault: 0 (None)\n"
+            "[DRV8350S Fault Details]\n"
+            "  FAULT1: 0x0000 | VGS2: 0x0000\n"
+            "============================================="
+        )
+        packet = FOCDataPacket(
+            timestamp=2338354,
+            foc_state=FOC_STATE_RUNNING,
+            fault_status1=0x0000,
+            vgs_status2=0x0000,
+            app_fault_code=0,
+            is_fault_active=False,
+            raw_text=detail,
+        )
+
+        self.assertIsNone(fault_packet_log_entry(packet))
+
+    def test_fault_packet_detail_signature_ignores_live_sample_values(self):
+        detail_a = (
+            "========== !!! FAULT DETECTED !!! ==========\n"
+            "Time: 212183 ms\n"
+            "  AngleRaw: 21007 (0x520F)\n"
+            "  AppFault: 6 (Param Invalid)\n"
+            "[Motor Identification]\n"
+            "  State:  8 (ERROR)\n"
+            "  Error:  8 (MI_ERR_CURRENT_TOO_LOW / 识别电流过低)\n"
+            "  RsDiag: target=2.000 A | Vd_avg=5.540 V | Id_avg=-0.020 A\n"
+            "============================================="
+        )
+        detail_b = (
+            "========== !!! FAULT DETECTED !!! ==========\n"
+            "Time: 220183 ms\n"
+            "  AngleRaw: 20850 (0x5172)\n"
+            "  AppFault: 6 (Param Invalid)\n"
+            "[Motor Identification]\n"
+            "  State:  8 (ERROR)\n"
+            "  Error:  8 (MI_ERR_CURRENT_TOO_LOW / 识别电流过低)\n"
+            "  RsDiag: target=2.000 A | Vd_avg=5.541 V | Id_avg=-0.021 A\n"
+            "============================================="
+        )
+
+        entry_a = fault_packet_log_entry(
+            FOCDataPacket(
+                timestamp=212183,
+                foc_state=FOC_STATE_FAULT,
+                app_fault_code=6,
+                is_fault_active=True,
+                raw_text=detail_a,
+            )
+        )
+        entry_b = fault_packet_log_entry(
+            FOCDataPacket(
+                timestamp=220183,
+                foc_state=FOC_STATE_FAULT,
+                app_fault_code=6,
+                is_fault_active=True,
+                raw_text=detail_b,
+            )
+        )
+
+        self.assertIsNotNone(entry_a)
+        self.assertIsNotNone(entry_b)
+        self.assertEqual(entry_a[0], entry_b[0])
+
+    def test_fault_summary_includes_identification_failure_when_available(self):
+        entry = fault_packet_log_entry(
+            FOCDataPacket(
+                timestamp=6456,
+                foc_state=FOC_STATE_FAULT,
+                app_fault_code=6,
+                identify_state=9,
+                identify_error=12,
+                encoder_detected=True,
+                raw_text="F,6456,5,0x00000000,0,1,0,0x0000,0x0000,0x0000,0,6,9,12,11.90,9.00,16.00",
+            )
+        )
+
+        self.assertIsNotNone(entry)
+        self.assertIn("识别状态=9", entry[1])
+        self.assertIn("识别错误=12", entry[1])
+
+    def test_fault_packet_log_entry_ignores_normal_packet(self):
+        packet = FOCDataPacket(timestamp=100, foc_state=FOC_STATE_READY, is_fault_active=False, raw_text="N,100,3")
+        self.assertIsNone(fault_packet_log_entry(packet))
+
+    def test_fault_error_log_entry_only_accepts_fault_like_errors(self):
+        self.assertIsNone(fault_error_log_entry("INFO", "已连接到 COM16"))
+        self.assertIsNone(fault_error_log_entry("ERROR", "串口读取失败"))
+
+        entry = fault_error_log_entry("ERROR", "故障：母线过压，请检查电源。")
+
+        self.assertIsNotNone(entry)
+        signature, text = entry
+        self.assertIn("error", signature)
+        self.assertIn("母线过压", text)
+
+    def test_build_vbus_limit_command_validates_order_and_range(self):
+        with self.assertRaisesRegex(ValueError, "欠压阈值"):
+            build_vbus_limit_command("", "15.0")
+
+        with self.assertRaisesRegex(ValueError, "过压阈值必须 > 欠压阈值"):
+            build_vbus_limit_command("12.0", "12.0")
+
+        with self.assertRaisesRegex(ValueError, "过压阈值必须 > 欠压阈值"):
+            build_vbus_limit_command("15.0", "12.0")
+
+    def test_can_edit_vbus_limits_only_when_motor_is_not_active(self):
+        self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=False)))
+        self.assertTrue(can_edit_vbus_limits(HostAppState(is_connected=True)))
+        self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=True, motor_enabled=True)))
+        self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=True, identify_active=True)))
+
+    def test_should_confirm_stall_mode_enable_only_when_unidentified_and_unarmed(self):
+        state = HostAppState(is_connected=True, power_unlocked=True)
+        self.assertTrue(should_confirm_stall_mode_enable(state))
+
+        state.motor_identified = True
+        self.assertFalse(should_confirm_stall_mode_enable(state))
+
+        state.motor_identified = False
+        state.stall_mode_armed = True
+        self.assertFalse(should_confirm_stall_mode_enable(state))
+
+    def test_should_confirm_stall_mode_enable_when_encoder_is_offline(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_identified=True,
+            encoder_detected=False,
+        )
+        self.assertTrue(should_confirm_stall_mode_enable(state))
+
+    def test_stall_mode_confirmation_text_mentions_encoder_warning(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_identified=True,
+            encoder_detected=False,
+        )
+        self.assertIn("TLE5012", stall_mode_confirmation_text(state))
+        self.assertIn("堵转模式", stall_mode_confirmation_text(state))
+        self.assertIn("开环试转", stall_mode_confirmation_text(state))
+
+    def test_host_state_tracks_stall_open_loop_runtime_flag(self):
+        state = HostAppState()
+        self.assertFalse(state.stall_open_loop_active)
+
     def test_rolling_plot_buffer_caps_history_and_exports_series(self):
         buffer = RollingPlotBuffer(max_samples=2)
-        buffer.append_packet(FOCDataPacket(timestamp=10, speed=1.0, Iq=0.2))
-        buffer.append_packet(FOCDataPacket(timestamp=20, speed=2.0, Iq=0.4))
-        buffer.append_packet(FOCDataPacket(timestamp=30, speed=3.0, Iq=0.6))
+        buffer.append_packet(FOCDataPacket(timestamp=10, speed=1.0, Iq=0.2, Ia=0.1, Ib=0.2, Ic=-0.3, vbus=11.7, speed_ref=0.5, pos_ref=1.0))
+        buffer.append_packet(FOCDataPacket(timestamp=20, speed=2.0, Iq=0.4, Ia=0.4, Ib=0.5, Ic=-0.9, vbus=11.8, speed_ref=1.5, pos_ref=2.0))
+        buffer.append_packet(FOCDataPacket(timestamp=30, speed=3.0, Iq=0.6, Ia=0.7, Ib=0.8, Ic=-1.5, vbus=11.9, speed_ref=2.5, pos_ref=3.0))
 
         times, values = buffer.series("speed")
         self.assertEqual(times, [20.0, 30.0])
         self.assertEqual(values, [2.0, 3.0])
 
-        csv_text = format_plot_csv(buffer.export_rows(["speed", "Iq"]))
-        self.assertIn("timestamp_ms,speed,Iq", csv_text)
-        self.assertIn("30,3.0,0.6", csv_text)
+        _, ia_values = buffer.series("Ia")
+        self.assertEqual(ia_values, [0.4, 0.7])
+
+        _, vbus_values = buffer.series("Vbus")
+        self.assertEqual(vbus_values, [11.8, 11.9])
+
+        _, pos_ref_values = buffer.series("pos_ref_deg")
+        self.assertEqual(pos_ref_values, [114.59155902616465, 171.88733853924697])
+        self.assertIn("pos_ref_deg", PLOT_CHANNELS)
+        self.assertNotIn("pos_ref", PLOT_CHANNELS)
+        self.assertIn("speed_ref", PLOT_CHANNELS)
+
+        csv_text = format_plot_csv(buffer.export_rows(["speed", "speed_ref", "pos_ref_deg", "Iq", "Ia", "Ib", "Ic", "Vbus"]))
+        self.assertIn("timestamp_ms,speed,speed_ref,pos_ref_deg,Iq,Ia,Ib,Ic,Vbus", csv_text)
+        self.assertIn("30,3.0,2.5,171.88733853924697,0.6,0.7,0.8,-1.5,11.9", csv_text)
+
+    def test_rolling_plot_buffer_defaults_to_30_second_history(self):
+        buffer = RollingPlotBuffer()
+
+        self.assertEqual(buffer.history_window_ms, 30000)
+
+        buffer.append_packet(FOCDataPacket(timestamp=0, speed=1.0))
+        buffer.append_packet(FOCDataPacket(timestamp=29999, speed=2.0))
+        buffer.append_packet(FOCDataPacket(timestamp=30001, speed=3.0))
+
+        times, values = buffer.series("speed")
+        self.assertEqual(times, [29999.0, 30001.0])
+        self.assertEqual(values, [2.0, 3.0])
+
+    def test_rolling_plot_buffer_merges_phase_current_only_samples(self):
+        buffer = RollingPlotBuffer()
+
+        buffer.append_packet(FOCDataPacket(timestamp=1000, angle=45.0, speed=2.0, Iq=0.4, Ia=0.1, Ib=0.2, Ic=-0.3, vbus=11.8))
+        buffer.append_packet(FOCDataPacket(timestamp=1005, Ia=0.4, Ib=0.5, Ic=-0.9, phase_current_only=True))
+
+        times, ia_values = buffer.series("Ia")
+        _, speed_values = buffer.series("speed")
+        _, vbus_values = buffer.series("Vbus")
+        self.assertEqual(times, [1000.0, 1005.0])
+        self.assertEqual(ia_values, [0.1, 0.4])
+        self.assertEqual(speed_values, [2.0, 2.0])
+        self.assertEqual(vbus_values, [11.8, 11.8])
 
     def test_profile_round_trip_persists_settings_and_presets(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -177,6 +525,7 @@ class TestGuiLogic(unittest.TestCase):
                 current_target=(0.1, 0.8),
                 speed_target=20.0,
                 position_target=1.57,
+                motor_pn=11,
                 current_pi=LoopTuning(kp=0.2, ki=0.01),
                 speed_pi=LoopTuning(kp=1.0, ki=0.1),
                 position_pd=PositionLoopTuning(kp=2.0, kd=0.2),
@@ -189,6 +538,7 @@ class TestGuiLogic(unittest.TestCase):
         self.assertEqual(loaded.selected_mode, 2)
         self.assertEqual(loaded.log_filters, ["ERROR", "TX"])
         self.assertEqual(loaded.current_target, (0.1, 0.8))
+        self.assertEqual(loaded.motor_pn, 11)
         self.assertEqual(loaded.speed_pi.kp, 1.0)
         self.assertEqual(loaded.position_pd.kd, 0.2)
 
@@ -203,7 +553,34 @@ class TestGuiLogic(unittest.TestCase):
         loaded = GuiProfile.from_dict(legacy_payload)
 
         self.assertEqual(loaded.position_pd.kp, 6.0)
-        self.assertEqual(loaded.position_pd.kd, 0.10)
+        self.assertEqual(loaded.position_pd.kd, 0.12)
+
+    def test_legacy_gui_profile_migrates_old_24v_defaults_to_12v_bench_defaults(self):
+        legacy_payload = {
+            "undervoltage_limit": 18.0,
+            "overvoltage_limit": 28.0,
+            "current_pi": {"kp": 0.2, "ki": 0.01},
+            "speed_pi": {"kp": 1.0, "ki": 0.1},
+            "position_pd": {"kp": 10.0, "kd": 0.10},
+        }
+
+        loaded = GuiProfile.from_dict(legacy_payload)
+
+        self.assertEqual(loaded.motor_pn, 11)
+        self.assertEqual(loaded.current_pi, LoopTuning(kp=0.3, ki=0.0))
+        self.assertEqual(loaded.speed_pi, LoopTuning(kp=0.3, ki=0.0))
+        self.assertEqual(loaded.position_pd, PositionLoopTuning(kp=4.0, kd=0.12))
+
+    def test_default_loop_tuning_matches_12v_firmware_baseline(self):
+        profile = GuiProfile()
+
+        self.assertEqual(profile.current_pi.kp, 0.3)
+        self.assertEqual(profile.current_pi.ki, 0.0)
+        self.assertEqual(profile.motor_pn, 11)
+        self.assertEqual(profile.speed_pi.kp, 0.3)
+        self.assertEqual(profile.speed_pi.ki, 0.0)
+        self.assertEqual(profile.position_pd.kp, 4.0)
+        self.assertEqual(profile.position_pd.kd, 0.12)
 
     def test_stale_data_detection_uses_threshold(self):
         self.assertFalse(is_data_stale(last_packet_received_at_ms=1500, now_ms=2200, threshold_ms=1000))

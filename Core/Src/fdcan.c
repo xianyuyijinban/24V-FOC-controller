@@ -33,8 +33,7 @@ void MX_FDCAN1_Init(void)
   /* USER CODE BEGIN FDCAN1_Init 0 */
 #if FOC_DEBUG_DISABLE_FDCAN_INIT
   return;
-#endif
-
+#else
   /* USER CODE END FDCAN1_Init 0 */
 
   /* USER CODE BEGIN FDCAN1_Init 1 */
@@ -75,6 +74,7 @@ void MX_FDCAN1_Init(void)
   /* USER CODE BEGIN FDCAN1_Init 2 */
 
   /* USER CODE END FDCAN1_Init 2 */
+#endif
 
 }
 

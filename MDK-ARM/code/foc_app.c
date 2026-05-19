@@ -7,10 +7,12 @@
 #include "foc_app.h"
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 
 /* 外部变量声明（来自其他模块） */
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim1;
+extern SPI_HandleTypeDef hspi3;
 extern volatile uint16_t adc_data[8];
 extern DRV8350S_Handle_t drv8350s;
 
@@ -20,10 +22,67 @@ extern DRV8350S_Handle_t drv8350s;
 
 /* 私有函数前向声明 */
 static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle);
-static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault);
+static void FOC_App_ApplyKnownMotorConstants(FOC_AppHandle_t *handle);
+static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault, uint8_t require_encoder);
 static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
+static uint8_t FOC_App_IsValidHandlePointer(const FOC_AppHandle_t *handle);
+static void FOC_App_UpdateIdentifyState(FOC_AppHandle_t *handle);
+static void FOC_App_EnterFault(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
+static uint8_t FOC_App_IsEncoderFaultActive(void);
+static uint8_t FOC_App_IsEncoderReadyForPowerStage(FOC_FaultCode_t *fault);
+static float FOC_App_GetCurrentRefLimit(const FOC_AppHandle_t *handle);
+static void FOC_App_ClampSpeedPiIntegral(FOC_PI_Controller_t *pi, float output_max, float output_min);
+static void FOC_App_PrimeNeutralPwm(void);
+static uint8_t FOC_App_ShouldBootstrapNeutralPwm(const FOC_AppHandle_t *handle, const ADC_Sampling_t *adc);
+static void FOC_App_RefreshEncoderFeedback(FOC_AppHandle_t *handle);
 static void FOC_PositionPD_Init(FOC_PositionPD_t *pd, float kp, float kd, float output_max, float output_min);
 static float FOC_PositionPD_Update(const FOC_PositionPD_t *pd, float pos_error, float speed_feedback);
+
+float FOC_App_PositionSensorToControlFrame(const FOC_AppHandle_t *handle, float pos_ref_sensor)
+{
+    float encoder_dir = 1.0f;
+
+    if (handle != NULL) {
+        encoder_dir = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+    }
+
+    return FOC_AngleNormalize(pos_ref_sensor * encoder_dir);
+}
+
+float FOC_App_PositionControlToSensorFrame(const FOC_AppHandle_t *handle, float pos_ref_control)
+{
+    float encoder_dir = 1.0f;
+    float pos_ref_sensor;
+
+    if (handle != NULL) {
+        encoder_dir = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+    }
+
+    pos_ref_sensor = FOC_AngleNormalize(pos_ref_control * encoder_dir);
+    if (pos_ref_sensor < 0.0f) {
+        pos_ref_sensor += 2.0f * FOC_PI;
+    }
+    return pos_ref_sensor;
+}
+
+static uint8_t FOC_App_IsValidHandlePointer(const FOC_AppHandle_t *handle)
+{
+    uintptr_t address = (uintptr_t)handle;
+
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    if ((address & 0x3U) != 0U) {
+        return 0U;
+    }
+
+    if ((address >= 0x20000000UL) && (address <= 0x3FFFFFFFUL)) {
+        return 1U;
+    }
+
+    return 0U;
+}
 
 /**
  * @brief FOC应用层初始化
@@ -40,27 +99,34 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->protection.overcurrent_limit_a = FOC_DEFAULT_OVERCURRENT_LIMIT_A;
     handle->protection.overvoltage_limit_v = FOC_DEFAULT_OVERVOLTAGE_LIMIT_V;
     handle->protection.undervoltage_limit_v = FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V;
+    handle->stall_mode_armed = 0U;
     
     /* 初始化母线电压 */
     handle->Vbus = 0.0f;
+
+    /* 初始化FOC核心（使用默认PI参数，识别/加载参数后会更新） */
+    FOC_Init(&handle->foc, 1.0f, 0.1f, 1.0f, 0.1f);
+    FOC_SetCurrentResistance(&handle->foc, handle->motor_param.Rs);
     
     /* 初始化速度环PI控制器 */
-    FOC_PI_Init(&handle->pi_speed, 0.1f, 0.01f, 10.0f, -10.0f);
+    FOC_PI_Init(&handle->pi_speed, 0.30f, 0.0f, 10.0f, -10.0f);
     
     /* 初始化位置环PD控制器 - 输出速度给定 */
-    FOC_PositionPD_Init(&handle->pos_pd, 10.0f, 0.10f, 50.0f, -50.0f);
+    FOC_PositionPD_Init(&handle->pos_pd,
+                        FOC_POSITION_PD_KP_DEFAULT,
+                        FOC_POSITION_PD_KD_DEFAULT,
+                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
+                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
     
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
     
     /* 尝试加载参数 */
     FOC_App_LoadParam(handle);
-    
-    /* 初始化FOC核心（使用默认PI参数，识别后会更新） */
-    FOC_Init(&handle->foc, 1.0f, 0.1f, 1.0f, 0.1f);
+    FOC_App_UpdateIdentifyState(handle);
     
     /* 如果参数有效，更新控制环参数 */
-    if (Param_IsValid(&handle->motor_param)) {
+    if (handle->motor_identified) {
         FOC_App_UpdateLoopParams(handle);
         handle->state = FOC_STATE_READY;
     } else {
@@ -76,6 +142,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
 void FOC_App_MainLoop(FOC_AppHandle_t *handle)
 {
     MI_ErrorCode_t mi_error = MI_ERR_NONE;
+    FOC_FaultCode_t voltageFault = FOC_FAULT_NONE;
 
     if (handle->pending_disable) {
         handle->pending_disable = 0U;
@@ -103,15 +170,23 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
                 /* 识别结束后先关闭功率级，回到安全待机 */
                 FOC_App_Disable(handle);
 
-                /* 识别完成，保存参数 */
+                /* 识别完成，先确认得到的参数能通过最终有效性门槛，再保存。 */
+                FOC_App_UpdateIdentifyState(handle);
+                if (!handle->motor_identified) {
+                    handle->stall_mode_armed = 0U;
+                    FOC_App_EnterFault(handle, FOC_FAULT_PARAM_INVALID);
+                    return;
+                }
+
                 FOC_App_SaveParam(handle);
                 
                 /* 更新控制环参数 */
                 FOC_App_UpdateLoopParams(handle);
                 
+                handle->stall_mode_armed = 0U;
                 handle->fault_code = FOC_FAULT_NONE;
-                handle->state = FOC_STATE_READY;
-                handle->enable_identify = 0;
+                handle->state = handle->motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
+                handle->enable_identify = 0U;
             } else {
                 mi_error = MI_GetError(&handle->mi_handle);
             }
@@ -121,11 +196,10 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
                 FOC_App_Disable(handle);
                 if (mi_error == MI_ERR_ENCODER_INVALID) {
                     handle->fault_code = FOC_FAULT_ENCODER;
+                    FOC_App_EnterFault(handle, FOC_FAULT_ENCODER);
                 } else {
-                    handle->fault_code = FOC_FAULT_PARAM_INVALID;
+                    FOC_App_EnterFault(handle, FOC_FAULT_PARAM_INVALID);
                 }
-                handle->state = FOC_STATE_FAULT;
-                handle->enable_identify = 0;
             }
             break;
             
@@ -135,22 +209,27 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
             if (fabsf(handle->Ia) > handle->protection.overcurrent_limit_a || 
                 fabsf(handle->Ib) > handle->protection.overcurrent_limit_a ||
                 fabsf(handle->Ic) > handle->protection.overcurrent_limit_a) {
-                handle->fault_code = FOC_FAULT_OVERCURRENT;
                 FOC_App_Disable(handle);
-                handle->state = FOC_STATE_FAULT;
-            } else if (handle->Vbus > handle->protection.overvoltage_limit_v) {
-                handle->fault_code = FOC_FAULT_OVERVOLTAGE;
+                FOC_App_EnterFault(handle, FOC_FAULT_OVERCURRENT);
+            } else if (FOC_App_GetVoltageTripFault(handle, &voltageFault)) {
                 FOC_App_Disable(handle);
-                handle->state = FOC_STATE_FAULT;
-            } else if (handle->Vbus < handle->protection.undervoltage_limit_v) {
-                handle->fault_code = FOC_FAULT_UNDERVOLTAGE;
-                FOC_App_Disable(handle);
-                handle->state = FOC_STATE_FAULT;
+                FOC_App_EnterFault(handle, voltageFault);
             }
             break;
             
         case FOC_STATE_FAULT:
-            /* 故障状态，等待复位 */
+            if (((handle->fault_code == FOC_FAULT_UNDERVOLTAGE) ||
+                 (handle->fault_code == FOC_FAULT_OVERVOLTAGE)) &&
+                FOC_App_IsVoltageFaultRecovered(handle, handle->fault_code)) {
+                handle->fault_code = FOC_FAULT_NONE;
+                FOC_App_ResetMotionState(handle);
+                handle->state = handle->motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
+            } else if ((handle->fault_code == FOC_FAULT_ENCODER) &&
+                       TLE5012_IsDataValid()) {
+                handle->fault_code = FOC_FAULT_NONE;
+                FOC_App_ResetMotionState(handle);
+                handle->state = handle->motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
+            }
             break;
             
         default:
@@ -168,8 +247,21 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 {
     ADC_Sampling_t *adc = NULL;
     float angle_deg;
+    float I_sum = 0.0f;
+    const float current_loop_ts = 1.0f / (float)FOC_CONTROL_FREQ;
     uint8_t pole_pairs = 1U;
     uint8_t identify_direct_svpwm = 0U;
+    uint8_t stall_without_encoder = 0U;
+    uint8_t stall_open_loop_active = 0U;
+    uint8_t current_feedback_valid = 0U;
+    uint8_t low_side_valid_count = 0U;
+    float current_a;
+    float current_b;
+    float current_c;
+
+    if (!FOC_App_IsValidHandlePointer(handle)) {
+        return;
+    }
 
     ADC_Sampling_BeginControlCycle();
 
@@ -177,22 +269,49 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         goto exit_cycle;
     }
 
-    if ((handle->state == FOC_STATE_RUNNING) && !TLE5012_IsDataValid()) {
+    stall_open_loop_active = ((handle->state == FOC_STATE_RUNNING) &&
+                              (handle->stall_open_loop_active != 0U));
+    stall_without_encoder = ((handle->state == FOC_STATE_RUNNING) &&
+                             !stall_open_loop_active &&
+                             (handle->stall_mode_armed != 0U) &&
+                             !TLE5012_IsDataValid());
+
+    if ((handle->state == FOC_STATE_RUNNING) &&
+        !stall_open_loop_active &&
+        !stall_without_encoder &&
+        FOC_App_IsEncoderFaultActive()) {
         FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ENCODER);
         goto exit_cycle;
     }
 
-    /* 读取编码器角度 */
-    angle_deg = TLE5012_GetAngle();
-    handle->theta_mech = angle_deg * 3.14159f / 180.0f;  /* 转换为弧度 */
-    handle->theta_sample_seq++;
-    if (handle->state == FOC_STATE_RUNNING) {
+    if (stall_open_loop_active) {
         pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
-        handle->theta_elec = handle->theta_mech * pole_pairs + handle->motor_param.theta_offset;
+        handle->theta_mech = FOC_AngleNormalize(handle->theta_mech + handle->stall_speed_ref_mech * current_loop_ts);
+        handle->stall_theta_elec = FOC_AngleNormalize(handle->stall_theta_elec +
+                                                     handle->stall_speed_ref_mech * pole_pairs * current_loop_ts);
+        handle->theta_elec = handle->stall_theta_elec;
+        handle->theta_sample_seq++;
         FOC_SetAngle(&handle->foc, handle->theta_elec);
     } else {
-        /* 识别阶段角度由识别状态机决定（开环），不覆盖 */
-        handle->theta_elec = handle->foc.theta_elec;
+        if (stall_without_encoder && FOC_App_IsEncoderFaultActive()) {
+            FOC_App_RequestDisableFromISR(handle, FOC_FAULT_ENCODER);
+            goto exit_cycle;
+        }
+
+        if (TLE5012_IsDataValid()) {
+            angle_deg = TLE5012_GetAngle();
+            handle->theta_mech = angle_deg * 3.14159f / 180.0f;  /* 转换为弧度 */
+            handle->theta_sample_seq++;
+        }
+        if (handle->state == FOC_STATE_RUNNING) {
+            float encoder_dir = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+            pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
+            handle->theta_elec = handle->theta_mech * encoder_dir * pole_pairs + handle->motor_param.theta_offset;
+            FOC_SetAngle(&handle->foc, handle->theta_elec);
+        } else {
+            /* 识别阶段角度由识别状态机决定（开环），不覆盖 */
+            handle->theta_elec = handle->foc.theta_elec;
+        }
     }
 
     /* 使用ADC采样模块计算后的物理量（含零点校准） */
@@ -205,12 +324,64 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     }
 
     adc = ADC_Sampling_GetData();
-    handle->Ia = adc->currentA;
-    handle->Ib = adc->currentB;
-    handle->Ic = adc->currentC;
+    low_side_valid_count += (adc->lowSideValidA != 0U) ? 1U : 0U;
+    low_side_valid_count += (adc->lowSideValidB != 0U) ? 1U : 0U;
+    low_side_valid_count += (adc->lowSideValidC != 0U) ? 1U : 0U;
+    current_feedback_valid = (low_side_valid_count >= 2U) ? 1U : 0U;
+    /* All closed-loop identification stages need guaranteed current feedback.
+       RS/ENCODER_ALIGN/MOTION_VERIFY use d-axis PI through FOC_Run;
+       LS uses direct SVPWM. All must bypass the low-side window gate. */
+    if ((handle->state == FOC_STATE_PARAM_IDENTIFY) &&
+        handle->enable_identify &&
+        (handle->mi_handle.state == MI_STATE_LS_IDENTIFY ||
+         handle->mi_handle.state == MI_STATE_RS_IDENTIFY ||
+         handle->mi_handle.state == MI_STATE_ENCODER_ALIGN ||
+         handle->mi_handle.state == MI_STATE_MOTION_VERIFY)) {
+        current_feedback_valid = 1U;
+    } else if (FOC_App_ShouldBootstrapNeutralPwm(handle, adc)) {
+        current_feedback_valid = 1U;
+    } else if (low_side_valid_count == 0U) {
+        handle->adc_invalid_low_side_streak++;
+        if (handle->adc_invalid_low_side_streak >= FOC_LOW_SIDE_ZERO_WINDOW_FORCE_INTERVAL) {
+            handle->adc_invalid_low_side_streak = 0U;
+            handle->adc_forced_low_side_count++;
+            current_feedback_valid = 1U;
+        }
+    } else {
+        handle->adc_invalid_low_side_streak = 0U;
+    }
+    if (!current_feedback_valid) {
+        handle->adc_invalid_low_side_count++;
+    } else {
+        handle->adc_valid_low_side_count++;
+    }
+
+    current_a = adc->currentA;
+    current_b = adc->currentB;
+    current_c = adc->currentC;
+    /* Current reconstruction: skip for stages that bypass window gate. */
+    if (!((handle->state == FOC_STATE_PARAM_IDENTIFY) &&
+          handle->enable_identify &&
+          (handle->mi_handle.state == MI_STATE_LS_IDENTIFY ||
+           handle->mi_handle.state == MI_STATE_RS_IDENTIFY ||
+           handle->mi_handle.state == MI_STATE_ENCODER_ALIGN ||
+           handle->mi_handle.state == MI_STATE_MOTION_VERIFY)) &&
+        (low_side_valid_count == 2U)) {
+        if (adc->lowSideValidA == 0U) {
+            current_a = -(current_b + current_c);
+        } else if (adc->lowSideValidB == 0U) {
+            current_b = -(current_a + current_c);
+        } else {
+            current_c = -(current_a + current_b);
+        }
+    }
+
+    handle->Ia = current_a;
+    handle->Ib = current_b;
+    handle->Ic = current_c;
     
     /* 【改进】三相电流不平衡检查 */
-    float I_sum = handle->Ia + handle->Ib + handle->Ic;
+    I_sum = handle->Ia + handle->Ib + handle->Ic;
     if (fabsf(I_sum) > CURRENT_IMBALANCE_THRESH) {
         /* 记录不平衡事件，可用于后续故障诊断 */
         /* 注意：这里不直接触发故障，因为轻微不平衡是正常现象 */
@@ -219,8 +390,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     /* 读取母线电压 */
     handle->Vbus = adc->vbus;
     
-    /* 更新FOC输入 */
-    FOC_UpdateCurrent(&handle->foc, handle->Ia, handle->Ib, handle->Ic);
+    if (current_feedback_valid) {
+        FOC_UpdateCurrent(&handle->foc, handle->Ia, handle->Ib, handle->Ic);
+    }
     FOC_SetVbus(&handle->foc, handle->Vbus);
 
     /* 参数识别在TIM1周期内执行，保证注入波形和采样同步
@@ -229,17 +401,44 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
     if (handle->state == FOC_STATE_PARAM_IDENTIFY && handle->enable_identify) {
         FOC_Clarke_Transform(&handle->foc.Iabc, &handle->foc.IalphaBeta);
         MI_Process(&handle->mi_handle);
+
+        /* P0-2: Immediately zero voltage outputs on error/complete to prevent
+           dangerous voltage application while main loop catches up and calls disable. */
+        if (handle->mi_handle.state == MI_STATE_ERROR ||
+            handle->mi_handle.state == MI_STATE_COMPLETE) {
+            handle->foc.Vdq.d = 0.0f;
+            handle->foc.Vdq.q = 0.0f;
+            handle->foc.ValphaBeta.alpha = 0.0f;
+            handle->foc.ValphaBeta.beta = 0.0f;
+            handle->foc.pi_d.integral = 0.0f;
+            handle->foc.pi_q.integral = 0.0f;
+            FOC_SVPWM_Generate(&handle->foc.ValphaBeta, handle->foc.Vbus, &handle->foc.svpwm);
+            identify_direct_svpwm = 1U;
+        }
     }
     
     if ((handle->state == FOC_STATE_PARAM_IDENTIFY) &&
         handle->enable_identify &&
-        ((handle->mi_handle.state == MI_STATE_RS_IDENTIFY) ||
-         (handle->mi_handle.state == MI_STATE_LS_IDENTIFY))) {
-        /* Rs/Ls识别阶段直接使用识别模块生成的SVPWM */
+        (handle->mi_handle.state == MI_STATE_LS_IDENTIFY ||
+         handle->mi_handle.state == MI_STATE_PN_IDENTIFY)) {
+        /* Ls/Pn识别阶段由识别模块直接生成SVPWM，不走FOC_Run的dq闭环路径。 */
         identify_direct_svpwm = 1U;
     }
 
-    if (!identify_direct_svpwm) {
+    if (identify_direct_svpwm) {
+        /* Ls识别阶段已由识别模块直接生成SVPWM。 */
+    } else if (!current_feedback_valid) {
+        if (handle->state == FOC_STATE_PARAM_IDENTIFY && !identify_direct_svpwm) {
+            /* During identify closed-loop stages, don't regenerate old voltage on invalid windows */
+            handle->foc.Vdq.d = 0.0f;
+            handle->foc.Vdq.q = 0.0f;
+            handle->foc.ValphaBeta.alpha = 0.0f;
+            handle->foc.ValphaBeta.beta = 0.0f;
+            FOC_SVPWM_Generate(&handle->foc.ValphaBeta, handle->foc.Vbus, &handle->foc.svpwm);
+        } else {
+            FOC_RegenerateVoltageVector(&handle->foc);
+        }
+    } else {
         /* 执行FOC计算 */
         FOC_Run(&handle->foc);
     }
@@ -270,9 +469,20 @@ exit_cycle:
 /**
  * @brief ISR中故障快速下电：仅做无阻塞动作，阻塞SPI收尾延后到主循环
  */
-static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
+void FOC_App_RequestFaultShutdownFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
 {
-    if (handle == NULL) {
+    if (!FOC_App_IsValidHandlePointer(handle)) {
+        return;
+    }
+
+    if (handle->pending_disable != 0U) {
+        return;
+    }
+
+    if ((handle->enable_pwm == 0U) &&
+        (handle->state != FOC_STATE_RUNNING) &&
+        (handle->state != FOC_STATE_PARAM_IDENTIFY)) {
+        FOC_App_EnterFault(handle, fault);
         return;
     }
 
@@ -284,9 +494,170 @@ static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode
 
     MI_RsOnlineEstimator_Enable(&handle->rs_est, 0U);
 
+    FOC_App_EnterFault(handle, fault);
+    handle->pending_disable = 1U;
+}
+
+static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
+{
+    FOC_App_RequestFaultShutdownFromISR(handle, fault);
+}
+
+static void FOC_App_UpdateIdentifyState(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->motor_identified = Param_IsValid(&handle->motor_param) ? 1U : 0U;
+}
+
+static void FOC_App_ApplyKnownMotorConstants(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->motor_param.Rs = 8.8f;
+    handle->motor_param.Ld = 0.0005f;
+    handle->motor_param.Lq = 0.0005f;
+    handle->motor_param.Ke = 0.129f;
+    handle->motor_param.Pn = 11U;
+    if ((handle->motor_param.encoder_dir != 1) && (handle->motor_param.encoder_dir != -1)) {
+        handle->motor_param.encoder_dir = 1;
+    }
+    if (handle->motor_param.J < 0.0f || handle->motor_param.J > 1.0f) {
+        handle->motor_param.J = 0.0001f;
+    }
+    handle->motor_param.valid_flag = 0xFFFFFFFF;
+}
+
+static void FOC_App_EnterFault(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
+{
+    if (handle == NULL) {
+        return;
+    }
+
     handle->fault_code = fault;
     handle->state = FOC_STATE_FAULT;
-    handle->pending_disable = 1U;
+    handle->enable_identify = 0U;
+    handle->stall_mode_armed = 0U;
+}
+
+static uint8_t FOC_App_IsEncoderFaultActive(void)
+{
+    if (TLE5012_IsDataValid()) {
+        return 0U;
+    }
+
+    return (TLE5012_GetCRCErrorCount() >= FOC_ENCODER_FAULT_MISS_THRESHOLD) ? 1U : 0U;
+}
+
+static uint8_t FOC_App_IsEncoderReadyForPowerStage(FOC_FaultCode_t *fault)
+{
+    if (TLE5012_IsDataValid()) {
+        return 1U;
+    }
+
+    if (FOC_App_IsEncoderFaultActive()) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_ENCODER;
+        }
+    }
+
+    return 0U;
+}
+
+static float FOC_App_GetCurrentRefLimit(const FOC_AppHandle_t *handle)
+{
+    float limit;
+    float voltage_limit;
+
+    if (handle == NULL) {
+        return FOC_DEFAULT_OVERCURRENT_LIMIT_A * FOC_CURRENT_REF_LIMIT_RATIO;
+    }
+
+    limit = handle->protection.overcurrent_limit_a * FOC_CURRENT_REF_LIMIT_RATIO;
+    if ((handle->motor_identified != 0U) &&
+        (handle->motor_param.Rs > 0.05f) &&
+        (handle->Vbus > 1.0f)) {
+        voltage_limit = (handle->Vbus * FOC_CURRENT_REF_VOLTAGE_RATIO *
+                         FOC_CURRENT_REF_VOLTAGE_MARGIN) / handle->motor_param.Rs;
+        if (voltage_limit < limit) {
+            limit = voltage_limit;
+        }
+    }
+    if (limit < 0.1f) {
+        limit = 0.1f;
+    }
+
+    return limit;
+}
+
+static void FOC_App_ClampSpeedPiIntegral(FOC_PI_Controller_t *pi, float output_max, float output_min)
+{
+    float integral_max;
+    float integral_min;
+
+    if ((pi == NULL) || (fabsf(pi->Ki) <= 1e-6f)) {
+        return;
+    }
+
+    integral_max = (output_max / pi->Ki) * 0.9f;
+    integral_min = (output_min / pi->Ki) * 0.9f;
+    if (integral_max < integral_min) {
+        float tmp = integral_max;
+        integral_max = integral_min;
+        integral_min = tmp;
+    }
+    pi->integral = FOC_Saturate(pi->integral, integral_max, integral_min);
+}
+
+static void FOC_App_PrimeNeutralPwm(void)
+{
+    uint16_t neutral = (uint16_t)(__HAL_TIM_GET_AUTORELOAD(&htim1) / 2U);
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, neutral);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, neutral);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, neutral);
+}
+
+static uint8_t FOC_App_ShouldBootstrapNeutralPwm(const FOC_AppHandle_t *handle, const ADC_Sampling_t *adc)
+{
+    if ((handle == NULL) || (adc == NULL)) {
+        return 0U;
+    }
+
+    if (handle->state != FOC_STATE_RUNNING) {
+        return 0U;
+    }
+
+    if ((adc->lowSideValidA != 0U) ||
+        (adc->lowSideValidB != 0U) ||
+        (adc->lowSideValidC != 0U)) {
+        return 0U;
+    }
+
+    if ((adc->pwmCompareA != adc->pwmCompareB) ||
+        (adc->pwmCompareB != adc->pwmCompareC)) {
+        return 0U;
+    }
+
+    if (handle->foc.svpwm.sector != 0U) {
+        return 0U;
+    }
+
+    if ((fabsf(handle->foc.Vdq.d) > FOC_NEUTRAL_BOOTSTRAP_VOLTAGE_EPS) ||
+        (fabsf(handle->foc.Vdq.q) > FOC_NEUTRAL_BOOTSTRAP_VOLTAGE_EPS)) {
+        return 0U;
+    }
+
+    if ((fabsf(handle->foc.Id_ref) <= FOC_NEUTRAL_BOOTSTRAP_CURRENT_EPS) &&
+        (fabsf(handle->foc.Iq_ref) <= FOC_NEUTRAL_BOOTSTRAP_CURRENT_EPS)) {
+        return 0U;
+    }
+
+    return 1U;
 }
 
 /**
@@ -305,33 +676,84 @@ static void FOC_App_RequestDisableFromISR(FOC_AppHandle_t *handle, FOC_FaultCode
  */
 void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 {
-    static float theta_prev = 0.0f;
-    static uint8_t speed_loop_ready = 0U;
     const float Ts = 1.0f / (float)FOC_SPEED_LOOP_FREQ;
     const float wc = 2.0f * FOC_PI * FOC_SPEED_LPF_CUTOFF_HZ;
     float alpha = (wc * Ts) / (1.0f + wc * Ts);
+    float encoder_dir = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
 
     if (handle->state != FOC_STATE_RUNNING) {
-        speed_loop_ready = 0U;
+        handle->speed_loop_ready = 0U;
+        handle->speed_theta_prev = handle->theta_mech;
+        handle->speed_loop_count++;
+        return;
+    }
+
+    if (handle->stall_open_loop_active) {
+        float speed_target = 0.0f;
+        float speed_step = FOC_STALL_OPEN_LOOP_SPEED_RAMP_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ;
+        float iq_target = handle->Iq_ref;
+        uint8_t pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
+
+        if (handle->control_mode == FOC_MODE_POSITION) {
+            handle->control_mode = FOC_MODE_SPEED;
+        }
+
+        if (handle->control_mode == FOC_MODE_SPEED) {
+            speed_target = FOC_Saturate(handle->speed_ref,
+                                        FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
+                                        -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
+        }
+
+        handle->stall_speed_ref_mech += FOC_Saturate(speed_target - handle->stall_speed_ref_mech,
+                                                     speed_step,
+                                                     -speed_step);
+        if ((fabsf(handle->stall_speed_ref_mech) < 1e-3f) && (fabsf(speed_target) < 1e-3f)) {
+            handle->stall_speed_ref_mech = 0.0f;
+        }
+
+        handle->speed_mech = handle->stall_speed_ref_mech;
+        handle->speed_elec = handle->speed_mech * pole_pairs;
+
+        iq_target = FOC_Saturate(iq_target,
+                                 FOC_STALL_OPEN_LOOP_CURRENT_MAX_A,
+                                 -FOC_STALL_OPEN_LOOP_CURRENT_MAX_A);
+        if ((handle->control_mode == FOC_MODE_SPEED) &&
+            (fabsf(handle->speed_mech) > 1e-3f) &&
+            (fabsf(iq_target) < 1e-3f)) {
+            iq_target = (handle->speed_mech >= 0.0f) ?
+                        FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A :
+                        -FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A;
+        }
+
+        handle->Id_ref = 0.0f;
+        handle->Iq_ref = iq_target;
+        FOC_SetCurrentReference(&handle->foc, 0.0f, iq_target);
         handle->speed_loop_count++;
         return;
     }
 
     /* 速度环（仅在运行状态执行） */
-    if (!speed_loop_ready) {
-        theta_prev = handle->theta_mech;
+    if (!handle->speed_loop_ready) {
+        handle->speed_theta_prev = handle->theta_mech;
         handle->speed_mech = 0.0f;
         handle->speed_elec = 0.0f;
-        speed_loop_ready = 1U;
+        handle->speed_loop_ready = 1U;
+        handle->speed_ref_ramped = 0.0f;
         handle->speed_loop_count++;
         return;
     }
 
     /* 计算转速（简化：微分法） */
-    float delta_theta = handle->theta_mech - theta_prev;
+    float delta_theta = handle->theta_mech - handle->speed_theta_prev;
     float speed_raw;
+    float speed_next;
+    float speed_step;
     float speed_ref_temp;
+    float speed_feedback;
     float speed_error;
+    float friction_comp;
+    float friction_dir;
+    float friction_delta;
 
     /* 处理角度环绕（-π到+π跳变） */
     if (delta_theta > FOC_PI) {
@@ -344,9 +766,12 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
     if (alpha < 0.0f) alpha = 0.0f;
     if (alpha > 1.0f) alpha = 1.0f;
     speed_raw = delta_theta * FOC_SPEED_LOOP_FREQ;
-    handle->speed_mech += alpha * (speed_raw - handle->speed_mech);
-    handle->speed_elec = handle->speed_mech * handle->motor_param.Pn;
-    theta_prev = handle->theta_mech;
+    speed_next = handle->speed_mech + alpha * (speed_raw - handle->speed_mech);
+    speed_step = FOC_SPEED_EST_ACCEL_LIMIT_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ;
+    handle->speed_mech += FOC_Saturate(speed_next - handle->speed_mech, speed_step, -speed_step);
+    handle->speed_elec = handle->speed_mech * handle->motor_param.Pn * encoder_dir;
+    float speed_mech_user = handle->speed_mech * encoder_dir;
+    handle->speed_theta_prev = handle->theta_mech;
 
     /* 速度给定来源：
      * - 位置模式：使用位置环输出的速度给定（在FOC_App_PositionLoop中更新）
@@ -359,19 +784,101 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         handle->speed_loop_count++;
         return;
     } else if (handle->control_mode == FOC_MODE_POSITION) {
-        /* 位置模式：使用位置环输出的速度给定 */
-        speed_ref_temp = handle->speed_ref;  /* 位置环更新的速度给定 */
+        float speed_ramp_delta = handle->speed_ref - handle->speed_ref_ramped;
+        float speed_ramp_step = FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ;
+        /* 位置模式复用速度给定斜坡，避免位置步进把速度环瞬间推到限幅。 */
+        handle->speed_ref_ramped += FOC_Saturate(speed_ramp_delta,
+                                                 speed_ramp_step,
+                                                 -speed_ramp_step);
+        speed_ref_temp = handle->speed_ref_ramped;
+        handle->position_loop_speed_ramp_sat_diag = (fabsf(speed_ramp_delta) > speed_ramp_step) ? 1U : 0U;
     } else {
         /* 速度模式：直接使用速度给定 */
-        speed_ref_temp = handle->speed_ref;
+        handle->speed_ref_ramped += FOC_Saturate(handle->speed_ref - handle->speed_ref_ramped,
+                                                 FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ,
+                                                 -FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ);
+        speed_ref_temp = handle->speed_ref_ramped;
+        handle->position_loop_speed_ramp_sat_diag = 0U;
     }
 
-    /* 速度环：速度误差 -> Iq电流给定 */
-    speed_error = speed_ref_temp - handle->speed_mech;
-    handle->Iq_ref = FOC_PI_Update(&handle->pi_speed, speed_error);
+    /* Speed and position commands are user-frame mechanical values. Keep the
+       outer loops in that frame, then map the torque command to the q-axis once. */
+    speed_feedback = speed_mech_user;
+    speed_error = speed_ref_temp - speed_feedback;
+    {
+        float iq_limit_pos = FOC_App_GetCurrentRefLimit(handle);
+        float iq_limit_neg = -FOC_App_GetCurrentRefLimit(handle);
+        float iq_ref_mech;
+        if (handle->control_mode == FOC_MODE_SPEED) {
+            if (iq_limit_pos > FOC_SPEED_POSITIVE_IQ_LIMIT_A) {
+                iq_limit_pos = FOC_SPEED_POSITIVE_IQ_LIMIT_A;
+            }
+            if ((-iq_limit_neg) > FOC_SPEED_NEGATIVE_IQ_LIMIT_A) {
+                iq_limit_neg = -FOC_SPEED_NEGATIVE_IQ_LIMIT_A;
+            }
+        } else if (handle->control_mode == FOC_MODE_POSITION) {
+            iq_limit_pos = FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A;
+            iq_limit_neg = -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A;
+        }
+        iq_ref_mech = FOC_Saturate(FOC_PI_Update(&handle->pi_speed, speed_error),
+                                   iq_limit_pos,
+                                   iq_limit_neg);
+        friction_dir = 0.0f;
+        friction_delta = 0.0f;
+        if ((handle->control_mode == FOC_MODE_SPEED) &&
+            (fabsf(speed_ref_temp) > FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S) &&
+            (fabsf(speed_error) > FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S) &&
+            (fabsf(speed_feedback) < FOC_SPEED_STATIC_FRICTION_ACTIVE_RAD_PER_S) &&
+            ((speed_ref_temp * speed_error) > 0.0f)) {
+            friction_dir = speed_ref_temp;
+        } else if (handle->control_mode == FOC_MODE_POSITION) {
+            float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float theta_mech_control = theta_mech_zeroed * encoder_dir;
+            float pos_error_for_friction = FOC_AngleNormalize(handle->pos_ref - theta_mech_control);
+            if (fabsf(pos_error_for_friction) > FOC_POSITION_STATIC_FRICTION_ENTER_RAD) {
+                handle->position_friction_active = 1U;
+            } else if (fabsf(pos_error_for_friction) < FOC_POSITION_STATIC_FRICTION_EXIT_RAD) {
+                handle->position_friction_active = 0U;
+            }
+            if (handle->position_friction_active != 0U) {
+                friction_dir = pos_error_for_friction;
+            }
+        }
 
-    /* 更新电流参考值 */
-    FOC_App_SetCurrentRef(handle, 0, handle->Iq_ref);  /* Id=0控制 */
+        if (friction_dir != 0.0f) {
+            if (handle->control_mode == FOC_MODE_POSITION) {
+                friction_comp = (friction_dir > 0.0f) ?
+                                FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A :
+                                FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A;
+            } else {
+                friction_comp = (friction_dir > 0.0f) ?
+                                FOC_SPEED_STATIC_FRICTION_POS_COMP_A :
+                                FOC_SPEED_STATIC_FRICTION_NEG_COMP_A;
+            }
+            friction_delta = (friction_dir > 0.0f) ? friction_comp : -friction_comp;
+            iq_ref_mech += friction_delta;
+            iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
+        }
+        if (handle->control_mode == FOC_MODE_POSITION) {
+            handle->position_loop_iq_pos_sat_diag = (iq_ref_mech >= iq_limit_pos) ? 1U : 0U;
+            handle->position_loop_iq_neg_sat_diag = (iq_ref_mech <= iq_limit_neg) ? 1U : 0U;
+        } else {
+            handle->position_loop_iq_pos_sat_diag = 0U;
+            handle->position_loop_iq_neg_sat_diag = 0U;
+        }
+        FOC_App_ClampSpeedPiIntegral(&handle->pi_speed, iq_limit_pos, iq_limit_neg);
+        float iq_cmd = iq_ref_mech;
+
+        handle->speed_loop_ref_diag = speed_ref_temp;
+        handle->speed_loop_mech_diag = speed_feedback;
+        handle->speed_loop_error_diag = speed_error;
+        handle->speed_loop_iq_mech_diag = iq_ref_mech;
+        handle->speed_loop_friction_diag = friction_delta;
+        handle->speed_loop_iq_cmd_diag = iq_cmd;
+
+        /* 更新电流参考值 */
+        FOC_App_SetCurrentRef(handle, 0.0f, iq_cmd);  /* Id=0控制 */
+    }
 
     handle->speed_loop_count++;
 }
@@ -390,18 +897,31 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
  */
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
 {
+    if ((handle == NULL) || handle->stall_open_loop_active) {
+        return;
+    }
+
     /* 位置环（仅在位置模式且运行状态执行） */
     if (handle->state == FOC_STATE_RUNNING && 
         handle->control_mode == FOC_MODE_POSITION) {
         
-        /* 位置误差计算 */
-        float pos_error = handle->pos_ref - handle->theta_mech;
+        /* 位置误差：pos_ref(用户坐标) - theta_mech_user(用户坐标) */
+        float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+        float theta_mech_user_pos = theta_mech_zeroed * encoder_dir_f;
+        float speed_mech_user_pos = handle->speed_mech * encoder_dir_f;
+        float pos_error = handle->pos_ref - theta_mech_user_pos;
         
         /* 处理角度环绕（最短路径） */
         pos_error = FOC_AngleNormalize(pos_error);
 
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
-        handle->speed_ref = FOC_PositionPD_Update(&handle->pos_pd, pos_error, handle->speed_mech);
+        float pos_pd_out = FOC_PositionPD_Update(&handle->pos_pd, pos_error, speed_mech_user_pos);
+        handle->speed_ref = pos_pd_out;
+        handle->position_loop_error_diag = pos_error;
+        handle->position_loop_pd_out_diag = pos_pd_out;
+        handle->position_loop_pd_sat_diag =
+            ((pos_pd_out >= handle->pos_pd.output_max) || (pos_pd_out <= handle->pos_pd.output_min)) ? 1U : 0U;
     }
 }
 
@@ -447,43 +967,113 @@ void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle)
 void FOC_App_Enable(FOC_AppHandle_t *handle)
 {
     FOC_FaultCode_t fault = FOC_FAULT_NONE;
+    uint8_t encoder_detected = 0U;
+    uint8_t requires_stall_mode = 0U;
+    uint8_t stall_enable = 0U;
 
-    if ((handle->state == FOC_STATE_READY) && handle->power_unlocked) {
-        if (!FOC_App_PrecheckPowerStage(handle, &fault)) {
-            handle->fault_code = fault;
-            handle->state = FOC_STATE_FAULT;
+    if ((handle == NULL) || !handle->power_unlocked) {
+        return;
+    }
+
+    if ((handle->state != FOC_STATE_READY) && (handle->state != FOC_STATE_IDLE)) {
+        return;
+    }
+
+    drv8350s.runtime.latchedFaultFlags = 0U;
+    drv8350s.runtime.latchedFaultStatus1 = 0U;
+    drv8350s.runtime.latchedVgsStatus2 = 0U;
+
+    encoder_detected = TLE5012_IsDataValid();
+    requires_stall_mode = (uint8_t)((!handle->motor_identified) || (!encoder_detected));
+
+    if (requires_stall_mode) {
+        if (!handle->stall_mode_armed) {
+            handle->fault_code = FOC_FAULT_NONE;
             handle->enable_pwm = 0U;
             return;
         }
 
-        /* 先上电驱动芯片，再开栅极，最后启动PWM */
-        HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
-        HAL_Delay(1);  /* 给DRV_EN上电留出稳定时间 */
-
-        (void)DRV8350S_ClearFaults(&drv8350s);
-        if (DRV8350S_EnableGateDrivers(&drv8350s) != 0) {
-            handle->fault_code = FOC_FAULT_DRV8350S;
-            handle->state = FOC_STATE_FAULT;
-            handle->enable_pwm = 0;
-            return;
-        }
-
-        ADC_Sampling_ResetTimingState();
-        
-        /* 启动PWM输出 */
-        HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-        HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-        HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-        HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-        HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
-        HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
-
-        handle->enable_pwm = 1;
-        handle->state = FOC_STATE_RUNNING;
-        
-        /* 使能Rs在线估计 */
-        MI_RsOnlineEstimator_Enable(&handle->rs_est, 1);
+        stall_enable = 1U;
+        handle->control_mode = FOC_MODE_SPEED;
     }
+
+    /* Normal precheck contract remains: FOC_App_PrecheckPowerStage(handle, &fault) */
+    if (!FOC_App_PrecheckPowerStage(handle, &fault, (uint8_t)(stall_enable == 0U))) {
+        if (fault != FOC_FAULT_NONE) {
+            FOC_App_EnterFault(handle, fault);
+        }
+        handle->enable_pwm = 0U;
+        return;
+    }
+
+    if ((stall_enable == 0U) &&
+        (handle->control_mode == FOC_MODE_POSITION) &&
+        (handle->position_ref_user_set == 0U)) {
+        FOC_App_RefreshEncoderFeedback(handle);
+        float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+        float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        handle->pos_ref = FOC_AngleNormalize(theta_mech_zeroed * encoder_dir_f);
+        handle->speed_ref = 0.0f;
+        handle->pi_speed.integral = 0.0f;
+    }
+
+    /* 先上电驱动芯片，再开栅极，最后启动PWM */
+    HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
+    HAL_Delay(1);  /* 给DRV_EN上电留出稳定时间 */
+
+    (void)DRV8350S_ClearFaults(&drv8350s);
+    if (DRV8350S_EnableGateDrivers(&drv8350s) != 0) {
+        FOC_App_EnterFault(handle, FOC_FAULT_DRV8350S);
+        handle->enable_pwm = 0U;
+        return;
+    }
+
+    ADC_Sampling_ResetTimingState();
+    handle->foc.pi_d.integral = 0.0f;  /* 清除识别阶段残留积分 */
+    handle->foc.pi_q.integral = 0.0f;
+    FOC_App_PrimeNeutralPwm();
+    handle->speed_loop_ready = 0U;
+    handle->speed_ref_ramped = 0.0f;
+    handle->speed_theta_prev = handle->theta_mech;
+    
+    /* 启动PWM输出 */
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+
+    handle->enable_pwm = 1U;
+    handle->fault_code = FOC_FAULT_NONE;
+    handle->stall_open_loop_active = stall_enable;
+    handle->stall_speed_ref_mech = 0.0f;
+    if (stall_enable) {
+        if (fabsf(handle->speed_ref) < 1e-3f) {
+            handle->speed_ref = FOC_STALL_OPEN_LOOP_DEFAULT_SPEED_RAD_PER_S;
+        }
+        handle->speed_ref = FOC_Saturate(handle->speed_ref,
+                                         FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
+                                         -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
+        if (fabsf(handle->Iq_ref) < 1e-3f) {
+            handle->Iq_ref = (handle->speed_ref >= 0.0f) ?
+                             FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A :
+                             -FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A;
+        }
+        handle->Id_ref = 0.0f;
+        handle->Iq_ref = FOC_Saturate(handle->Iq_ref,
+                                      FOC_STALL_OPEN_LOOP_CURRENT_MAX_A,
+                                      -FOC_STALL_OPEN_LOOP_CURRENT_MAX_A);
+        FOC_SetCurrentReference(&handle->foc, 0.0f, handle->Iq_ref);
+        handle->theta_mech = encoder_detected ? handle->theta_mech : 0.0f;
+        handle->stall_theta_elec = encoder_detected ? handle->theta_elec : 0.0f;
+    } else {
+        handle->stall_theta_elec = handle->theta_elec;
+    }
+    handle->state = FOC_STATE_RUNNING;
+    
+    /* 使能Rs在线估计 */
+    MI_RsOnlineEstimator_Enable(&handle->rs_est, 1U);
 }
 
 /**
@@ -511,8 +1101,91 @@ void FOC_App_Disable(FOC_AppHandle_t *handle)
     MI_RsOnlineEstimator_Enable(&handle->rs_est, 0);
     
     if (handle->state == FOC_STATE_RUNNING || handle->state == FOC_STATE_PARAM_IDENTIFY) {
-        handle->state = FOC_STATE_READY;
+        handle->state = handle->motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
     }
+}
+
+uint32_t FOC_App_GetVoltageWarningFlags(const FOC_AppHandle_t *handle)
+{
+    uint32_t warningFlags = 0U;
+
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    if (handle->Vbus < handle->protection.undervoltage_limit_v) {
+        warningFlags |= FOC_WARNING_VBUS_UNDERVOLTAGE_BIT;
+    }
+
+    if (handle->Vbus > handle->protection.overvoltage_limit_v) {
+        warningFlags |= FOC_WARNING_VBUS_OVERVOLTAGE_BIT;
+    }
+
+    return warningFlags;
+}
+
+uint8_t FOC_App_GetVoltageTripFault(const FOC_AppHandle_t *handle, FOC_FaultCode_t *fault)
+{
+    float severeUndervoltage;
+    float severeOvervoltage;
+
+    if (fault != NULL) {
+        *fault = FOC_FAULT_NONE;
+    }
+
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    severeUndervoltage = handle->protection.undervoltage_limit_v - FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V;
+    if (severeUndervoltage < 0.0f) {
+        severeUndervoltage = 0.0f;
+    }
+    severeOvervoltage = handle->protection.overvoltage_limit_v + FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V;
+
+    if (handle->Vbus < severeUndervoltage) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_UNDERVOLTAGE;
+        }
+        return 1U;
+    }
+
+    if (handle->Vbus > severeOvervoltage) {
+        if (fault != NULL) {
+            *fault = FOC_FAULT_OVERVOLTAGE;
+        }
+        return 1U;
+    }
+
+    return 0U;
+}
+
+uint8_t FOC_App_IsVoltageFaultRecovered(const FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
+{
+    float severeUndervoltage;
+    float severeOvervoltage;
+
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    severeUndervoltage = handle->protection.undervoltage_limit_v - FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V +
+                         FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V;
+    if (severeUndervoltage < 0.0f) {
+        severeUndervoltage = 0.0f;
+    }
+    severeOvervoltage = handle->protection.overvoltage_limit_v + FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V -
+                        FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V;
+
+    if (fault == FOC_FAULT_UNDERVOLTAGE) {
+        return (handle->Vbus >= severeUndervoltage) ? 1U : 0U;
+    }
+
+    if (fault == FOC_FAULT_OVERVOLTAGE) {
+        return (handle->Vbus <= severeOvervoltage) ? 1U : 0U;
+    }
+
+    return 0U;
 }
 
 void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle)
@@ -528,10 +1201,19 @@ void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle)
         return;
     }
 
-    handle->Ia = adc->currentA;
-    handle->Ib = adc->currentB;
-    handle->Ic = adc->currentC;
+    if ((handle->state != FOC_STATE_RUNNING) &&
+        (handle->state != FOC_STATE_PARAM_IDENTIFY)) {
+        handle->Ia = adc->currentA;
+        handle->Ib = adc->currentB;
+        handle->Ic = adc->currentC;
+    }
     handle->Vbus = adc->vbus;
+    handle->warning_flags = FOC_App_GetVoltageWarningFlags(handle);
+    if ((handle->state != FOC_STATE_RUNNING) &&
+        (handle->state != FOC_STATE_PARAM_IDENTIFY) &&
+        (handle->stall_open_loop_active == 0U)) {
+        FOC_App_RefreshEncoderFeedback(handle);
+    }
     FOC_SetVbus(&handle->foc, handle->Vbus);
 }
 
@@ -544,15 +1226,43 @@ void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
     handle->Id_ref = 0.0f;
     handle->Iq_ref = 0.0f;
     handle->speed_ref = 0.0f;
-    handle->pos_ref = handle->theta_mech;
+    handle->speed_ref_ramped = 0.0f;
+    handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, handle->theta_mech);
     handle->speed_mech = 0.0f;
     handle->speed_elec = 0.0f;
+    handle->speed_theta_prev = handle->theta_mech;
+    handle->position_ref_user_set = 0U;
+    handle->speed_loop_ready = 0U;
+    handle->position_friction_active = 0U;
+    handle->stall_open_loop_active = 0U;
+    handle->stall_theta_elec = 0.0f;
+    handle->stall_speed_ref_mech = 0.0f;
+    handle->speed_loop_ref_diag = 0.0f;
+    handle->speed_loop_mech_diag = 0.0f;
+    handle->speed_loop_error_diag = 0.0f;
+    handle->speed_loop_iq_mech_diag = 0.0f;
+    handle->speed_loop_friction_diag = 0.0f;
+    handle->speed_loop_iq_cmd_diag = 0.0f;
+    handle->position_loop_error_diag = 0.0f;
+    handle->position_loop_pd_out_diag = 0.0f;
+    handle->position_loop_pd_sat_diag = 0U;
+    handle->position_loop_speed_ramp_sat_diag = 0U;
+    handle->position_loop_iq_pos_sat_diag = 0U;
+    handle->position_loop_iq_neg_sat_diag = 0U;
 
     FOC_SetCurrentReference(&handle->foc, 0.0f, 0.0f);
+    handle->foc.Iabc.a = 0.0f;
+    handle->foc.Iabc.b = 0.0f;
+    handle->foc.Iabc.c = 0.0f;
+    handle->foc.IalphaBeta.alpha = 0.0f;
+    handle->foc.IalphaBeta.beta = 0.0f;
+    handle->foc.Idq.d = 0.0f;
+    handle->foc.Idq.q = 0.0f;
     handle->foc.Vdq.d = 0.0f;
     handle->foc.Vdq.q = 0.0f;
     handle->foc.ValphaBeta.alpha = 0.0f;
     handle->foc.ValphaBeta.beta = 0.0f;
+    FOC_SVPWM_Generate(&handle->foc.ValphaBeta, handle->foc.Vbus, &handle->foc.svpwm);
     handle->foc.pi_d.integral = 0.0f;
     handle->foc.pi_q.integral = 0.0f;
     handle->pi_speed.integral = 0.0f;
@@ -566,6 +1276,23 @@ void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
  */
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref)
 {
+    float current_limit;
+
+    if (handle == NULL) {
+        return;
+    }
+
+    current_limit = FOC_App_GetCurrentRefLimit(handle);
+    Id_ref = FOC_Saturate(Id_ref, current_limit, -current_limit);
+    Iq_ref = FOC_Saturate(Iq_ref, current_limit, -current_limit);
+
+    if (handle->stall_open_loop_active || ((!handle->motor_identified) && handle->stall_mode_armed)) {
+        Id_ref = 0.0f;
+        Iq_ref = FOC_Saturate(Iq_ref,
+                              FOC_STALL_OPEN_LOOP_CURRENT_MAX_A,
+                              -FOC_STALL_OPEN_LOOP_CURRENT_MAX_A);
+    }
+
     handle->Id_ref = Id_ref;
     handle->Iq_ref = Iq_ref;
     FOC_SetCurrentReference(&handle->foc, Id_ref, Iq_ref);
@@ -578,6 +1305,17 @@ void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref)
  */
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref)
 {
+    if (handle == NULL) {
+        return;
+    }
+
+    if (handle->stall_open_loop_active || ((!handle->motor_identified) && handle->stall_mode_armed)) {
+        speed_ref = FOC_Saturate(speed_ref,
+
+			FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
+                                 -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
+    }
+
     handle->speed_ref = speed_ref;
 }
 
@@ -588,7 +1326,15 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref)
  */
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
 {
-    handle->pos_ref = pos_ref;
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, pos_ref);
+    handle->position_ref_user_set = 1U;
+    handle->position_friction_active = 0U;
+    handle->speed_ref_ramped = 0.0f;
+    handle->pi_speed.integral = 0.0f;
 }
 
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
@@ -597,7 +1343,11 @@ void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
         return;
     }
 
-    FOC_PositionPD_Init(&handle->pos_pd, kp, kd, handle->pos_pd.output_max, handle->pos_pd.output_min);
+    FOC_PositionPD_Init(&handle->pos_pd,
+                        kp,
+                        kd,
+                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
+                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
 }
 
 /**
@@ -607,9 +1357,27 @@ void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
  */
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 {
+    if (handle == NULL) {
+        return;
+    }
+
+    if (handle->stall_open_loop_active && (mode == FOC_MODE_POSITION)) {
+        mode = FOC_MODE_SPEED;
+    }
+
     handle->control_mode = mode;
+    if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
+        FOC_App_RefreshEncoderFeedback(handle);
+        float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+        float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        handle->pos_ref = FOC_AngleNormalize(theta_mech_zeroed * encoder_dir_f);
+        handle->speed_ref = 0.0f;
+        handle->position_ref_user_set = 0U;
+    }
+
     /* 切换模式时清零积分，防止跳变 */
     handle->pi_speed.integral = 0.0f;
+    handle->position_friction_active = 0U;
 }
 
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)
@@ -632,7 +1400,36 @@ void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, f
     handle->protection.overvoltage_limit_v = overvoltage;
 }
 
-static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault)
+void FOC_App_SetPolePairs(FOC_AppHandle_t *handle, uint8_t pole_pairs)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    if ((pole_pairs == 0U) || (pole_pairs > 50U)) {
+        return;
+    }
+
+    if ((handle->enable_pwm != 0U) ||
+        (handle->state == FOC_STATE_RUNNING) ||
+        (handle->state == FOC_STATE_PARAM_IDENTIFY)) {
+        return;
+    }
+
+    handle->motor_param.Pn = pole_pairs;
+    handle->motor_param.valid_flag = 0U;
+    handle->motor_identified = 0U;
+    handle->mi_handle.pn_last_calc = 0.0f;
+    handle->mi_handle.pn_last_delta_mech = 0.0f;
+    handle->mi_handle.pn_last_delta_elec = 0.0f;
+    handle->mi_handle.pn_observed_dir = 0;
+    FOC_App_UpdateIdentifyState(handle);
+    if (handle->state == FOC_STATE_READY) {
+        handle->state = FOC_STATE_IDLE;
+    }
+}
+
+static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode_t *fault, uint8_t require_encoder)
 {
     uint16_t fs1 = 0U;
     uint16_t fs2 = 0U;
@@ -651,24 +1448,11 @@ static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode
 
     FOC_App_RefreshTelemetry(handle);
 
-    if (handle->Vbus > handle->protection.overvoltage_limit_v) {
-        if (fault != NULL) {
-            *fault = FOC_FAULT_OVERVOLTAGE;
-        }
+    if (FOC_App_GetVoltageTripFault(handle, fault)) {
         return 0U;
     }
 
-    if (handle->Vbus < handle->protection.undervoltage_limit_v) {
-        if (fault != NULL) {
-            *fault = FOC_FAULT_UNDERVOLTAGE;
-        }
-        return 0U;
-    }
-
-    if (!TLE5012_IsDataValid()) {
-        if (fault != NULL) {
-            *fault = FOC_FAULT_ENCODER;
-        }
+    if ((require_encoder != 0U) && !FOC_App_IsEncoderReadyForPowerStage(fault)) {
         return 0U;
     }
 
@@ -704,13 +1488,33 @@ static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode
     return 1U;
 }
 
+static void FOC_App_RefreshEncoderFeedback(FOC_AppHandle_t *handle)
+{
+    float angle_deg;
+    float encoder_dir;
+    uint8_t pole_pairs;
+
+    if ((handle == NULL) || !TLE5012_IsDataValid()) {
+        return;
+    }
+
+    angle_deg = TLE5012_GetAngle();
+    handle->theta_mech = FOC_AngleNormalize(angle_deg * FOC_PI / 180.0f);
+    handle->theta_sample_seq++;
+
+    encoder_dir = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+    pole_pairs = (handle->motor_param.Pn > 0U) ? handle->motor_param.Pn : 1U;
+    handle->theta_elec = FOC_AngleNormalize((handle->theta_mech * encoder_dir * (float)pole_pairs) +
+                                            handle->motor_param.theta_offset);
+}
+
 /**
  * @brief 根据电机参数计算控制环参数
  * @param handle FOC应用层句柄指针
  * 
  * 三环带宽分配原则（从外到内，带宽依次增加5-10倍）：
  * - 位置环带宽: 10-20 Hz (机械响应最慢)
- * - 速度环带宽: 100-200 Hz (比位置环快10倍)
+ * - 速度环带宽: 5 Hz bench-safe initial value
  * - 电流环带宽: 1000-2000 Hz (比速度环快10倍)
  * 
  * 计算公式（典型工程整定）：
@@ -720,73 +1524,52 @@ static uint8_t FOC_App_PrecheckPowerStage(FOC_AppHandle_t *handle, FOC_FaultCode
  */
 static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
 {
-    MotorParam_t *mp = &handle->motor_param;
-    
-    /* 电流环参数计算 - 带宽 2000Hz */
-    float current_bw = 2000.0f;  /* 电流环带宽 Hz */
-    float T_sample = 0.00005f;   /* 电流环采样周期 50us */
-    float Kp_i = mp->Ld * 2.0f * FOC_PI * current_bw;
-    float Ki_i = mp->Rs * 2.0f * FOC_PI * current_bw * T_sample;
-    
-    /* 限制电流环PI参数范围，防止极端值 */
-    if (Kp_i < 0.1f) Kp_i = 0.1f;
-    if (Kp_i > 100.0f) Kp_i = 100.0f;
-    if (Ki_i < 0.001f) Ki_i = 0.001f;
-    if (Ki_i > 10.0f) Ki_i = 10.0f;
+    /* 12V/8.8R/low-side bench baseline. The previous 2kHz bandwidth formula
+       amplified reconstruction spikes into bus-limited voltage at zero current. */
+    float Kp_i = FOC_CURRENT_LOOP_KP_12V_BENCH;
+    float Ki_i = FOC_CURRENT_LOOP_KI_12V_BENCH;
     
     /* 更新电流环PI */
     FOC_Init(&handle->foc, Kp_i, Ki_i, Kp_i, Ki_i);
+    /* 电流环积分分离：误差>1.5A时暂停积分，防止瞬态过流 */
+    handle->foc.pi_d.integral_sep_thresh = 1.5f;
+    handle->foc.pi_q.integral_sep_thresh = 1.5f;
+    FOC_SetCurrentResistance(&handle->foc, handle->motor_param.Rs);
     
-    /* 速度环参数计算 - 带宽 100Hz (电流环的1/20) */
-    float speed_bw = 100.0f;     /* 速度环带宽 Hz */
-    float T_speed = 1.0f / (float)FOC_SPEED_LOOP_FREQ;  /* 速度环采样周期 */
-    
-    /* 速度环PI基于转动惯量和转矩常数
-     * 简化的工程整定: Kp = J * ws^2 / Kt, Ki = ws / 10
-     * 其中 ws = 2π * speed_bw
-     */
-    float ws = 2.0f * FOC_PI * speed_bw;
-    float Kt = 1.5f * mp->Pn * mp->Ke;  /* 转矩常数 Nm/A (假设使用Iq控制) */
-    
-    float Kp_s, Ki_s;
-    if (Kt > 0.001f && mp->J > 0.0f) {
-        /* 有有效参数时使用计算值 */
-        Kp_s = mp->J * ws * ws / Kt * 0.5f;  /* 0.5为阻尼系数，可根据需要调整 */
-        Ki_s = Kp_s * ws * 0.1f * T_speed;   /* Ki = Kp * ws/10 * T */
-    } else {
-        /* 使用默认值 */
-        Kp_s = 0.1f;
-        Ki_s = 0.01f;
-    }
-    
-    /* 限制速度环PI参数 */
-    if (Kp_s < 0.01f) Kp_s = 0.01f;
-    if (Kp_s > 50.0f) Kp_s = 50.0f;
-    if (Ki_s < 0.001f) Ki_s = 0.001f;
-    if (Ki_s > 5.0f) Ki_s = 5.0f;
+    /* 速度环参数 - 固定值，台架测试验证(12V, 24N22P, 74KV) */
+    /* 使用台架实测整定值，不使用Ke/J自动计算(默认Ke/J参数不准确) */
+    float Kp_s = 0.30f;  /* 固定比例增益 */
+    float Ki_s = 0.0f;   /* 2kHz速度积分先禁用，避免Rs前馈下低速冲飞 */
     
     /* 更新速度环PI */
-    FOC_PI_Init(&handle->pi_speed, Kp_s, Ki_s, 50.0f, -50.0f);
+    {
+        float speed_current_limit = FOC_App_GetCurrentRefLimit(handle);
+        FOC_PI_Init(&handle->pi_speed, Kp_s, Ki_s, speed_current_limit, -speed_current_limit);
+    }
     
     /* 位置环参数计算 - 显式PD
      * Kp_pos: 位置误差(rad) -> 速度给定(rad/s)
      * Kd_pos: 实际速度反馈阻尼系数
      */
-    float Kp_p = 20.0f;
-    float Kd_p = 0.10f;
+    float Kp_p = FOC_POSITION_PD_KP_DEFAULT;
+    float Kd_p = FOC_POSITION_PD_KD_DEFAULT;
 
     if (Kp_s > 0.0f) {
-        Kp_p = sqrtf(Kp_s) * 8.0f;
-        if (Kp_p < 10.0f) Kp_p = 10.0f;
+        Kp_p = sqrtf(Kp_s) * FOC_POSITION_PD_KP_SCALE;
+        if (Kp_p < FOC_POSITION_PD_KP_MIN) Kp_p = FOC_POSITION_PD_KP_MIN;
         if (Kp_p > 100.0f) Kp_p = 100.0f;
 
         Kd_p = 0.01f * Kp_p;
-        if (Kd_p < 0.05f) Kd_p = 0.05f;
+        if (Kd_p < FOC_POSITION_PD_KD_DEFAULT) Kd_p = FOC_POSITION_PD_KD_DEFAULT;
         if (Kd_p > 0.25f) Kd_p = 0.25f;
     }
 
     /* 更新位置环PD */
-    FOC_PositionPD_Init(&handle->pos_pd, Kp_p, Kd_p, 50.0f, -50.0f);
+    FOC_PositionPD_Init(&handle->pos_pd,
+                        Kp_p,
+                        Kd_p,
+                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
+                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
     
     /* 可选: 打印调试信息 */
     /*
@@ -832,6 +1615,8 @@ void FOC_App_LoadParam(FOC_AppHandle_t *handle)
         /* 加载失败，使用默认参数 */
         Param_SetDefault(&handle->motor_param);
     }
+    FOC_App_ApplyKnownMotorConstants(handle);
+    FOC_App_UpdateIdentifyState(handle);
 }
 
 /**
@@ -841,6 +1626,10 @@ void FOC_App_LoadParam(FOC_AppHandle_t *handle)
 void FOC_App_SaveParam(FOC_AppHandle_t *handle)
 {
     Param_Save(&handle->motor_param);
+    /* Flash write stalls CPU → TLE5012 SPI transaction may be interrupted.
+       Abort any stuck SPI transfer and reset encoder state machine. */
+    HAL_SPI_Abort(&hspi3);
+    TLE5012_Init();
 }
 
 /**
@@ -856,34 +1645,39 @@ void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
     }
 
     if (handle->state == FOC_STATE_IDLE || handle->state == FOC_STATE_READY) {
-        if (!FOC_App_PrecheckPowerStage(handle, &fault)) {
-            handle->fault_code = fault;
-            handle->state = FOC_STATE_FAULT;
+        if (!FOC_App_PrecheckPowerStage(handle, &fault, 1U)) {
+            if (fault != FOC_FAULT_NONE) {
+                FOC_App_EnterFault(handle, fault);
+            }
             handle->enable_pwm = 0U;
-            handle->enable_identify = 0U;
+            if (fault != FOC_FAULT_NONE) {
+                handle->enable_identify = 0U;
+            }
             return;
         }
 
         /* 参数识别需要实际激励：确保功率级已上电并允许PWM输出 */
         if (!handle->enable_pwm) {
+            drv8350s.runtime.latchedFaultFlags = 0U;
+            drv8350s.runtime.latchedFaultStatus1 = 0U;
+            drv8350s.runtime.latchedVgsStatus2 = 0U;
             HAL_GPIO_WritePin(DRV_EN_GPIO_Port, DRV_EN_Pin, GPIO_PIN_SET);
             HAL_Delay(1);
             (void)DRV8350S_ClearFaults(&drv8350s);
             if (DRV8350S_EnableGateDrivers(&drv8350s) != 0) {
-                handle->fault_code = FOC_FAULT_DRV8350S;
-                handle->state = FOC_STATE_FAULT;
-                handle->enable_pwm = 0;
-                handle->enable_identify = 0;
+                FOC_App_EnterFault(handle, FOC_FAULT_DRV8350S);
+                handle->enable_pwm = 0U;
                 return;
             }
 
+            FOC_App_PrimeNeutralPwm();
             HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
             HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
             HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
             HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
             HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
             HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
-            handle->enable_pwm = 1;
+            handle->enable_pwm = 1U;
         }
 
         ADC_Sampling_ResetTimingState();
@@ -893,7 +1687,7 @@ void FOC_App_StartIdentify(FOC_AppHandle_t *handle)
         MI_StartIdentify(&handle->mi_handle);
         
         handle->state = FOC_STATE_PARAM_IDENTIFY;
-        handle->enable_identify = 1;
+        handle->enable_identify = 1U;
     }
 }
 

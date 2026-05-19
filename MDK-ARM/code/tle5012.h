@@ -16,6 +16,7 @@
 #include "main.h"
 
 // TLE5012B 使用软件片选，NSS 连接到 MCU PA15
+// Encoder board: CN2.5/CN2.6 share the encoder DATA net in 3-wire SSC mode.
 #define TLE5012_CS_PORT      TLE5012_NSS_GPIO_Port
 #define TLE5012_CS_PIN       TLE5012_NSS_Pin
 
@@ -36,12 +37,27 @@ typedef void (*TLE5012_FaultCallback_t)(TLE5012_Fault_t fault);
 typedef struct {
     float angle;            // 角度值 0.0 ~ 360.0
     uint16_t raw_angle;     // 原始角度数据
+    uint16_t raw_word;      // 最近一次完整Data Word
+    uint16_t safety_word;   // 最近一次完整Safety Word
     uint8_t status;         // 状态字节 (Safety Word高8位，含bit15复位/看门狗状态)
     uint8_t reset_fault;    // Safety Word bit15=0，表示芯片复位/看门狗异常
     uint8_t crc_error;      // CRC错误标志 (1=错误)
+    uint8_t received_crc;   // Safety Word低8位
+    uint8_t calculated_crc; // 本地计算CRC
+    uint8_t data_ok;        // Interface OK + Angle Valid
     uint8_t update_flag;    // 数据更新标志
     uint8_t data_valid;     // 【新增】数据有效标志
 } TLE5012_Data_t;
+
+typedef struct {
+    uint8_t active;
+    uint8_t step;
+    uint8_t cs_level;
+    uint8_t sck_level;
+    uint8_t data_out;
+    uint8_t data_in;
+    uint32_t last_tick;
+} TLE5012_GpioDiagState_t;
 
 void TLE5012_Init(void);
 void TLE5012_StartRead(void); // 触发异步读取
@@ -49,6 +65,10 @@ void TLE5012_HandleTxComplete(void); // 发送命令完成，切换到接收阶�
 void TLE5012_ProcessData(uint16_t *rx_buf); // 处理接收到的数据
 void TLE5012_HandleTransferError(void); // SPI错误/启动失败恢复
 float TLE5012_GetAngle(void); // 获取角度值（0-360度）
+void TLE5012_GpioDiagStart(void);
+void TLE5012_GpioDiagStop(void);
+void TLE5012_GpioDiagService(void);
+uint8_t TLE5012_IsGpioDiagActive(void);
 
 /* 【新增】故障处理函数 */
 void TLE5012_RegisterFaultCallback(TLE5012_FaultCallback_t callback);
@@ -57,6 +77,7 @@ void TLE5012_ClearCRCErrorCount(void);
 uint8_t TLE5012_IsDataValid(void);
 
 extern TLE5012_Data_t tle5012_sensor;
+extern volatile TLE5012_GpioDiagState_t tle5012_gpio_diag;
 extern uint16_t tle5012_rx_buf[2];  // SPI接收缓冲区：Data + Safety
 
 #ifdef __cplusplus

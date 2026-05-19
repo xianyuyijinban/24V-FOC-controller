@@ -7,17 +7,89 @@
  */
 
 #include "adc_sampling.h"
+#include "tim.h"
 #include <math.h>
 #include <string.h>
 
 /* 私有变量 */
-static ADC_HandleTypeDef* s_hadc = NULL;
 static ADC_Sampling_t s_adcData;
 static volatile uint8_t s_controlWindowOpen = 1U;
 static volatile uint32_t s_lastConsumedFrameSequence = 0U;
 
 /* 外部变量声明（在stm32h7xx_it.c中定义） */
 extern volatile uint16_t adc_data[8];
+
+typedef struct {
+    uint32_t sum;
+    uint64_t sumSq;
+    uint16_t min;
+    uint16_t max;
+} ADC_NoiseAccum_t;
+
+static uint16_t ADC_Sampling_IntegerSqrt(uint32_t value)
+{
+    uint32_t root = 0U;
+    uint32_t bit = 1UL << 30;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+
+    while (bit != 0U) {
+        if (value >= (root + bit)) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+
+    return (uint16_t)root;
+}
+
+static void ADC_NoiseAccum_Init(ADC_NoiseAccum_t *accum, uint16_t first)
+{
+    accum->sum = 0U;
+    accum->sumSq = 0ULL;
+    accum->min = first;
+    accum->max = first;
+}
+
+static void ADC_NoiseAccum_Add(ADC_NoiseAccum_t *accum, uint16_t raw)
+{
+    accum->sum += raw;
+    accum->sumSq += ((uint64_t)raw * (uint64_t)raw);
+    if (raw < accum->min) {
+        accum->min = raw;
+    }
+    if (raw > accum->max) {
+        accum->max = raw;
+    }
+}
+
+static void ADC_NoiseAccum_Finish(const ADC_NoiseAccum_t *accum,
+                                  uint16_t count,
+                                  ADC_Sampling_NoiseChannelStats_t *stats)
+{
+    uint32_t mean;
+    uint64_t varianceNumerator;
+    uint64_t varianceDenominator;
+    uint32_t variance;
+
+    mean = (accum->sum + ((uint32_t)count / 2U)) / (uint32_t)count;
+    varianceNumerator = ((uint64_t)count * accum->sumSq) -
+                        ((uint64_t)accum->sum * (uint64_t)accum->sum);
+    varianceDenominator = (uint64_t)count * (uint64_t)count;
+    variance = (uint32_t)((varianceNumerator + (varianceDenominator / 2ULL)) /
+                          varianceDenominator);
+
+    stats->min = accum->min;
+    stats->max = accum->max;
+    stats->mean = (uint16_t)mean;
+    stats->peakToPeak = (uint16_t)(accum->max - accum->min);
+    stats->stddev = ADC_Sampling_IntegerSqrt(variance);
+}
 
 /**
  * @brief 初始化ADC采样模块
@@ -27,8 +99,6 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc)
     if (hadc == NULL) {
         return -1;
     }
-    
-    s_hadc = hadc;
     
     /* 清零数据结构 */
     memset((void*)&s_adcData, 0, sizeof(ADC_Sampling_t));
@@ -68,6 +138,17 @@ void ADC_Sampling_Process(void)
     s_adcData.vbus = ADC_CalcVoltage(s_adcData.rawVbus, K_VBUS_DIV);
     
     /* 更新标志 */
+    s_adcData.pwmPeriod = (uint16_t)__HAL_TIM_GET_AUTORELOAD(&htim1);
+    s_adcData.pwmCompareA = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
+    s_adcData.pwmCompareB = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_2);
+    s_adcData.pwmCompareC = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_3);
+    s_adcData.triggerCompare = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_4);
+    s_adcData.timerCount = (uint16_t)__HAL_TIM_GET_COUNTER(&htim1);
+    s_adcData.timerCountingDown = (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim1) != RESET) ? 1U : 0U;
+    s_adcData.lowSideValidA = (s_adcData.pwmCompareA <= s_adcData.triggerCompare) ? 1U : 0U;
+    s_adcData.lowSideValidB = (s_adcData.pwmCompareB <= s_adcData.triggerCompare) ? 1U : 0U;
+    s_adcData.lowSideValidC = (s_adcData.pwmCompareC <= s_adcData.triggerCompare) ? 1U : 0U;
+
     if (frameValid) {
         s_adcData.dataReady = 1U;
         s_adcData.lastCommittedCycle = frameCycle;
@@ -240,4 +321,76 @@ uint8_t ADC_Sampling_CheckImbalance(float threshold)
     }
     
     return 0;  /* 平衡 */
+}
+
+uint16_t ADC_Sampling_CaptureNoiseStats(uint16_t requestedSamples, ADC_Sampling_NoiseStats_t *stats)
+{
+    ADC_NoiseAccum_t accA;
+    ADC_NoiseAccum_t accB;
+    ADC_NoiseAccum_t accC;
+    ADC_NoiseAccum_t accVbus;
+    uint16_t target;
+    uint16_t count = 0U;
+    uint32_t startTick;
+    uint32_t lastFrame;
+    uint32_t timeoutMs;
+    uint16_t rawA;
+    uint16_t rawB;
+    uint16_t rawC;
+    uint16_t rawVbus;
+
+    if (stats == NULL) {
+        return 0U;
+    }
+
+    memset((void*)stats, 0, sizeof(ADC_Sampling_NoiseStats_t));
+
+    target = requestedSamples;
+    if (target < ADC_NOISE_MIN_SAMPLES) {
+        target = ADC_NOISE_MIN_SAMPLES;
+    }
+    if (target > ADC_NOISE_MAX_SAMPLES) {
+        target = ADC_NOISE_MAX_SAMPLES;
+    }
+
+    startTick = HAL_GetTick();
+    lastFrame = s_adcData.frameSequence;
+    timeoutMs = 250U + ((uint32_t)target / 4U);
+
+    while (count < target) {
+        if ((HAL_GetTick() - startTick) > timeoutMs) {
+            return 0U;
+        }
+
+        if (s_adcData.frameSequence == lastFrame) {
+            continue;
+        }
+        lastFrame = s_adcData.frameSequence;
+
+        rawA = s_adcData.rawCurrentA;
+        rawB = s_adcData.rawCurrentB;
+        rawC = s_adcData.rawCurrentC;
+        rawVbus = s_adcData.rawVbus;
+
+        if (count == 0U) {
+            ADC_NoiseAccum_Init(&accA, rawA);
+            ADC_NoiseAccum_Init(&accB, rawB);
+            ADC_NoiseAccum_Init(&accC, rawC);
+            ADC_NoiseAccum_Init(&accVbus, rawVbus);
+        }
+
+        ADC_NoiseAccum_Add(&accA, rawA);
+        ADC_NoiseAccum_Add(&accB, rawB);
+        ADC_NoiseAccum_Add(&accC, rawC);
+        ADC_NoiseAccum_Add(&accVbus, rawVbus);
+        count++;
+    }
+
+    stats->samples = count;
+    ADC_NoiseAccum_Finish(&accA, count, &stats->currentA);
+    ADC_NoiseAccum_Finish(&accB, count, &stats->currentB);
+    ADC_NoiseAccum_Finish(&accC, count, &stats->currentC);
+    ADC_NoiseAccum_Finish(&accVbus, count, &stats->vbus);
+
+    return count;
 }

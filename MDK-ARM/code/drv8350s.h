@@ -54,7 +54,20 @@ extern "C" {
 #define DRV8350S_VGS_LB_BIT             ((uint32_t)(1U << 2)  << DRV8350S_VGS_STATUS_SHIFT)
 #define DRV8350S_VGS_HC_BIT             ((uint32_t)(1U << 1)  << DRV8350S_VGS_STATUS_SHIFT)
 #define DRV8350S_VGS_LC_BIT             ((uint32_t)(1U << 0)  << DRV8350S_VGS_STATUS_SHIFT)
+#define DRV8350S_FW_UART_RX_FAULT_BIT   (1UL << 27)
+#define DRV8350S_FW_ADC_CAL_FAULT_BIT   (1UL << 28)
+#define DRV8350S_FW_TIM_TRIG_FAULT_BIT  (1UL << 29)
+#define DRV8350S_FW_ADC_DMA_FAULT_BIT   (1UL << 30)
 #define DRV8350S_COMM_FAULT_BIT         (1UL << 31)
+#define DRV8350S_HARD_SHUTDOWN_FAULT_MASK \
+    ((uint32_t)DRV8350S_VDS_OCP_BIT | (uint32_t)DRV8350S_GDF_BIT | \
+     (uint32_t)DRV8350S_UVLO_BIT | (uint32_t)DRV8350S_OTSD_BIT | \
+     (uint32_t)DRV8350S_VDS_HA_BIT | (uint32_t)DRV8350S_VDS_LA_BIT | \
+     (uint32_t)DRV8350S_VDS_HB_BIT | (uint32_t)DRV8350S_VDS_LB_BIT | \
+     (uint32_t)DRV8350S_VDS_HC_BIT | (uint32_t)DRV8350S_VDS_LC_BIT | \
+     DRV8350S_GDUV_BIT | DRV8350S_VGS_HA_BIT | DRV8350S_VGS_LA_BIT | \
+     DRV8350S_VGS_HB_BIT | DRV8350S_VGS_LB_BIT | DRV8350S_VGS_HC_BIT | \
+     DRV8350S_VGS_LC_BIT)
 
 /* Raw register bit masks for parsing (without shift) */
 /* DRV8350S: Bit 10-8 are Reserved, not CSA Overcurrent */
@@ -186,6 +199,9 @@ typedef struct {
 
     /* Parsed fault status */
     volatile uint32_t faultFlags;
+    volatile uint32_t latchedFaultFlags;
+    volatile uint16_t latchedFaultStatus1;
+    volatile uint16_t latchedVgsStatus2;
     volatile uint8_t  isFaultActive;
     volatile uint8_t  commFaultActive;
     volatile uint8_t  commValidated;
@@ -263,6 +279,7 @@ int8_t DRV8350S_SetBrake(DRV8350S_Handle_t* handle);
 
 /* Status & Diagnostics */
 uint32_t DRV8350S_GetFaultFlags(DRV8350S_Handle_t* handle);
+uint8_t DRV8350S_ShouldHardShutdown(uint32_t faultFlags);
 const char* DRV8350S_FaultToString(uint32_t faultBit);
 void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle);
 

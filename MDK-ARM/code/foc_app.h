@@ -23,11 +23,34 @@ extern "C" {
 
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
-#define FOC_PWM_PERIOD          50          /* PWM周期 50us */
-#define FOC_CONTROL_FREQ        20000       /* 电流环频率 20kHz */
-#define FOC_SPEED_LOOP_FREQ     2000        /* 【修改】速度环频率 2kHz (原为1kHz) */
+#define FOC_PWM_PERIOD          50          /* ARR=49, center-aligned */
+#define FOC_CONTROL_FREQ        10000       /* PWM/ADC/effective current loop freq */
+#define FOC_SPEED_LOOP_FREQ     2000        /* Target speed loop freq (TBD by scope) */
 #define FOC_POSITION_LOOP_FREQ  200         /* 【新增】位置环频率 200Hz */
-#define FOC_SPEED_LPF_CUTOFF_HZ 200.0f      /* 速度估算低通截止频率 */
+#define FOC_SPEED_LPF_CUTOFF_HZ 20.0f       /* 速度估算低通截止频率：低速台架优先抑制编码器微分噪声 */
+#define FOC_SPEED_EST_ACCEL_LIMIT_RAD_PER_S2 60.0f /* 速度估算限斜率，抑制低速编码器离群尖峰 */
+#define FOC_SPEED_STATIC_FRICTION_POS_COMP_A 0.03f /* Rs前馈启用后降低起动补偿，避免低速冲飞 */
+#define FOC_SPEED_STATIC_FRICTION_NEG_COMP_A 0.03f /* Rs前馈启用后正反向使用对称起动补偿 */
+#define FOC_SPEED_POSITIVE_IQ_LIMIT_A 0.25f /* 12V/Rs前馈台架速度模式保守限流 */
+#define FOC_SPEED_NEGATIVE_IQ_LIMIT_A 0.25f /* 12V/Rs前馈台架速度模式保守限流 */
+#define FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A 0.25f /* 位置模式先以保守抓力跑通 */
+#define FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A 0.25f /* 位置模式先以保守抓力跑通 */
+#define FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 1.0f /* 速度给定限斜率，12V台架小步稳定响应 */
+#define FOC_CURRENT_LOOP_KP_12V_BENCH       0.30f /* 12V/8.8R低边采样台架实测零电流稳定基线 */
+#define FOC_CURRENT_LOOP_KI_12V_BENCH       0.1f  /* 小积分消除Id稳态误差（需搭配低分离阈值） */
+#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.03f /* Rs前馈后位置起动补偿只保留小偏置 */
+#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.03f /* Rs前馈后位置起动补偿只保留小偏置 */
+#define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */
+#define FOC_POSITION_PD_KD_DEFAULT 0.12f /* 12V台架位置模式默认速度阻尼 */
+#define FOC_POSITION_PD_KP_SCALE 1.0f   /* 派生增益 */
+#define FOC_POSITION_PD_KP_MIN 4.0f     /* 最小刚度 */
+#define FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S 0.05f /* 误差超过该值才加起动偏置 */
+#define FOC_SPEED_STATIC_FRICTION_ACTIVE_RAD_PER_S 0.20f /* 实际速度低于该值才加起动偏置 */
+#define FOC_POSITION_STATIC_FRICTION_ENTER_RAD 0.052f /* 位置误差超过约3deg才加起动偏置 */
+#define FOC_POSITION_STATIC_FRICTION_EXIT_RAD 0.017f /* 位置误差小于约1deg才退出起动偏置 */
+#define FOC_NEUTRAL_BOOTSTRAP_VOLTAGE_EPS 0.001f /* 中性PWM起动判定：当前电压近零 */
+#define FOC_NEUTRAL_BOOTSTRAP_CURRENT_EPS 0.001f /* 中性PWM起动判定：电流给定非零 */
+#define FOC_LOW_SIDE_ZERO_WINDOW_FORCE_INTERVAL 32U  /* 0/0/0窗口饥饿逃逸间隔，低边采样下保守避免启动过流 */
 
 /* 电流采样 */
 #define FOC_ADC_RESOLUTION      12          /* ADC分辨率 */
@@ -39,10 +62,24 @@ extern "C" {
 #define FOC_ENCODER_RESOLUTION  65536       /* TLE5012 16位分辨率 */
 
 /* 保护阈值默认值 */
-#define FOC_DEFAULT_OVERCURRENT_LIMIT_A   15.0f   /* 过流保护阈值 A */
-#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   28.0f   /* 过压保护阈值 V */
-#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  18.0f   /* 欠压保护阈值 V */
+#define FOC_DEFAULT_OVERCURRENT_LIMIT_A   3.0f    /* 过流保护阈值 A */
+#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   30.0f   /* 24V系统过压阈值 V */
+#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  18.0f   /* 24V系统欠压阈值 V */
+#define FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V  1.0f    /* 严重电压故障相对告警阈值的额外裕量 */
+#define FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V 0.5f /* 严重电压故障自动恢复滞回 */
 #define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */
+#define FOC_ENCODER_FAULT_MISS_THRESHOLD 3U /* 编码器连续无效/CRC错误升级为故障 */
+#define FOC_CURRENT_REF_LIMIT_RATIO       0.80f /* 电流给定最多使用过流阈值的80%，给保护留余量 */
+#define FOC_CURRENT_REF_VOLTAGE_RATIO     0.577f /* SVPWM相电压可用量约 Vbus/sqrt(3) */
+#define FOC_CURRENT_REF_VOLTAGE_MARGIN    1.25f  /* 高阻电机按电压/Rs降额，12V台架仍有Vq余量时小步放宽 */
+#define FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S      20.0f  /* 堵转开环试转最大机械角速度 */
+#define FOC_STALL_OPEN_LOOP_SPEED_RAMP_RAD_PER_S2    200.0f /* 堵转开环试转速度斜率 */
+#define FOC_STALL_OPEN_LOOP_CURRENT_MAX_A            2.0f   /* 堵转开环试转电流上限 */
+#define FOC_STALL_OPEN_LOOP_DEFAULT_SPEED_RAD_PER_S  5.0f   /* 未显式给speed时的默认试转速度 */
+#define FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A             0.5f   /* 未显式给Iq时的默认试转扭矩 */
+#define FOC_POSITION_SPEED_LIMIT_RAD_PER_S           1.0f   /* 位置PD输出速度上限，配合1rad/s^2斜坡 */
+#define FOC_WARNING_VBUS_UNDERVOLTAGE_BIT (1UL << 0)
+#define FOC_WARNING_VBUS_OVERVOLTAGE_BIT  (1UL << 1)
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */
 
 /*==================== 数据结构 ====================*/
@@ -107,6 +144,7 @@ typedef struct {
     /* 状态 */
     FOC_AppState_t state;
     FOC_FaultCode_t fault_code;
+    uint32_t warning_flags;            /* 非停机告警位 */
     FOC_ControlMode_t control_mode;  /* 控制模式：力矩/速度/位置 */
     
     /* 反馈值 */
@@ -116,12 +154,14 @@ typedef struct {
     float theta_elec;           /* 电角度 rad */
     float speed_mech;           /* 机械转速 rad/s */
     float speed_elec;           /* 电转速 rad/s */
+    float speed_theta_prev;     /* 速度估算上一拍机械角度 rad */
     uint32_t theta_sample_seq;  /* 机械角度样本序号 */
     
     /* 参考值 */
     float Id_ref;
     float Iq_ref;
     float speed_ref;
+    float speed_ref_ramped;     /* 速度模式内部限斜率给定 rad/s */
     float pos_ref;              /* 位置给定 (rad) */
     
     /* 外环控制器 */
@@ -131,12 +171,42 @@ typedef struct {
     /* 运行时计数 */
     uint32_t control_count;
     uint32_t speed_loop_count;
+    uint32_t adc_valid_low_side_count;
+    uint32_t adc_invalid_low_side_count;
+    uint32_t adc_forced_low_side_count;
+    uint32_t adc_invalid_low_side_streak;
+    float speed_loop_ref_diag;
+    float speed_loop_mech_diag;
+    float speed_loop_error_diag;
+    float speed_loop_iq_mech_diag;
+    float speed_loop_friction_diag;
+    float speed_loop_iq_cmd_diag;
+    float position_loop_error_diag;     /* 位置环最近一次位置误差 rad */
+    float position_loop_pd_out_diag;    /* 位置PD输出到速度给定 rad/s */
+    uint8_t position_loop_pd_sat_diag;  /* 位置PD输出是否触及速度上限 */
+    uint8_t position_loop_speed_ramp_sat_diag; /* 位置模式速度斜坡是否限制给定 */
+    uint8_t position_loop_iq_pos_sat_diag;     /* 位置模式正向Iq是否触顶 */
+    uint8_t position_loop_iq_neg_sat_diag;     /* 位置模式负向Iq是否触底 */
+    uint32_t position_pref_cmd_count_diag;     /* 最近PREF命令计数 */
+    float position_pref_raw_diag;              /* 最近PREF用户原始目标 rad */
+    float position_pref_mapped_diag;           /* 最近PREF按encoder_dir映射后目标 rad */
+    float position_pref_before_diag;           /* PREF执行前pos_ref rad */
+    float position_pref_after_diag;            /* PREF执行后pos_ref rad */
+    uint8_t position_pref_user_set_diag;       /* PREF执行后user_set状态 */
     
     /* 使能标志 */
+    uint8_t motor_identified;      /* 0=未识别，1=已识别 */
+    uint8_t stall_mode_armed;      /* 0=未授权，1=允许未识别堵转使能 */
+    uint8_t stall_open_loop_active;/* 0=关闭，1=编码器离线开环试转中 */
     uint8_t power_unlocked;        /* 0=锁定，1=允许功率级动作 */
     uint8_t enable_pwm;
     uint8_t enable_identify;
+    uint8_t position_ref_user_set; /* 1=用户显式下发过位置目标，不在使能时覆盖 */
+    uint8_t speed_loop_ready;   /* 1=速度估算器已用当前角度完成预置 */
+    uint8_t position_friction_active; /* 位置模式静摩擦补偿滞回状态 */
     volatile uint8_t pending_disable;   /* ISR中仅做快速下电，阻塞SPI收尾延后到主循环 */
+    float stall_theta_elec;        /* 堵转开环试转使用的合成电角度 */
+    float stall_speed_ref_mech;    /* 堵转开环试转使用的限幅/斜率后的机械角速度 */
     
 } FOC_AppHandle_t;
 
@@ -147,6 +217,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle);
 void FOC_App_MainLoop(FOC_AppHandle_t *handle);
 void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle);
 void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle);
+void FOC_App_RequestFaultShutdownFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 
 /* 三环控制（分频调用） */
 void FOC_App_SpeedLoop(FOC_AppHandle_t *handle);           /* 速度环 (2kHz) */
@@ -161,12 +232,18 @@ void FOC_App_Enable(FOC_AppHandle_t *handle);
 void FOC_App_Disable(FOC_AppHandle_t *handle);
 void FOC_App_ResetMotionState(FOC_AppHandle_t *handle);
 void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);
+uint32_t FOC_App_GetVoltageWarningFlags(const FOC_AppHandle_t *handle);
+uint8_t FOC_App_GetVoltageTripFault(const FOC_AppHandle_t *handle, FOC_FaultCode_t *fault);
+uint8_t FOC_App_IsVoltageFaultRecovered(const FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
+void FOC_App_SetPolePairs(FOC_AppHandle_t *handle, uint8_t pole_pairs);
+float FOC_App_PositionSensorToControlFrame(const FOC_AppHandle_t *handle, float pos_ref_sensor);
+float FOC_App_PositionControlToSensorFrame(const FOC_AppHandle_t *handle, float pos_ref_control);
 
 /* 参数管理 */
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);

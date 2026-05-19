@@ -25,6 +25,7 @@
 #include "head.h"
 #include "uart_upload.h"
 #include "adc_sampling.h"
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -66,9 +67,15 @@ volatile uint8_t urR_data[128];
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 volatile uint16_t adc_data[8] = {0};
+extern TIM_HandleTypeDef htim1;
 
 #define UART_CMD_LINE_MAX       96U
 #define UART_CMD_QUEUE_DEPTH    8U
+#define UART_ADC_PHASE_SCAN_MIN_TRIGGER 2U
+#define UART_ADC_PHASE_SCAN_MAX_TRIGGER 46U
+#define UART_ADC_PHASE_SCAN_TRIGGER_STEP 2U
+#define UART_ADC_SECTOR_SCAN_SECTORS 6U
+#define UART_ADC_SECTOR_SCAN_MIN_PHASES 3U
 
 static char s_uartCmdLine[UART_CMD_LINE_MAX];
 static uint16_t s_uartCmdLen = 0U;
@@ -77,6 +84,58 @@ static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
 static volatile uint8_t s_uartCmdDropUntilEol = 0U;
 static volatile uint32_t s_uartRxRestartFailCount = 0U;
+
+typedef struct {
+    uint32_t sum;
+    uint64_t sumSq;
+    uint16_t min;
+    uint16_t max;
+} UART_AdcNoiseAccum_t;
+
+typedef struct {
+    UART_AdcNoiseAccum_t accA;
+    UART_AdcNoiseAccum_t accB;
+    UART_AdcNoiseAccum_t accC;
+    uint32_t sumCcrA;
+    uint32_t sumCcrB;
+    uint32_t sumCcrC;
+    uint16_t count;
+    uint8_t winA;
+    uint8_t winB;
+    uint8_t winC;
+} UART_AdcSectorBucket_t;
+
+static uint8_t s_adcNoiseActive = 0U;
+static uint16_t s_adcNoiseTargetSamples = 0U;
+static uint16_t s_adcNoiseCapturedSamples = 0U;
+static uint32_t s_adcNoiseStartTick = 0U;
+static uint32_t s_adcNoiseTimeoutMs = 0U;
+static uint32_t s_adcNoiseLastFrameSequence = 0U;
+static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
+
+static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
+{
+    FOC_FaultCode_t voltageFault = FOC_FAULT_NONE;
+
+    FOC_App_RefreshTelemetry(&g_foc_app);
+    g_foc_app.warning_flags = FOC_App_GetVoltageWarningFlags(&g_foc_app);
+
+    if ((g_foc_app.state != FOC_STATE_FAULT) ||
+        ((g_foc_app.fault_code != FOC_FAULT_UNDERVOLTAGE) &&
+         (g_foc_app.fault_code != FOC_FAULT_OVERVOLTAGE))) {
+        return;
+    }
+
+    __disable_irq();
+    if (FOC_App_GetVoltageTripFault(&g_foc_app, &voltageFault)) {
+        g_foc_app.fault_code = voltageFault;
+    } else if (FOC_App_IsVoltageFaultRecovered(&g_foc_app, g_foc_app.fault_code)) {
+        g_foc_app.fault_code = FOC_FAULT_NONE;
+        FOC_App_ResetMotionState(&g_foc_app);
+        g_foc_app.state = g_foc_app.motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
+    }
+    __enable_irq();
+}
 
 static size_t UART_BoundedStrLen(const char *str, size_t maxLen)
 {
@@ -91,12 +150,141 @@ static size_t UART_BoundedStrLen(const char *str, size_t maxLen)
     return len;
 }
 
+static uint8_t UART_CommandParseFloatToken(const char **cursor, float *value)
+{
+    const char *p;
+    float result = 0.0f;
+    float frac_scale = 0.1f;
+    int sign = 1;
+    uint8_t has_digit = 0U;
+
+    if ((cursor == NULL) || (*cursor == NULL) || (value == NULL)) {
+        return 0U;
+    }
+
+    p = *cursor;
+    if (*p == '-') {
+        sign = -1;
+        p++;
+    } else if (*p == '+') {
+        p++;
+    }
+
+    while ((*p >= '0') && (*p <= '9')) {
+        has_digit = 1U;
+        result = (result * 10.0f) + (float)(*p - '0');
+        p++;
+    }
+
+    if (*p == '.') {
+        p++;
+        while ((*p >= '0') && (*p <= '9')) {
+            has_digit = 1U;
+            result += (float)(*p - '0') * frac_scale;
+            frac_scale *= 0.1f;
+            p++;
+        }
+    }
+
+    if (has_digit == 0U) {
+        return 0U;
+    }
+
+    *value = (sign < 0) ? -result : result;
+    *cursor = p;
+    return 1U;
+}
+
+static uint8_t UART_CommandMatchPrefix(const char *cmd, const char *prefix, const char **args)
+{
+    size_t prefix_len;
+
+    if ((cmd == NULL) || (prefix == NULL) || (args == NULL)) {
+        return 0U;
+    }
+
+    prefix_len = UART_BoundedStrLen(prefix, UART_CMD_LINE_MAX);
+    if (strncmp(cmd, prefix, prefix_len) != 0) {
+        return 0U;
+    }
+
+    *args = &cmd[prefix_len];
+    return 1U;
+}
+
+static uint8_t UART_CommandParseFloat1(const char *cmd, const char *prefix, float *v1)
+{
+    const char *p;
+
+    if (!UART_CommandMatchPrefix(cmd, prefix, &p)) {
+        return 0U;
+    }
+    if (!UART_CommandParseFloatToken(&p, v1)) {
+        return 0U;
+    }
+    return (*p == '\0') ? 1U : 0U;
+}
+
+static uint8_t UART_CommandParseFloat2(const char *cmd, const char *prefix, float *v1, float *v2)
+{
+    const char *p;
+
+    if (!UART_CommandMatchPrefix(cmd, prefix, &p)) {
+        return 0U;
+    }
+    if (!UART_CommandParseFloatToken(&p, v1) || (*p != ',')) {
+        return 0U;
+    }
+    p++;
+    if (!UART_CommandParseFloatToken(&p, v2)) {
+        return 0U;
+    }
+    return (*p == '\0') ? 1U : 0U;
+}
+
+static uint8_t UART_CommandIsPriority(const char *line)
+{
+    (void)line;
+    return 0U;
+}
+
+static void UART_CommandQueueCopy(uint8_t index, const char *line)
+{
+    size_t copyLen;
+
+    copyLen = UART_BoundedStrLen(line, UART_CMD_LINE_MAX - 1U);
+    memcpy(s_uartCmdQueue[index], line, copyLen);
+    s_uartCmdQueue[index][copyLen] = '\0';
+}
+
+static void UART_CommandQueuePushPriority(const char *line)
+{
+    uint8_t prev;
+
+    if (line == NULL) {
+        return;
+    }
+
+    prev = (uint8_t)((s_uartCmdQueueRead + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    if (prev == s_uartCmdQueueWrite) {
+        /* 队列满：为实时位置目标让路，丢弃尾部最新的普通命令 */
+        s_uartCmdQueueWrite = (uint8_t)((s_uartCmdQueueWrite + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    }
+
+    UART_CommandQueueCopy(prev, line);
+    s_uartCmdQueueRead = prev;
+}
+
 static void UART_CommandQueuePush(const char *line)
 {
     uint8_t next;
-    size_t copyLen;
 
     if (line == NULL) {
+        return;
+    }
+
+    if (UART_CommandIsPriority(line)) {
+        UART_CommandQueuePushPriority(line);
         return;
     }
 
@@ -106,10 +294,526 @@ static void UART_CommandQueuePush(const char *line)
         s_uartCmdQueueRead = (uint8_t)((s_uartCmdQueueRead + 1U) % UART_CMD_QUEUE_DEPTH);
     }
 
-    copyLen = UART_BoundedStrLen(line, UART_CMD_LINE_MAX - 1U);
-    memcpy(s_uartCmdQueue[s_uartCmdQueueWrite], line, copyLen);
-    s_uartCmdQueue[s_uartCmdQueueWrite][copyLen] = '\0';
+    UART_CommandQueueCopy(s_uartCmdQueueWrite, line);
     s_uartCmdQueueWrite = next;
+}
+
+static void UART_CommandSendText(const char *text)
+{
+    size_t len;
+
+    if (text == NULL) {
+        return;
+    }
+
+    len = UART_BoundedStrLen(text, 512U);
+    (void)HAL_UART_Transmit(&huart1, (uint8_t*)text, (uint16_t)len, 200U);
+}
+
+static uint16_t UART_AdcNoiseIntegerSqrt(uint32_t value)
+{
+    uint32_t root = 0U;
+    uint32_t bit = 1UL << 30;
+
+    while (bit > value) {
+        bit >>= 2;
+    }
+
+    while (bit != 0U) {
+        if (value >= (root + bit)) {
+            value -= root + bit;
+            root = (root >> 1) + bit;
+        } else {
+            root >>= 1;
+        }
+        bit >>= 2;
+    }
+
+    return (uint16_t)root;
+}
+
+static void UART_AdcNoiseAccumInit(UART_AdcNoiseAccum_t *accum, uint16_t raw)
+{
+    accum->sum = 0U;
+    accum->sumSq = 0ULL;
+    accum->min = raw;
+    accum->max = raw;
+}
+
+static void UART_AdcNoiseAccumAdd(UART_AdcNoiseAccum_t *accum, uint16_t raw)
+{
+    accum->sum += raw;
+    accum->sumSq += ((uint64_t)raw * (uint64_t)raw);
+    if (raw < accum->min) {
+        accum->min = raw;
+    }
+    if (raw > accum->max) {
+        accum->max = raw;
+    }
+}
+
+static void UART_AdcNoiseAccumFinish(const UART_AdcNoiseAccum_t *accum,
+                                     uint16_t count,
+                                     ADC_Sampling_NoiseChannelStats_t *stats)
+{
+    uint32_t mean;
+    uint64_t varianceNumerator;
+    uint64_t varianceDenominator;
+    uint32_t variance;
+
+    mean = (accum->sum + ((uint32_t)count / 2U)) / (uint32_t)count;
+    varianceNumerator = ((uint64_t)count * accum->sumSq) -
+                        ((uint64_t)accum->sum * (uint64_t)accum->sum);
+    varianceDenominator = (uint64_t)count * (uint64_t)count;
+    variance = (uint32_t)((varianceNumerator + (varianceDenominator / 2ULL)) /
+                          varianceDenominator);
+
+    stats->min = accum->min;
+    stats->max = accum->max;
+    stats->mean = (uint16_t)mean;
+    stats->peakToPeak = (uint16_t)(accum->max - accum->min);
+    stats->stddev = UART_AdcNoiseIntegerSqrt(variance);
+}
+
+static uint8_t UART_CommandCanRunAdcNoiseTest(void)
+{
+    return ((g_foc_app.enable_pwm == 0U) &&
+            (g_foc_app.state != FOC_STATE_RUNNING) &&
+            (g_foc_app.state != FOC_STATE_PARAM_IDENTIFY)) ? 1U : 0U;
+}
+
+static uint16_t UART_CommandClampAdcNoiseSamples(uint16_t requestedSamples)
+{
+    uint16_t target = requestedSamples;
+
+    if (target < ADC_NOISE_MIN_SAMPLES) {
+        target = ADC_NOISE_MIN_SAMPLES;
+    }
+    if (target > ADC_NOISE_MAX_SAMPLES) {
+        target = ADC_NOISE_MAX_SAMPLES;
+    }
+
+    return target;
+}
+
+static void UART_CommandAppendAdcNoiseChannel(char *buf,
+                                              size_t len,
+                                              const char *name,
+                                              const ADC_Sampling_NoiseChannelStats_t *stats)
+{
+    size_t used;
+
+    used = UART_BoundedStrLen(buf, len);
+    if (used >= len) {
+        return;
+    }
+
+    (void)snprintf(&buf[used], len - used,
+                   ",%s:min=%u,max=%u,mean=%u,pp=%u,std=%u",
+                   name,
+                   (unsigned int)stats->min,
+                   (unsigned int)stats->max,
+                   (unsigned int)stats->mean,
+                   (unsigned int)stats->peakToPeak,
+                   (unsigned int)stats->stddev);
+}
+
+static void UART_CommandHandleAdcNoise(uint16_t requestedSamples)
+{
+    char response[512];
+    ADC_Sampling_t *adc;
+
+    if (!UART_CommandCanRunAdcNoiseTest()) {
+        (void)snprintf(response, sizeof(response),
+                       "ADC_NOISE,BUSY,state=%u,pwm=%u\r\n",
+                       (unsigned int)g_foc_app.state,
+                       (unsigned int)g_foc_app.enable_pwm);
+        UART_CommandSendText(response);
+        return;
+    }
+
+    if (s_adcNoiseActive != 0U) {
+        UART_CommandSendText("ADC_NOISE,BUSY,active=1\r\n");
+        return;
+    }
+
+    adc = ADC_Sampling_GetData();
+    s_adcNoiseTargetSamples = UART_CommandClampAdcNoiseSamples(requestedSamples);
+    s_adcNoiseCapturedSamples = 0U;
+    s_adcNoiseStartTick = HAL_GetTick();
+    s_adcNoiseTimeoutMs = 2000U + (uint32_t)s_adcNoiseTargetSamples;
+    s_adcNoiseLastFrameSequence = adc->frameSequence;
+    s_adcNoiseActive = 1U;
+
+    (void)snprintf(response, sizeof(response),
+                   "ADC_NOISE,START,n=%u\r\n",
+                   (unsigned int)s_adcNoiseTargetSamples);
+    UART_CommandSendText(response);
+}
+
+static void UART_CommandSendAdcNoiseResult(const ADC_Sampling_NoiseStats_t *stats)
+{
+    char response[512];
+    size_t used;
+
+    (void)snprintf(response, sizeof(response),
+                   "ADC_NOISE,OK,n=%u",
+                   (unsigned int)stats->samples);
+    UART_CommandAppendAdcNoiseChannel(response, sizeof(response), "A", &stats->currentA);
+    UART_CommandAppendAdcNoiseChannel(response, sizeof(response), "B", &stats->currentB);
+    UART_CommandAppendAdcNoiseChannel(response, sizeof(response), "C", &stats->currentC);
+    UART_CommandAppendAdcNoiseChannel(response, sizeof(response), "VBUS", &stats->vbus);
+    used = UART_BoundedStrLen(response, sizeof(response));
+    if (used < (sizeof(response) - 3U)) {
+        response[used] = '\r';
+        response[used + 1U] = '\n';
+        response[used + 2U] = '\0';
+    } else {
+        response[sizeof(response) - 3U] = '\r';
+        response[sizeof(response) - 2U] = '\n';
+        response[sizeof(response) - 1U] = '\0';
+    }
+    UART_CommandSendText(response);
+}
+
+static void UART_CommandServiceAdcNoise(void)
+{
+    ADC_Sampling_t *adc;
+    ADC_Sampling_NoiseStats_t stats;
+    uint16_t raw[ADC_CHANNEL_COUNT];
+
+    if (s_adcNoiseActive == 0U) {
+        return;
+    }
+
+    if (!UART_CommandCanRunAdcNoiseTest()) {
+        s_adcNoiseActive = 0U;
+        UART_CommandSendText("ADC_NOISE,ERR,aborted\r\n");
+        return;
+    }
+
+    if ((HAL_GetTick() - s_adcNoiseStartTick) > s_adcNoiseTimeoutMs) {
+        s_adcNoiseActive = 0U;
+        UART_CommandSendText("ADC_NOISE,ERR,timeout\r\n");
+        return;
+    }
+
+    adc = ADC_Sampling_GetData();
+    if (adc->frameSequence == s_adcNoiseLastFrameSequence) {
+        return;
+    }
+    s_adcNoiseLastFrameSequence = adc->frameSequence;
+
+    raw[ADC_CH_CURRENT_A] = adc->rawCurrentA;
+    raw[ADC_CH_CURRENT_B] = adc->rawCurrentB;
+    raw[ADC_CH_CURRENT_C] = adc->rawCurrentC;
+    raw[ADC_CH_VBUS] = adc->rawVbus;
+
+    if (s_adcNoiseCapturedSamples == 0U) {
+        UART_AdcNoiseAccumInit(&s_adcNoiseAccum[ADC_CH_CURRENT_A], raw[ADC_CH_CURRENT_A]);
+        UART_AdcNoiseAccumInit(&s_adcNoiseAccum[ADC_CH_CURRENT_B], raw[ADC_CH_CURRENT_B]);
+        UART_AdcNoiseAccumInit(&s_adcNoiseAccum[ADC_CH_CURRENT_C], raw[ADC_CH_CURRENT_C]);
+        UART_AdcNoiseAccumInit(&s_adcNoiseAccum[ADC_CH_VBUS], raw[ADC_CH_VBUS]);
+    }
+
+    UART_AdcNoiseAccumAdd(&s_adcNoiseAccum[ADC_CH_CURRENT_A], raw[ADC_CH_CURRENT_A]);
+    UART_AdcNoiseAccumAdd(&s_adcNoiseAccum[ADC_CH_CURRENT_B], raw[ADC_CH_CURRENT_B]);
+    UART_AdcNoiseAccumAdd(&s_adcNoiseAccum[ADC_CH_CURRENT_C], raw[ADC_CH_CURRENT_C]);
+    UART_AdcNoiseAccumAdd(&s_adcNoiseAccum[ADC_CH_VBUS], raw[ADC_CH_VBUS]);
+    s_adcNoiseCapturedSamples++;
+
+    if (s_adcNoiseCapturedSamples < s_adcNoiseTargetSamples) {
+        return;
+    }
+
+    memset((void*)&stats, 0, sizeof(stats));
+    stats.samples = s_adcNoiseCapturedSamples;
+    UART_AdcNoiseAccumFinish(&s_adcNoiseAccum[ADC_CH_CURRENT_A], stats.samples, &stats.currentA);
+    UART_AdcNoiseAccumFinish(&s_adcNoiseAccum[ADC_CH_CURRENT_B], stats.samples, &stats.currentB);
+    UART_AdcNoiseAccumFinish(&s_adcNoiseAccum[ADC_CH_CURRENT_C], stats.samples, &stats.currentC);
+    UART_AdcNoiseAccumFinish(&s_adcNoiseAccum[ADC_CH_VBUS], stats.samples, &stats.vbus);
+
+    s_adcNoiseActive = 0U;
+    UART_CommandSendAdcNoiseResult(&stats);
+}
+
+static uint8_t UART_CommandCanRunAdcPhaseScan(void)
+{
+    return ((g_foc_app.enable_pwm != 0U) &&
+            (g_foc_app.state == FOC_STATE_RUNNING)) ? 1U : 0U;
+}
+
+static uint8_t UART_CommandAdcSectorMinPhase(uint16_t ccrA, uint16_t ccrB, uint16_t ccrC)
+{
+    if ((ccrA <= ccrB) && (ccrA <= ccrC)) {
+        return 0U;
+    }
+    if (ccrB <= ccrC) {
+        return 1U;
+    }
+    return 2U;
+}
+
+static char UART_CommandAdcSectorPhaseName(uint8_t phase)
+{
+    static const char names[UART_ADC_SECTOR_SCAN_MIN_PHASES] = {'A', 'B', 'C'};
+
+    if (phase >= UART_ADC_SECTOR_SCAN_MIN_PHASES) {
+        return '?';
+    }
+    return names[phase];
+}
+
+static void UART_CommandAdcSectorBucketAdd(UART_AdcSectorBucket_t *bucket,
+                                           const ADC_Sampling_t *adc)
+{
+    if (bucket->count == 0U) {
+        UART_AdcNoiseAccumInit(&bucket->accA, adc->rawCurrentA);
+        UART_AdcNoiseAccumInit(&bucket->accB, adc->rawCurrentB);
+        UART_AdcNoiseAccumInit(&bucket->accC, adc->rawCurrentC);
+        bucket->sumCcrA = 0U;
+        bucket->sumCcrB = 0U;
+        bucket->sumCcrC = 0U;
+        bucket->winA = 0U;
+        bucket->winB = 0U;
+        bucket->winC = 0U;
+    }
+
+    UART_AdcNoiseAccumAdd(&bucket->accA, adc->rawCurrentA);
+    UART_AdcNoiseAccumAdd(&bucket->accB, adc->rawCurrentB);
+    UART_AdcNoiseAccumAdd(&bucket->accC, adc->rawCurrentC);
+    bucket->sumCcrA += adc->pwmCompareA;
+    bucket->sumCcrB += adc->pwmCompareB;
+    bucket->sumCcrC += adc->pwmCompareC;
+    bucket->winA |= adc->lowSideValidA;
+    bucket->winB |= adc->lowSideValidB;
+    bucket->winC |= adc->lowSideValidC;
+    bucket->count++;
+}
+
+static void UART_CommandHandleAdcSectorScan(uint16_t requestedSamples)
+{
+    UART_AdcSectorBucket_t buckets[UART_ADC_SECTOR_SCAN_SECTORS][UART_ADC_SECTOR_SCAN_MIN_PHASES];
+    char response[256];
+    ADC_Sampling_t *adc;
+    uint16_t samples;
+    uint16_t captured = 0U;
+    uint32_t lastFrame;
+    uint32_t startTick;
+    uint32_t timeoutMs;
+    uint8_t sector;
+    uint8_t minPhase;
+
+    if (!UART_CommandCanRunAdcPhaseScan()) {
+        (void)snprintf(response, sizeof(response),
+                       "ADC_SECTOR_SCAN,BUSY,state=%u,pwm=%u\r\n",
+                       (unsigned)g_foc_app.state,
+                       (unsigned)g_foc_app.enable_pwm);
+        UART_CommandSendText(response);
+        return;
+    }
+
+    memset((void*)buckets, 0, sizeof(buckets));
+    samples = UART_CommandClampAdcNoiseSamples(requestedSamples);
+    adc = ADC_Sampling_GetData();
+    lastFrame = adc->frameSequence;
+    startTick = HAL_GetTick();
+    timeoutMs = 500U + (uint32_t)samples;
+
+    (void)snprintf(response, sizeof(response),
+                   "ADC_SECTOR_SCAN,START,n=%u\r\n",
+                   (unsigned)samples);
+    UART_CommandSendText(response);
+
+    while (captured < samples) {
+        if ((HAL_GetTick() - startTick) > timeoutMs) {
+            break;
+        }
+
+        if (adc->frameSequence == lastFrame) {
+            continue;
+        }
+        lastFrame = adc->frameSequence;
+
+        sector = g_foc_app.foc.svpwm.sector;
+        if ((sector < 1U) || (sector > UART_ADC_SECTOR_SCAN_SECTORS)) {
+            continue;
+        }
+
+        minPhase = UART_CommandAdcSectorMinPhase(adc->pwmCompareA, adc->pwmCompareB, adc->pwmCompareC);
+        UART_CommandAdcSectorBucketAdd(&buckets[sector - 1U][minPhase], adc);
+        captured++;
+    }
+
+    for (sector = 1U; sector <= UART_ADC_SECTOR_SCAN_SECTORS; sector++) {
+        for (minPhase = 0U; minPhase < UART_ADC_SECTOR_SCAN_MIN_PHASES; minPhase++) {
+            UART_AdcSectorBucket_t *bucket = &buckets[sector - 1U][minPhase];
+            ADC_Sampling_NoiseChannelStats_t statsA;
+            ADC_Sampling_NoiseChannelStats_t statsB;
+            ADC_Sampling_NoiseChannelStats_t statsC;
+
+            if (bucket->count == 0U) {
+                continue;
+            }
+
+            UART_AdcNoiseAccumFinish(&bucket->accA, bucket->count, &statsA);
+            UART_AdcNoiseAccumFinish(&bucket->accB, bucket->count, &statsB);
+            UART_AdcNoiseAccumFinish(&bucket->accC, bucket->count, &statsC);
+            (void)snprintf(response, sizeof(response),
+                           "ADC_SECTOR_SCAN,BUCKET,sector=%u,min=%c,count=%u,A:min=%u,max=%u,mean=%u,B:min=%u,max=%u,mean=%u,C:min=%u,max=%u,mean=%u,CCR:%u/%u/%u,win:%u/%u/%u\r\n",
+                           (unsigned)sector,
+                           UART_CommandAdcSectorPhaseName(minPhase),
+                           (unsigned)bucket->count,
+                           (unsigned)statsA.min,
+                           (unsigned)statsA.max,
+                           (unsigned)statsA.mean,
+                           (unsigned)statsB.min,
+                           (unsigned)statsB.max,
+                           (unsigned)statsB.mean,
+                           (unsigned)statsC.min,
+                           (unsigned)statsC.max,
+                           (unsigned)statsC.mean,
+                           (unsigned)((bucket->sumCcrA + ((uint32_t)bucket->count / 2U)) / (uint32_t)bucket->count),
+                           (unsigned)((bucket->sumCcrB + ((uint32_t)bucket->count / 2U)) / (uint32_t)bucket->count),
+                           (unsigned)((bucket->sumCcrC + ((uint32_t)bucket->count / 2U)) / (uint32_t)bucket->count),
+                           (unsigned)bucket->winA,
+                           (unsigned)bucket->winB,
+                           (unsigned)bucket->winC);
+            UART_CommandSendText(response);
+        }
+    }
+
+    (void)snprintf(response, sizeof(response),
+                   "ADC_SECTOR_SCAN,DONE,captured=%u\r\n",
+                   (unsigned)captured);
+    UART_CommandSendText(response);
+}
+
+static uint16_t UART_CommandCapturePhaseScanPoint(uint16_t trigger,
+                                                  uint16_t requestedSamples,
+                                                  UART_AdcNoiseAccum_t *accA,
+                                                  UART_AdcNoiseAccum_t *accB,
+                                                  UART_AdcNoiseAccum_t *accC,
+                                                  uint8_t *winA,
+                                                  uint8_t *winB,
+                                                  uint8_t *winC)
+{
+    ADC_Sampling_t *adc;
+    uint16_t count = 0U;
+    uint32_t lastFrame;
+    uint32_t startTick;
+    uint32_t timeoutMs;
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, trigger);
+    adc = ADC_Sampling_GetData();
+    lastFrame = adc->frameSequence;
+    startTick = HAL_GetTick();
+    timeoutMs = 250U + (uint32_t)requestedSamples;
+
+    while (count < requestedSamples) {
+        if ((HAL_GetTick() - startTick) > timeoutMs) {
+            break;
+        }
+
+        if (adc->frameSequence == lastFrame) {
+            continue;
+        }
+        lastFrame = adc->frameSequence;
+
+        if (count == 0U) {
+            UART_AdcNoiseAccumInit(accA, adc->rawCurrentA);
+            UART_AdcNoiseAccumInit(accB, adc->rawCurrentB);
+            UART_AdcNoiseAccumInit(accC, adc->rawCurrentC);
+        }
+
+        UART_AdcNoiseAccumAdd(accA, adc->rawCurrentA);
+        UART_AdcNoiseAccumAdd(accB, adc->rawCurrentB);
+        UART_AdcNoiseAccumAdd(accC, adc->rawCurrentC);
+        *winA = adc->lowSideValidA;
+        *winB = adc->lowSideValidB;
+        *winC = adc->lowSideValidC;
+        count++;
+    }
+
+    return count;
+}
+
+static void UART_CommandHandleAdcPhaseScan(uint16_t requestedSamples)
+{
+    char response[256];
+    uint16_t samples;
+    uint16_t originalTrigger;
+    uint16_t trigger;
+
+    if (!UART_CommandCanRunAdcPhaseScan()) {
+        (void)snprintf(response, sizeof(response),
+                       "ADC_PHASE_SCAN,BUSY,state=%u,pwm=%u\r\n",
+                       (unsigned)g_foc_app.state,
+                       (unsigned)g_foc_app.enable_pwm);
+        UART_CommandSendText(response);
+        return;
+    }
+
+    samples = UART_CommandClampAdcNoiseSamples(requestedSamples);
+    originalTrigger = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_4);
+    (void)snprintf(response, sizeof(response),
+                   "ADC_PHASE_SCAN,START,n=%u,start=%u,end=%u,step=%u\r\n",
+                   (unsigned)samples,
+                   (unsigned)UART_ADC_PHASE_SCAN_MIN_TRIGGER,
+                   (unsigned)UART_ADC_PHASE_SCAN_MAX_TRIGGER,
+                   (unsigned)UART_ADC_PHASE_SCAN_TRIGGER_STEP);
+    UART_CommandSendText(response);
+
+    for (trigger = UART_ADC_PHASE_SCAN_MIN_TRIGGER;
+         trigger <= UART_ADC_PHASE_SCAN_MAX_TRIGGER;
+         trigger = (uint16_t)(trigger + UART_ADC_PHASE_SCAN_TRIGGER_STEP)) {
+        UART_AdcNoiseAccum_t accA;
+        UART_AdcNoiseAccum_t accB;
+        UART_AdcNoiseAccum_t accC;
+        ADC_Sampling_NoiseChannelStats_t statsA;
+        ADC_Sampling_NoiseChannelStats_t statsB;
+        ADC_Sampling_NoiseChannelStats_t statsC;
+        uint8_t winA = 0U;
+        uint8_t winB = 0U;
+        uint8_t winC = 0U;
+        uint16_t captured;
+
+        captured = UART_CommandCapturePhaseScanPoint(trigger, samples, &accA, &accB, &accC, &winA, &winB, &winC);
+        if (captured == 0U) {
+            (void)snprintf(response, sizeof(response),
+                           "ADC_PHASE_SCAN,POINT,trig=%u,n=0,timeout=1\r\n",
+                           (unsigned)trigger);
+            UART_CommandSendText(response);
+            continue;
+        }
+
+        UART_AdcNoiseAccumFinish(&accA, captured, &statsA);
+        UART_AdcNoiseAccumFinish(&accB, captured, &statsB);
+        UART_AdcNoiseAccumFinish(&accC, captured, &statsC);
+        (void)snprintf(response, sizeof(response),
+                       "ADC_PHASE_SCAN,POINT,trig=%u,n=%u,A:min=%u,max=%u,mean=%u,B:min=%u,max=%u,mean=%u,C:min=%u,max=%u,mean=%u,win=%u/%u/%u\r\n",
+                       (unsigned)trigger,
+                       (unsigned)captured,
+                       (unsigned)statsA.min,
+                       (unsigned)statsA.max,
+                       (unsigned)statsA.mean,
+                       (unsigned)statsB.min,
+                       (unsigned)statsB.max,
+                       (unsigned)statsB.mean,
+                       (unsigned)statsC.min,
+                       (unsigned)statsC.max,
+                       (unsigned)statsC.mean,
+                       (unsigned)winA,
+                       (unsigned)winB,
+                       (unsigned)winC);
+        UART_CommandSendText(response);
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, originalTrigger);
+    (void)snprintf(response, sizeof(response),
+                   "ADC_PHASE_SCAN,DONE,restore=%u\r\n",
+                   (unsigned)originalTrigger);
+    UART_CommandSendText(response);
 }
 
 static void UART_CommandExecute(const char *cmd)
@@ -121,13 +825,89 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    if (strcmp(cmd, "CMD:FAULT_DETAIL") == 0) {
+        DrvUart_UploadImmediate();
+        return;
+    }
+
     if (sscanf(cmd, "CMD:UNLOCK,%ld", &int_arg) == 1) {
         if (int_arg != 0) {
             g_foc_app.power_unlocked = 1U;
         } else {
             g_foc_app.power_unlocked = 0U;
+            g_foc_app.stall_mode_armed = 0U;
             FOC_App_StopIdentify(&g_foc_app);
             FOC_App_Disable(&g_foc_app);
+        }
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:ADC_NOISE,%ld", &int_arg) == 1) {
+        if (int_arg < 0) {
+            int_arg = 0;
+        }
+        UART_CommandHandleAdcNoise((uint16_t)int_arg);
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:ADC_PHASE_SCAN,%ld", &int_arg) == 1) {
+        if (int_arg < 0) {
+            int_arg = 0;
+        }
+        UART_CommandHandleAdcPhaseScan((uint16_t)int_arg);
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:ADC_SECTOR_SCAN,%ld", &int_arg) == 1) {
+        if (int_arg < 0) {
+            int_arg = 0;
+        }
+        UART_CommandHandleAdcSectorScan((uint16_t)int_arg);
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:TLE_GPIO_DIAG,%ld", &int_arg) == 1) {
+        if (int_arg != 0) {
+            if ((g_foc_app.enable_pwm != 0U) ||
+                (g_foc_app.state == FOC_STATE_RUNNING) ||
+                (g_foc_app.state == FOC_STATE_PARAM_IDENTIFY)) {
+                UART_CommandSendText("TLE_GPIO_DIAG,BUSY,pwm_active=1\r\n");
+                return;
+            }
+            TLE5012_GpioDiagStart();
+            UART_CommandSendText("TLE_GPIO_DIAG,START,step_ms=500,watch=tle5012_gpio_diag\r\n");
+        } else {
+            TLE5012_GpioDiagStop();
+            UART_CommandSendText("TLE_GPIO_DIAG,STOP\r\n");
+        }
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:TLE_RAW") == 0) {
+        char response[256];
+        uint32_t angle_cdeg = (uint32_t)((tle5012_sensor.angle * 100.0f) + 0.5f);
+        snprintf(response,
+                 sizeof(response),
+                 "TLE_RAW,raw=0x%04X,safety=0x%04X,status=0x%02X,recv_crc=0x%02X,calc_crc=0x%02X,data_ok=%u,crc_error=%u,valid=%u,angle=%lu.%02lu\r\n",
+                 tle5012_sensor.raw_word,
+                 tle5012_sensor.safety_word,
+                 tle5012_sensor.status,
+                 tle5012_sensor.received_crc,
+                 tle5012_sensor.calculated_crc,
+                 tle5012_sensor.data_ok,
+                 tle5012_sensor.crc_error,
+                 tle5012_sensor.data_valid,
+                 (unsigned long)(angle_cdeg / 100UL),
+                 (unsigned long)(angle_cdeg % 100UL));
+        UART_CommandSendText(response);
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:STALL_MODE,%ld", &int_arg) == 1) {
+        if (int_arg != 0) {
+            g_foc_app.stall_mode_armed = 1U;
+        } else {
+            g_foc_app.stall_mode_armed = 0U;
         }
         return;
     }
@@ -153,18 +933,71 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
-    if (sscanf(cmd, "CMD:IREF,%f,%f", &f1, &f2) == 2) {
+    if (UART_CommandParseFloat2(cmd, "CMD:IREF,", &f1, &f2)) {
         FOC_App_SetCurrentRef(&g_foc_app, f1, f2);
         return;
     }
 
-    if (sscanf(cmd, "CMD:SREF,%f", &f1) == 1) {
+    if (UART_CommandParseFloat1(cmd, "CMD:SREF,", &f1)) {
         FOC_App_SetSpeedRef(&g_foc_app, f1);
         return;
     }
 
-    if (sscanf(cmd, "CMD:PREF,%f", &f1) == 1) {
+    if (UART_CommandParseFloat1(cmd, "CMD:PREF,", &f1)) {
+        float pos_before = g_foc_app.pos_ref;
+        __disable_irq();
         FOC_App_SetPositionRef(&g_foc_app, f1);
+        FOC_App_PositionLoop(&g_foc_app);
+        g_foc_app.position_pref_cmd_count_diag++;
+        g_foc_app.position_pref_raw_diag = f1;
+        g_foc_app.position_pref_mapped_diag = g_foc_app.pos_ref;
+        g_foc_app.position_pref_before_diag = pos_before;
+        g_foc_app.position_pref_after_diag = g_foc_app.pos_ref;
+        g_foc_app.position_pref_user_set_diag = g_foc_app.position_ref_user_set;
+        __enable_irq();
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:HOME") == 0) {
+        char response[64];
+        if (g_foc_app.enable_pwm != 0U) {
+            snprintf(response, sizeof(response), "HOME,FAIL,motor_running\r\n");
+            UART_CommandSendText(response);
+            return;
+        }
+        float old_offset = g_foc_app.motor_param.mech_zero_offset;
+        MI_SetMechZero(&g_foc_app.motor_param, g_foc_app.theta_mech);
+        if (g_foc_app.position_ref_user_set) {
+            float dir = (g_foc_app.motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+            g_foc_app.pos_ref = FOC_AngleNormalize(
+                g_foc_app.pos_ref + (old_offset - g_foc_app.motor_param.mech_zero_offset) * dir);
+        }
+        FOC_App_SaveParam(&g_foc_app);
+        snprintf(response, sizeof(response),
+                 "HOME,OK,%d.%03d\r\n",
+                 (int)g_foc_app.motor_param.mech_zero_offset,
+                 (int)(fabsf(g_foc_app.motor_param.mech_zero_offset * 1000.0f)) % 1000);
+        UART_CommandSendText(response);
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:CLEAR_HOME") == 0) {
+        char response[64];
+        if (g_foc_app.enable_pwm != 0U) {
+            snprintf(response, sizeof(response), "CLEAR_HOME,FAIL,motor_running\r\n");
+            UART_CommandSendText(response);
+            return;
+        }
+        float old_offset = g_foc_app.motor_param.mech_zero_offset;
+        g_foc_app.motor_param.mech_zero_offset = 0.0f;
+        if (g_foc_app.position_ref_user_set) {
+            float dir = (g_foc_app.motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+            g_foc_app.pos_ref = FOC_AngleNormalize(
+                g_foc_app.pos_ref + old_offset * dir);
+        }
+        FOC_App_SaveParam(&g_foc_app);
+        snprintf(response, sizeof(response), "CLEAR_HOME,OK,0.000\r\n");
+        UART_CommandSendText(response);
         return;
     }
 
@@ -180,11 +1013,27 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
-    if (sscanf(cmd, "CMD:VBUS_LIMIT,%f,%f", &f1, &f2) == 2) {
+    if (UART_CommandParseFloat2(cmd, "CMD:VBUS_LIMIT,", &f1, &f2)) {
+        float oldUndervoltage = g_foc_app.protection.undervoltage_limit_v;
+        float oldOvervoltage = g_foc_app.protection.overvoltage_limit_v;
+
         if ((g_foc_app.enable_pwm == 0U) &&
             (g_foc_app.state != FOC_STATE_RUNNING) &&
             (g_foc_app.state != FOC_STATE_PARAM_IDENTIFY)) {
             FOC_App_SetVoltageThresholds(&g_foc_app, f1, f2);
+            if ((fabsf(g_foc_app.protection.undervoltage_limit_v - oldUndervoltage) > 0.0005f) ||
+                (fabsf(g_foc_app.protection.overvoltage_limit_v - oldOvervoltage) > 0.0005f)) {
+                UART_ReevaluateVoltageFaultAfterThresholdUpdate();
+            }
+        }
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:MOTOR_PN,%ld", &int_arg) == 1) {
+        if (int_arg >= 1L && int_arg <= 50L) {
+            __disable_irq();
+            FOC_App_SetPolePairs(&g_foc_app, (uint8_t)int_arg);
+            __enable_irq();
         }
         return;
     }
@@ -194,10 +1043,12 @@ static void UART_CommandExecute(const char *cmd)
         uint8_t drv_fault_active = 1U;
         uint8_t encoder_ok;
         uint8_t vbus_ok;
+        FOC_FaultCode_t voltageFault = FOC_FAULT_NONE;
 
         (void)DRV8350S_ClearFaults(&drv8350s);
 
         FOC_App_RefreshTelemetry(&g_foc_app);
+        g_foc_app.warning_flags = FOC_App_GetVoltageWarningFlags(&g_foc_app);
 
         if ((DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_FAULT_STATUS_1, &fs1) == 0) &&
             (DRV8350S_ReadRegister(&drv8350s, DRV8350S_REG_VGS_STATUS_2, &fs2) == 0) &&
@@ -216,43 +1067,42 @@ static void UART_CommandExecute(const char *cmd)
             drv_fault_active = drv8350s.runtime.isFaultActive;
         }
 
-        encoder_ok = TLE5012_IsDataValid();
-        vbus_ok = (g_foc_app.Vbus >= g_foc_app.protection.undervoltage_limit_v) &&
-                  (g_foc_app.Vbus <= g_foc_app.protection.overvoltage_limit_v);
+        encoder_ok = g_foc_app.motor_identified ? TLE5012_IsDataValid() : 1U;
+        vbus_ok = FOC_App_GetVoltageTripFault(&g_foc_app, &voltageFault) ? 0U : 1U;
 
         __disable_irq();
         if ((!drv_fault_active) && encoder_ok && vbus_ok) {
             g_foc_app.fault_code = FOC_FAULT_NONE;
+            g_foc_app.pending_disable = 0U;
             FOC_App_ResetMotionState(&g_foc_app);
             if (g_foc_app.state == FOC_STATE_FAULT) {
-                g_foc_app.state = FOC_STATE_READY;
+                g_foc_app.state = g_foc_app.motor_identified ? FOC_STATE_READY : FOC_STATE_IDLE;
             }
         } else {
             if (drv_fault_active) {
                 g_foc_app.fault_code = FOC_FAULT_DRV8350S;
             } else if (!encoder_ok) {
                 g_foc_app.fault_code = FOC_FAULT_ENCODER;
-            } else if (g_foc_app.Vbus > g_foc_app.protection.overvoltage_limit_v) {
-                g_foc_app.fault_code = FOC_FAULT_OVERVOLTAGE;
-            } else if (g_foc_app.Vbus < g_foc_app.protection.undervoltage_limit_v) {
-                g_foc_app.fault_code = FOC_FAULT_UNDERVOLTAGE;
+            } else if (FOC_App_GetVoltageTripFault(&g_foc_app, &voltageFault)) {
+                g_foc_app.fault_code = voltageFault;
             }
         }
         __enable_irq();
         return;
     }
 
-    if (sscanf(cmd, "CMD:PI_CURRENT,%f,%f", &f1, &f2) == 2) {
+    if (UART_CommandParseFloat2(cmd, "CMD:PI_CURRENT,", &f1, &f2)) {
         if (f1 > 0.0f && f2 >= 0.0f) {
+            float current_ki_discrete = f2 / (float)FOC_CONTROL_FREQ;
             __disable_irq();
-            FOC_PI_Init(&g_foc_app.foc.pi_d, f1, f2, g_foc_app.foc.pi_d.output_max, g_foc_app.foc.pi_d.output_min);
-            FOC_PI_Init(&g_foc_app.foc.pi_q, f1, f2, g_foc_app.foc.pi_q.output_max, g_foc_app.foc.pi_q.output_min);
+            FOC_PI_Init(&g_foc_app.foc.pi_d, f1, current_ki_discrete, g_foc_app.foc.pi_d.output_max, g_foc_app.foc.pi_d.output_min);
+            FOC_PI_Init(&g_foc_app.foc.pi_q, f1, current_ki_discrete, g_foc_app.foc.pi_q.output_max, g_foc_app.foc.pi_q.output_min);
             __enable_irq();
         }
         return;
     }
 
-    if (sscanf(cmd, "CMD:PI_SPEED,%f,%f", &f1, &f2) == 2) {
+    if (UART_CommandParseFloat2(cmd, "CMD:PI_SPEED,", &f1, &f2)) {
         if (f1 > 0.0f && f2 >= 0.0f) {
             __disable_irq();
             FOC_PI_Init(&g_foc_app.pi_speed, f1, f2, g_foc_app.pi_speed.output_max, g_foc_app.pi_speed.output_min);
@@ -261,7 +1111,7 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
-    if (sscanf(cmd, "CMD:PD_POS,%f,%f", &f1, &f2) == 2) {
+    if (UART_CommandParseFloat2(cmd, "CMD:PD_POS,", &f1, &f2)) {
         if (f1 > 0.0f && f2 >= 0.0f) {
             __disable_irq();
             FOC_App_SetPositionPDGains(&g_foc_app, f1, f2);
@@ -286,6 +1136,9 @@ void UART_Command_ProcessPending(void)
 
         UART_CommandExecute(cmd);
     }
+
+    UART_CommandServiceAdcNoise();
+    TLE5012_GpioDiagService();
 }
 /* USER CODE END 0 */
 
@@ -529,27 +1382,26 @@ void DMA1_Stream4_IRQHandler(void)
 void TIM1_UP_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_UP_IRQn 0 */
-
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);  /* DEBUG: scope on PB0 to measure actual ISR freq */
   /* USER CODE END TIM1_UP_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_IRQn 1 */
-    /* ===== 电流环 (20kHz) =====
-     * 【重要】电流环每周期都执行，是FOC的核心
-     * 包含：ADC采样、Clark/Park变换、PI控制、SVPWM生成
+    /* ===== FOC current loop =====
+     * PWM: 20kHz center-aligned (ARR=24, PSC=239).
+     * TIM1_UP rate: TBD by scope (may be 20kHz or 40kHz depending on update event mode).
+     * Effective FOC rate: ADC-frame-gated, ~20kHz (matches PWM/ADC trigger).
      */
     FOC_App_TIM1_IRQHandler(&g_foc_app);
     
-    /* ===== TLE5012编码器读取 (5kHz = 20kHz/4) ===== */
+    /* TLE5012 encoder read: target ~5kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
     static uint8_t tle5012_div_counter = 0;
-    if (++tle5012_div_counter >= 4) 
+    if (++tle5012_div_counter >= 4)
     {
         tle5012_div_counter = 0;
         TLE5012_StartRead();
     }
-    
-    /* ===== 速度环 (2kHz = 20kHz/10) =====
-     * 计算转速 + 速度PI控制
-     */
+
+    /* Speed loop: target ~2kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
     static uint8_t speed_loop_div_counter = 0;
     if (++speed_loop_div_counter >= 10) 
     {
@@ -557,9 +1409,7 @@ void TIM1_UP_IRQHandler(void)
         FOC_App_SpeedLoop(&g_foc_app);
     }
     
-    /* ===== 位置环 (200Hz = 20kHz/100) =====
-     * 位置环输出速度给定，速度环使用
-     */
+    /* Position loop: target ~200Hz. Actual rate depends on TIM1_UP freq (TBD by scope). */
     static uint8_t position_loop_div_counter = 0;
     if (++position_loop_div_counter >= 100) 
     {
@@ -567,7 +1417,7 @@ void TIM1_UP_IRQHandler(void)
         FOC_App_PositionLoop(&g_foc_app);
     }
     
-    /* ===== DRV8350S栅极驱动状态读取 (20kHz) ===== */
+    /* DRV8350S status poll. Rate = TIM1_UP freq (TBD by scope). */
     DRV8350S_TIM1_UpdateCallback(&drv8350s);
   /* USER CODE END TIM1_UP_IRQn 1 */
 }
@@ -678,15 +1528,15 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
         
         switch (reg) {
             case DRV8350S_REG_FAULT_STATUS_1:
-                /* Handle fault if active */
-                if (drv8350s.runtime.isFaultActive) {
-                    /* Fault handling */
-                }
                 break;
             case DRV8350S_REG_VGS_STATUS_2:
                 break;
             default:
                 break;
+        }
+
+        if (DRV8350S_ShouldHardShutdown(drv8350s.runtime.faultFlags)) {
+            FOC_App_RequestFaultShutdownFromISR(&g_foc_app, FOC_FAULT_DRV8350S);
         }
     } else if (hspi == &hspi3) {
         TLE5012_ProcessData(tle5012_rx_buf);

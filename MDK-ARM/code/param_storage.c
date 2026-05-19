@@ -88,7 +88,8 @@ ParamStatus_t Param_Load(MotorParam_t *param)
     }
     
     /* 检查版本 */
-    if (package->header.version != PARAM_VERSION) {
+    if ((package->header.version != PARAM_VERSION) &&
+        (package->header.version != PARAM_VERSION_PRE_ALIGN_D_AXIS)) {
         return PARAM_ERR_INVALID;
     }
     
@@ -100,6 +101,11 @@ ParamStatus_t Param_Load(MotorParam_t *param)
     
     /* 复制参数 */
     memcpy(param, &package->motor, sizeof(MotorParam_t));
+
+    if (package->header.version == PARAM_VERSION_PRE_ALIGN_D_AXIS) {
+        param->theta_offset = FOC_AngleNormalize(param->theta_offset + (0.5f * FOC_PI));
+        param->valid_flag = 0xFFFFFFFF;
+    }
     
     return PARAM_OK;
 }
@@ -157,20 +163,44 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
  */
 uint8_t Param_IsValid(const MotorParam_t *param)
 {
-    /* 检查有效性标志 */
-    if (param->valid_flag != 0xFFFFFFFF) {
-        return 0;
+    return (Param_GetInvalidFlags(param) == 0U) ? 1U : 0U;
+}
+
+uint32_t Param_GetInvalidFlags(const MotorParam_t *param)
+{
+    uint32_t flags = 0U;
+
+    if (param == NULL) {
+        return 0xFFFFFFFFUL;
     }
-    
-    /* 检查参数范围 */
-    if (param->Rs <= 0 || param->Rs > 10.0f) return 0;      /* 电阻 0~10Ω */
-    if (param->Ld <= 0 || param->Ld > 0.01f) return 0;      /* 电感 0~10mH */
-    if (param->Lq <= 0 || param->Lq > 0.01f) return 0;
-    if (param->Ke < 0 || param->Ke > 1.0f) return 0;        /* 反电动势常数 */
-    if (param->Pn == 0 || param->Pn > 50) return 0;         /* 极对数 */
-    if (param->J < 0 || param->J > 1.0f) return 0;          /* 转动惯量 */
-    
-    return 1;
+
+    if (param->valid_flag != 0xFFFFFFFF) {
+        flags |= PARAM_INVALID_VALID_FLAG;
+    }
+
+    if (param->Rs <= 0 || param->Rs > PARAM_RS_MAX_OHM) {
+        flags |= PARAM_INVALID_RS;
+    }
+    if (param->Ld <= 0 || param->Ld > 0.01f) {
+        flags |= PARAM_INVALID_LD;
+    }
+    if (param->Lq <= 0 || param->Lq > 0.01f) {
+        flags |= PARAM_INVALID_LQ;
+    }
+    if (param->Ke < 0 || param->Ke > 1.0f) {
+        flags |= PARAM_INVALID_KE;
+    }
+    if (param->Pn == 0 || param->Pn > 50) {
+        flags |= PARAM_INVALID_PN;
+    }
+    if ((param->encoder_dir != 1) && (param->encoder_dir != -1)) {
+        flags |= PARAM_INVALID_ENCODER_DIR;
+    }
+    if (param->J < 0 || param->J > 1.0f) {
+        flags |= PARAM_INVALID_J;
+    }
+
+    return flags;
 }
 
 /**
@@ -181,17 +211,18 @@ void Param_SetDefault(MotorParam_t *param)
 {
     memset(param, 0, sizeof(MotorParam_t));
     
-    /* 典型24V关节电机默认值 */
-    param->Rs = 0.5f;           /* 0.5Ω */
+    /* 24N22P 76KV 关节电机默认值 */
+    param->Rs = 8.8f;           /* 8.8Ω (76KV电机实测) */
     param->Ld = 0.0005f;        /* 0.5mH */
     param->Lq = 0.0005f;        /* 0.5mH */
-    param->Ke = 0.05f;          /* 0.05 V/(rad/s) */
-    param->Pn = 7;              /* 7对极 */
+    param->Ke = 0.129f;         /* 0.129 V/(rad/s) = 60/(2pi*74KV) */
+    param->Pn = 11;             /* 11对极（24N22P） */
+    param->encoder_dir = 1;
     param->J = 0.0001f;         /* 0.0001 kg·m² */
     param->B = 0.001f;          /* 0.001 N·m·s/rad */
     param->theta_offset = 0.0f;
     param->theta_mech_zero = 0.0f;
-    param->valid_flag = 0;
+    param->valid_flag = 0xFFFFFFFF;
 }
 
 /**

@@ -23,10 +23,24 @@ extern "C" {
 
 /* 参数魔数（用于验证数据有效性） */
 #define PARAM_MAGIC_NUMBER      0x4D4F544F  /* "MOTO" */
-#define PARAM_VERSION           0x00010002  /* 版本 1.2 */
+#define PARAM_VERSION_PRE_ALIGN_D_AXIS   0x00010003
+#define PARAM_VERSION           0x00010004  /* 版本 1.4：编码器对齐零点改为d轴电零位 */
 
 /* 最大重试次数 */
 #define PARAM_MAX_RETRY         3
+
+/* 电机参数有效范围：24N22P云台/关节类电机实测Rs可能超过10Ω */
+#define PARAM_RS_MAX_OHM       30.0f
+
+/* 参数有效性位图：用于故障详情定位 Param_IsValid 拒绝的具体字段 */
+#define PARAM_INVALID_VALID_FLAG  (1UL << 0)
+#define PARAM_INVALID_RS          (1UL << 1)
+#define PARAM_INVALID_LD          (1UL << 2)
+#define PARAM_INVALID_LQ          (1UL << 3)
+#define PARAM_INVALID_KE          (1UL << 4)
+#define PARAM_INVALID_PN          (1UL << 5)
+#define PARAM_INVALID_ENCODER_DIR (1UL << 6)
+#define PARAM_INVALID_J           (1UL << 7)
 
 /*==================== 数据结构 ====================*/
 
@@ -68,6 +82,7 @@ ParamStatus_t Param_Save(const MotorParam_t *param);
 
 /* 参数验证 */
 uint8_t Param_IsValid(const MotorParam_t *param);
+uint32_t Param_GetInvalidFlags(const MotorParam_t *param);
 void Param_SetDefault(MotorParam_t *param);
 
 /* 工具函数 */

@@ -88,6 +88,9 @@ typedef struct {
     
     /* 母线电压 */
     float Vbus;
+
+    /* Current-loop feedforward */
+    float current_resistance_ohm;
     
     /* 状态 */
     uint8_t enabled;
@@ -111,9 +114,11 @@ float FOC_PI_Update(FOC_PI_Controller_t *pi, float error);
 /* FOC主控制 */
 void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q);
 void FOC_SetCurrentReference(FOC_Handle_t *foc, float Id_ref, float Iq_ref);
+void FOC_SetCurrentResistance(FOC_Handle_t *foc, float resistance_ohm);
 void FOC_SetAngle(FOC_Handle_t *foc, float theta_elec);
 void FOC_SetVbus(FOC_Handle_t *foc, float Vbus);
 void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic);
+void FOC_RegenerateVoltageVector(FOC_Handle_t *foc);
 void FOC_Run(FOC_Handle_t *foc);
 void FOC_GetPWM(FOC_Handle_t *foc, uint16_t *pwm_a, uint16_t *pwm_b, uint16_t *pwm_c, uint16_t pwm_period);
 void FOC_GetModulationWave(const FOC_Handle_t *foc, float *ma, float *mb, float *mc);

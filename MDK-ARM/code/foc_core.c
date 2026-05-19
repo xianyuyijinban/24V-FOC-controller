@@ -10,6 +10,17 @@
 /* 电流环电压矢量饱和后的反算抗积分饱和增益 */
 #define FOC_CURRENT_AW_GAIN    0.2f
 #define FOC_EPSILON            1e-6f
+#define FOC_ZERO_CURRENT_REF_EPS      0.002f
+#define FOC_ZERO_CURRENT_FEEDBACK_EPS 0.020f
+
+static float FOC_PI_IntegralLimit(float output_max, float Ki)
+{
+    if (fabsf(Ki) > FOC_EPSILON) {
+        return (fabsf(output_max) * 0.9f) / fabsf(Ki);
+    }
+
+    return 0.0f;
+}
 
 /**
  * @brief Clark变换 (三相静止坐标系 → 两相静止坐标系)
@@ -17,17 +28,17 @@
  * @param alphabeta 输出：两相静止坐标系 (alpha, beta)
  * @note 使用等幅值变换
  * 
- * 等幅值Clark变换公式：
- *   alpha = a
- *   beta  = (a + 2*b) / √3
- * 
- * 推导：利用三相平衡条件 a + b + c = 0
- *   beta = (b - c) / √3 = (b - (-a-b)) / √3 = (a + 2b) / √3
+ * 等幅值Clark变换公式（三电流形式）：
+ *   alpha = (2a - b - c) / 3
+ *   beta  = (b - c) / √3
+ *
+ * 与两电流公式在三相平衡时等价，但不会在低边采样窗口异常或
+ * C相电流显著而A/B较小时把真实电流丢掉。
  */
 void FOC_Clarke_Transform(const FOC_ABC_t *abc, FOC_AlphaBeta_t *alphabeta)
 {
-    alphabeta->alpha = abc->a;
-    alphabeta->beta = (abc->a + 2.0f * abc->b) / FOC_SQRT3;
+    alphabeta->alpha = (2.0f * abc->a - abc->b - abc->c) / 3.0f;
+    alphabeta->beta = (abc->b - abc->c) / FOC_SQRT3;
 }
 
 /**
@@ -179,7 +190,7 @@ void FOC_PI_Init(FOC_PI_Controller_t *pi, float Kp, float Ki, float output_max, 
     pi->integral = 0.0f;
     pi->output_max = output_max;
     pi->output_min = output_min;
-    pi->integral_max = output_max * 0.9f;  /* 积分限幅略小于输出限幅 */
+    pi->integral_max = FOC_PI_IntegralLimit(output_max, Ki);
 
     /* 各环独立积分分离阈值：按输出限幅和Kp换算到误差域 */
     output_span = fabsf(output_max - output_min);
@@ -246,6 +257,7 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     
     /* 默认母线电压 */
     foc->Vbus = 24.0f;
+    foc->current_resistance_ohm = 0.0f;
     
     foc->enabled = 1;
 }
@@ -260,6 +272,14 @@ void FOC_SetCurrentReference(FOC_Handle_t *foc, float Id_ref, float Iq_ref)
 {
     foc->Id_ref = Id_ref;
     foc->Iq_ref = Iq_ref;
+}
+
+void FOC_SetCurrentResistance(FOC_Handle_t *foc, float resistance_ohm)
+{
+    if (resistance_ohm < 0.0f) {
+        resistance_ohm = 0.0f;
+    }
+    foc->current_resistance_ohm = resistance_ohm;
 }
 
 /**
@@ -289,8 +309,8 @@ void FOC_SetVbus(FOC_Handle_t *foc, float Vbus)
     foc->pi_d.output_min = -Vmax;
     foc->pi_q.output_max = Vmax;
     foc->pi_q.output_min = -Vmax;
-    foc->pi_d.integral_max = Vmax * 0.9f;
-    foc->pi_q.integral_max = Vmax * 0.9f;
+    foc->pi_d.integral_max = FOC_PI_IntegralLimit(Vmax, foc->pi_d.Ki);
+    foc->pi_q.integral_max = FOC_PI_IntegralLimit(Vmax, foc->pi_q.Ki);
 }
 
 /**
@@ -305,6 +325,16 @@ void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic)
     foc->Iabc.a = Ia;
     foc->Iabc.b = Ib;
     foc->Iabc.c = Ic;
+}
+
+void FOC_RegenerateVoltageVector(FOC_Handle_t *foc)
+{
+    if (!foc->enabled) {
+        return;
+    }
+
+    FOC_Inverse_Park_Transform(&foc->Vdq, foc->sin_theta, foc->cos_theta, &foc->ValphaBeta);
+    FOC_SVPWM_Generate(&foc->ValphaBeta, foc->Vbus, &foc->svpwm);
 }
 
 /**
@@ -336,8 +366,21 @@ void FOC_Run(FOC_Handle_t *foc)
     /* Step 3: PI控制器计算DQ轴电压 */
     error_d = foc->Id_ref - foc->Idq.d;
     error_q = foc->Iq_ref - foc->Idq.q;
-    vd_cmd = FOC_PI_Update(&foc->pi_d, error_d);
-    vq_cmd = FOC_PI_Update(&foc->pi_q, error_q);
+    if ((fabsf(foc->Id_ref) <= FOC_ZERO_CURRENT_REF_EPS) &&
+        (fabsf(foc->Iq_ref) <= FOC_ZERO_CURRENT_REF_EPS) &&
+        (fabsf(foc->Idq.d) <= FOC_ZERO_CURRENT_FEEDBACK_EPS) &&
+        (fabsf(foc->Idq.q) <= FOC_ZERO_CURRENT_FEEDBACK_EPS)) {
+        foc->pi_d.integral = 0.0f;
+        foc->pi_q.integral = 0.0f;
+        foc->Vdq.d = 0.0f;
+        foc->Vdq.q = 0.0f;
+        foc->ValphaBeta.alpha = 0.0f;
+        foc->ValphaBeta.beta = 0.0f;
+        FOC_SVPWM_Generate(&foc->ValphaBeta, foc->Vbus, &foc->svpwm);
+        return;
+    }
+    vd_cmd = (foc->current_resistance_ohm * foc->Id_ref) + FOC_PI_Update(&foc->pi_d, error_d);
+    vq_cmd = (foc->current_resistance_ohm * foc->Iq_ref) + FOC_PI_Update(&foc->pi_q, error_q);
 
     /* Step 3.5: 电压矢量限幅（Vd/Vq联合限幅）+ 反算抗积分饱和 */
     vd_sat = vd_cmd;

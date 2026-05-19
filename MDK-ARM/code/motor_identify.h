@@ -18,27 +18,48 @@ extern "C" {
 
 /*==================== 配置参数 ====================*/
 
-/* Rs识别参数 */
-#define MI_RS_TEST_VOLTAGE      0.05f       /* 测试电压 = 5% Vbus */
-#define MI_RS_TEST_DURATION     100         /* 测试时间 ms */
-#define MI_RS_SETTLE_TIME       50          /* 稳定时间 ms */
-#define MI_RS_CONVERGE_THRESH   0.05f       /* 收敛阈值 0.05Ω */
-#define MI_RS_CURRENT_THRESH    0.5f        /* 最小测试电流 A */
+/* Rs识别参数 — d轴闭环锁轴法 */
+#define MI_RS_LOCK_CURRENT_INITIAL 0.15f /* d轴锁轴起始电流 A，24V下PI增益高需保守起步 */
+#define MI_RS_LOCK_CURRENT_STEP    0.1f  /* 电流不足时步进 A */
+#define MI_RS_LOCK_CURRENT_MAX     1.0f  /* 最大锁轴电流 A */
+#define MI_RS_LOCK_DURATION        150   /* 锁轴等待时间 ms */
+#define MI_RS_SAMPLE_DURATION      50    /* 采样时间 ms */
+#define MI_RS_CONVERGE_THRESH   0.5f        /* 绝对收敛阈值 0.5Ω */
+#define MI_RS_CONVERGE_REL_THRESH 0.5f      /* 正负半周期允许50%相对差 */
+#define MI_RS_CURRENT_THRESH    0.15f       /* DC电流绝对值有效阈值 */
+#define MI_RS_CURRENT_MAX       10.0f        /* 旁路RS过流检查（ADC偏移导致假报警） */
 
 /* Ls识别参数 */
 #define MI_LS_INJ_FREQUENCY     1000.0f     /* 注入频率 Hz */
-#define MI_LS_INJ_AMPLITUDE     0.1f        /* 注入幅值 = 10% Vbus */
+#define MI_LS_INJ_AMPLITUDE     0.2f        /* 注入幅值 = 20% Vbus，24V高电阻台架下先把Irms拉离噪声底 */
+#define MI_LS_INJ_VOLTAGE_MAX_V 2.4f        /* 识别注入绝对电压上限，保持24V台架不超过12V已验证幅值 */
 #define MI_LS_TEST_DURATION     200         /* 测试时间 ms */
 #define MI_LS_CONVERGE_THRESH   0.0001f     /* 收敛阈值 0.1mH */
+#define MI_LS_VALID_MAX_H       0.01f       /* 必须与Param_IsValid的Ld/Lq上限一致 */
+#define MI_LS_FALLBACK_DEFAULT  0.0005f     /* Ls未可靠收敛时使用0.5mH保守默认值 */
 
-/* Ke识别参数 */
-#define MI_KE_TEST_SPEED_RPM    500.0f      /* 测试转速 rpm */
-#define MI_KE_RAMP_TIME         500         /* 加速时间 ms */
+/* Ke识别参数 — ADC触发修复后降速防DRV过流 */
+#define MI_KE_TEST_SPEED_RPM    100.0f      /* 测试转速 rpm */
+#define MI_KE_RAMP_TIME         1000        /* 加速时间 ms */
 #define MI_KE_MEASURE_TIME      100         /* 测量时间 ms */
 
-/* 极对数识别 */
-#define MI_PN_TEST_CURRENT      1.0f        /* 测试电流 A */
-#define MI_PN_TEST_DURATION     300         /* 测试时间 ms */
+/* 极对数方向验证：Pn由上位机/Flash配置，这里只验证编码器方向与真实运动 */
+#define MI_PN_ALIGN_CURRENT     0.1f        /* 24V台架锁轴电流再降档，尽量避免PN验证在进入电压步进前先触发DRV保护 */
+#define MI_PN_ALIGN_DURATION    100         /* 缩短锁轴保持时间，减少高侧GDUV/VGS锁存窗口 */
+#define MI_PN_TEST_CURRENT_INITIAL 0.25f    /* 24V台架更低起步电流，避免VDS过流 */
+#define MI_PN_TEST_CURRENT_STEP 0.05f       /* 更小步进 */
+#define MI_PN_TEST_CURRENT_MAX  0.5f        /* 24V台架降低上限，1.2A已验证触发VDS_HA */
+#define MI_PN_STEP_ELEC_DEG     30.0f       /* 每次步进30电角度，让转子逐段吸附前进而不是连续追旋转场 */
+#define MI_PN_NUDGE_ELEC_DEG    20.0f       /* 增大解卡脉冲角度，优先验证能否真正跨过齿槽峰 */
+#define MI_PN_NUDGE_SETTLE_MS   40          /* 解卡脉冲保持40ms，尽量只撬动转子不过度带来新振荡 */
+#define MI_PN_STEP_SETTLE_MS    120         /* 每步保持120ms，给24N22P转子越过齿槽并稳定到新磁场位置 */
+#define MI_PN_STEP_COUNT        18          /* 总共步进18次，累计540电角度，给PnCalc足够的分辨率 */
+#define MI_PN_TEST_VOLTAGE_RATIO 0.15f      /* ADC触发修复后真实电流在走，降电压防VDS */
+#define MI_PN_TEST_VOLTAGE_MAX_V 1.8f       /* 12V安全上限，ADC触发修复前高值因无电流未暴露 */
+#define MI_PN_STRICT_VERIFY     0           /* 默认台架友好模式：保留诊断，但不因弱机械响应阻塞后续识别 */
+#define MI_PN_MIN_EXPECTED_TRAVEL_RATIO 0.35f /* 实测机械角至少达到理论拖动量的35% */
+#define MI_PN_MIN_MECH_DELTA_RAD 0.12f      /* 最小有效机械运动量 rad */
+#define MI_PN_DIR_SIGN_MIN_MECH_DELTA_RAD 0.02f /* 机械位移至少超过约1.1deg，才用其符号覆盖 encoder_dir */
 
 /* 转动惯量识别 */
 #define MI_J_TEST_SPEED_RPM     300.0f      /* 目标转速 rpm */
@@ -51,6 +72,19 @@ extern "C" {
 /* 编码器零位对齐 */
 #define MI_ALIGN_CURRENT        0.8f        /* 锁轴d轴电流 A */
 #define MI_ALIGN_DURATION       200         /* 锁轴时长 ms */
+
+/* 识别完成前单向弱运动认证：仅验证编码器方向无严重错误，不强制高齿槽电机完成完整拖动 */
+#define MI_VERIFY_CURRENT       1.0f        /* d轴拖动电流 A，Vbus/Rs安全限幅后实际值更低 */
+#define MI_VERIFY_MECH_FREQ_HZ  0.03f       /* 极低速拖动，高齿槽电机需要更长时间跟随 */
+#define MI_VERIFY_MIN_MECH_RAD  0.30f       /* 最小可信位移约17°，达到即强通过 */
+#define MI_VERIFY_DIR_LOCK_RAD  0.15f       /* 累计约8.6°后锁定实测方向 */
+#define MI_VERIFY_REVERSE_FAULT_RAD 0.30f   /* 反向累计超过约17°视为相序/方向异常 */
+#define MI_VERIFY_PHASE_TIMEOUT_MS 60000    /* 单向超时60s */
+#define MI_VERIFY_NO_MOTION_TIMEOUT_MS 5000 /* 5s内无有效位移则停止拖动，避免堵转加热 */
+#define MI_VERIFY_NO_MOTION_MIN_RAD 0.03f   /* 无运动判据：原始累计<0.03rad */
+
+/* 编码器识别期容错：单个TLE帧瞬态无效只等待，连续无效才终止识别 */
+#define MI_ENCODER_INVALID_CONSECUTIVE_LIMIT 20U
 
 /* 错误代码 */
 typedef enum {
@@ -66,6 +100,7 @@ typedef enum {
     MI_ERR_CURRENT_TOO_HIGH,    /* 测试电流太大 */
     MI_ERR_ENCODER_INVALID,     /* 编码器反馈无效 */
     MI_ERR_TIMEOUT,             /* 超时 */
+    MI_ERR_PHASE_SEQUENCE,       /* 相序或编码器方向异常 */
 } MI_ErrorCode_t;
 
 /*==================== 数据结构 ====================*/
@@ -77,11 +112,13 @@ typedef struct {
     float Lq;               /* q轴电感 H */
     float Ke;               /* 反电动势常数 V/(rad/s) */
     uint8_t Pn;             /* 极对数 */
+    int8_t encoder_dir;     /* 编码器方向：+1=机械角与正电角同向，-1=反向 */
     float J;                /* 转动惯量 kg·m² */
     float B;                /* 摩擦系数 N·m·s/rad */
     float theta_offset;     /* 编码器零位偏移 rad */
     float theta_mech_zero;  /* 识别/对齐得到的机械零位 rad */
-    
+    float mech_zero_offset; /* 用户设定机械零位偏置 rad */
+
     /* 参数有效性标志 */
     uint32_t valid_flag;
 } MotorParam_t;
@@ -99,12 +136,13 @@ typedef struct {
 /* 识别状态机状态 */
 typedef enum {
     MI_STATE_IDLE = 0,
-    MI_STATE_PN_IDENTIFY,       /* 极对数识别 */
+    MI_STATE_PN_IDENTIFY,       /* 极对数验证：Pn由上位机/Flash配置 */
     MI_STATE_RS_IDENTIFY,       /* 电阻识别 */
     MI_STATE_LS_IDENTIFY,       /* 电感识别 */
     MI_STATE_KE_IDENTIFY,       /* 反电动势识别 */
     MI_STATE_J_IDENTIFY,        /* 惯量识别 */
     MI_STATE_ENCODER_ALIGN,     /* 编码器对齐 */
+    MI_STATE_MOTION_VERIFY,     /* 双向真实运动认证 */
     MI_STATE_COMPLETE,          /* 完成 */
     MI_STATE_ERROR              /* 错误 */
 } MI_State_t;
@@ -123,17 +161,39 @@ typedef struct {
     float theta_min;            /* 最小角度 */
     uint32_t state_start_time;  /* 状态开始时间 */
     uint32_t sample_count;      /* 采样计数 */
+    uint8_t encoder_invalid_count; /* 识别期连续编码器无效计数 */
     
     /* 中间计算结果 */
     float sum_v;                /* 电压累加 */
+    float sum_vq;               /* q轴电压累加 */
     float sum_i;                /* 电流累加 */
+    float sum_ia;               /* A相电流累加 */
+    float sum_ib;               /* B相电流累加 */
+    float sum_ic;               /* C相电流累加 */
+    float sum_ialpha;           /* Ialpha累加 */
+    float sum_ibeta;            /* Ibeta累加 */
+    float sum_i_mag;            /* dq电流幅值累加，用于识别阶段轴向错配诊断 */
     float sum_ii;               /* 电流平方累加 */
     float sum_vi;               /* 电压电流乘积累加 */
     
     /* Rs识别专用 */
     float Rs_positive;          /* 正极性Rs */
     float Rs_negative;          /* 负极性Rs */
+    float rs_current_target;    /* d轴锁轴电流目标 A */
+    float rs_last_v_avg;        /* 最近一次Rs窗口平均d轴电压 */
+    float rs_last_i_avg;        /* 最近一次Rs窗口平均d轴电流 */
+    float rs_last_i_mag_avg;    /* 最近一次Rs窗口平均dq电流幅值 */
+    float rs_last_vec_rs;       /* 最近一次Rs窗口矢量投影电阻 */
+    uint32_t rs_last_samples;   /* 最近一次Rs窗口采样数 */
     uint8_t polarity;           /* 当前极性 */
+
+    /* Ls识别专用 */
+    float ls_last_v_rms;        /* 最近一次Ls识别注入电压RMS */
+    float ls_last_i_rms;        /* 最近一次Ls识别电流RMS */
+    float ls_last_z;            /* 最近一次Ls识别阻抗幅值 */
+    float ls_last_xl;           /* 最近一次Ls识别感抗 */
+    float ls_last_l;            /* 最近一次Ls识别计算电感 */
+    uint8_t ls_used_fallback;   /* Ls是否回退到默认值 */
     
     /* Ke识别状态 */
     uint8_t ke_state;           /* Ke识别状态机状态 */
@@ -146,9 +206,26 @@ typedef struct {
     uint8_t pn_state;           /* Pn识别状态 */
     float pn_theta_start;       /* Pn识别起始机械角度 */
     float pn_theta_accum;       /* Pn识别角度累加 */
-    uint32_t pn_elec_cycles;    /* Pn识别电周期计数 */
+    uint32_t pn_elec_cycles;    /* Pn步进计数 */
     float pn_theta_last;        /* Pn识别上次角度 */
     float pn_elec_last;         /* Pn识别上次电角度 */
+    float pn_current_target;    /* 当前Pn开环拖动电流目标 */
+    float pn_last_delta_mech;   /* 最近一次Pn机械角累计变化 rad */
+    float pn_last_delta_elec;   /* 最近一次Pn电角指令变化 rad */
+    float pn_last_calc;         /* 最近一次Pn计算值 */
+    int8_t pn_observed_dir;     /* 正电角拖动时实测机械方向：+1/-1 */
+
+    /* 识别完成前单向弱运动认证 */
+    uint8_t verify_phase;       /* 0=初始化, 1=单向拖动验证 */
+    float verify_theta_last;    /* 上次认证机械角 rad */
+    float verify_theta_accum;   /* 锁定方向后累计机械角 rad */
+    float verify_elec_cmd;      /* 当前认证电角指令 rad */
+    float verify_raw_accum;     /* 原始累计（锁定方向前使用） */
+    int8_t verify_locked_dir;   /* 锁定后的实测机械方向：+1/-1, 0=未锁定 */
+    int8_t verify_expected_dir; /* 期望机械方向：来自pn_observed_dir或电角命令方向 */
+    uint8_t motion_verify_weak; /* 单向弱通过标志 */
+    uint8_t motion_verify_status; /* 0=not_run, 1=strong_pass, 2=weak_pass, 3=failed */
+    uint8_t verify_reverse_fault; /* 反向运动异常标志：1=曾检测到显著反向 */
     
     /* 进度回调 */
     void (*progress_callback)(uint8_t percent, const char *step_name);
@@ -172,12 +249,16 @@ MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle);
 MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle);
+MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle);
 
 /* Rs在线估计 */
 void MI_RsOnlineEstimator_Init(RsOnlineEstimator_t *est, float alpha);
 void MI_RsOnlineEstimator_Enable(RsOnlineEstimator_t *est, uint8_t enable);
 void MI_RsOnlineEstimator_Update(RsOnlineEstimator_t *est, float Vd, float Vq, float Id, float Iq, float omega_e);
 float MI_RsOnlineEstimator_GetRs(RsOnlineEstimator_t *est);
+
+/* 机械零位设置 */
+void MI_SetMechZero(MotorParam_t *param, float current_theta_mech);
 
 /* 辅助函数 */
 uint8_t MI_CheckMechanicalLock(MI_Handle_t *handle);

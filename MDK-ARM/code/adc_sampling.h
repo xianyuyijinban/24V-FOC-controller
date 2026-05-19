@@ -21,7 +21,7 @@ extern "C" {
 
 /* ADC参数 */
 #define ADC_VREF            3.3f        /* ADC参考电压(V) */
-#define ADC_MAX             4095.0f     /* 12位ADC满量程(2^12 - 1) */
+#define ADC_MAX             4096.0f     /* 12位ADC码宽(2^12)，按满量程码宽换算 */
 #define ADC_HALF            2048.0f     /* VCC/2对应的ADC值 */
 
 /* 电流采样电路参数（运放差分放大）
@@ -30,12 +30,13 @@ extern "C" {
  *   - 运放增益：15倍 (Rf/Rin = 15kΩ/1kΩ)
  *   - 输出偏置：VCC/2 = 1.65V (双极性信号，可测正负电流)
  * 计算公式推导：
- *   Vout = 1.65V + (IC+ - IC-) × 15
- *   反推电流：I = (Vout - 1.65V) / 0.15 = (Vout - 1.65V) × 6.667 A/V
+ *   下管采样前端输出相对FOC相电流定义为反相，运行态Q轴验证要求 Vq 与 Iq 同向。
+ *   先按ADC码计算幅值，再通过 ADC_CURRENT_POLARITY 统一修正符号。
  */
 #define R_SHUNT             0.01f       /* 采样电阻 10mΩ */
 #define AMP_GAIN            15.0f       /* 运放差分增益 */
 #define K_CURRENT           (1.0f / (R_SHUNT * AMP_GAIN))  /* 6.667 A/V */
+#define ADC_CURRENT_POLARITY (-1.0f)    /* 下管采样前端相对FOC相电流定义为反相 */
 
 /* 母线电压采样电路参数（电阻分压）
  * 电路结构：
@@ -50,7 +51,7 @@ extern "C" {
 #define CURRENT_IMBALANCE_THRESH    0.5f    /* 三相电流和阈值(A) */
 
 /* 采样时序配置 */
-#define ADC_SAMPLING_TRIGGER_SOURCE_TEXT         "TIM1_TRGO2_OC4REF"
+#define ADC_SAMPLING_TRIGGER_SOURCE_TEXT         "TIM1_TRGO2_OC4REF_FALLING"
 #define ADC_SAMPLING_CURRENT_SAMPLE_TIME_CYCLES  32.5f
 #define ADC_SAMPLING_VBUS_SAMPLE_TIME_CYCLES     16.5f
 
@@ -61,6 +62,10 @@ extern "C" {
 #define ADC_CH_VBUS         3   /* PC4 - ADC1_INP4  - 母线电压 */
 
 #define ADC_CHANNEL_COUNT   4   /* ADC通道数量 */
+
+/* ADC噪声诊断采样限制：只输出统计值，不通过UART刷原始样本流 */
+#define ADC_NOISE_MIN_SAMPLES  16U
+#define ADC_NOISE_MAX_SAMPLES  4096U
 
 /*==================== 数据结构 ====================*/
 
@@ -101,11 +106,39 @@ typedef struct {
     volatile uint32_t frameAgeCycles;   /* 当前数据相对消费侧的年龄(控制周期) */
     volatile uint32_t sampleMissCount;  /* 控制周期未拿到新帧的次数 */
     volatile uint32_t invalidWindowCount; /* 帧在关闭窗口到达的次数 */
+
+    /* PWM/采样窗口诊断（在ADC DMA完成瞬间抓取） */
+    volatile uint16_t pwmPeriod;        /* TIM1 ARR */
+    volatile uint16_t pwmCompareA;      /* TIM1 CCR1 */
+    volatile uint16_t pwmCompareB;      /* TIM1 CCR2 */
+    volatile uint16_t pwmCompareC;      /* TIM1 CCR3 */
+    volatile uint16_t triggerCompare;   /* TIM1 CCR4 / ADC触发位置 */
+    volatile uint16_t timerCount;       /* ADC DMA完成时TIM1 CNT */
+    volatile uint8_t timerCountingDown; /* ADC DMA完成时TIM1计数方向 */
+    volatile uint8_t lowSideValidA;     /* A相在该触发位置是否满足低边采样窗口 */
+    volatile uint8_t lowSideValidB;     /* B相在该触发位置是否满足低边采样窗口 */
+    volatile uint8_t lowSideValidC;     /* C相在该触发位置是否满足低边采样窗口 */
     
     /* 【新增】校准状态 */
     ADC_CalibStatus_t calibStatus;      /* 校准状态 */
     uint16_t imbalanceCount;            /* 不平衡计数 */
 } ADC_Sampling_t;
+
+typedef struct {
+    uint16_t min;          /* 原始ADC最小值 */
+    uint16_t max;          /* 原始ADC最大值 */
+    uint16_t mean;         /* 原始ADC均值 */
+    uint16_t peakToPeak;   /* 原始ADC峰峰值 */
+    uint16_t stddev;       /* 原始ADC标准差 */
+} ADC_Sampling_NoiseChannelStats_t;
+
+typedef struct {
+    uint16_t samples;      /* 实际统计样本数 */
+    ADC_Sampling_NoiseChannelStats_t currentA;
+    ADC_Sampling_NoiseChannelStats_t currentB;
+    ADC_Sampling_NoiseChannelStats_t currentC;
+    ADC_Sampling_NoiseChannelStats_t vbus;
+} ADC_Sampling_NoiseStats_t;
 
 /*==================== 函数声明 ====================*/
 
@@ -177,6 +210,14 @@ ADC_CalibStatus_t ADC_Sampling_GetCalibStatus(void);
 uint8_t ADC_Sampling_CheckImbalance(float threshold);
 
 /**
+ * @brief 捕获ADC原始码噪声统计（仅用于未驱动状态下台架诊断）
+ * @param requestedSamples 请求样本数，函数内部限制到16~4096
+ * @param stats 统计结果
+ * @return 实际统计样本数，0表示超时或参数错误
+ */
+uint16_t ADC_Sampling_CaptureNoiseStats(uint16_t requestedSamples, ADC_Sampling_NoiseStats_t *stats);
+
+/**
  * @brief 计算电流（双极性，带VCC/2偏置）
  * @param raw ADC原始值 (0~4095)
  * @param offset 零点偏移校准值 (理论上≈2048)
@@ -185,7 +226,7 @@ uint8_t ADC_Sampling_CheckImbalance(float threshold);
 static inline float ADC_CalcCurrent(uint16_t raw, int16_t offset)
 {
     int16_t adc_centered = (int16_t)raw - offset;
-    return ((float)adc_centered) * ADC_VREF / ADC_MAX * K_CURRENT;
+    return ADC_CURRENT_POLARITY * ((float)adc_centered) * ADC_VREF / ADC_MAX * K_CURRENT;
 }
 
 /**

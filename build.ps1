@@ -90,6 +90,8 @@ $ASFLAGS = $MCU_FLAGS + $DEFINES + $INCLUDES + @(
 $LFLAGS = $MCU_FLAGS + @(
     "-specs=nano.specs",
     "-specs=nosys.specs",
+    "-u",
+    "_scanf_float",
     "-TSTM32H743VITX_FLASH.ld",
     "-Wl,-Map=$BUILD_DIR/$TARGET.map,--cref",
     "-Wl,--gc-sections",

@@ -22,6 +22,9 @@
 
 /* USER CODE BEGIN 0 */
 
+/* ADC trigger at CNT=45 (90% of ARR=49). All low-side MOSFETs ON here. */
+#define TIM1_ADC_TRIGGER_PULSE 45U
+
 /* USER CODE END 0 */
 
 TIM_HandleTypeDef htim1;
@@ -45,7 +48,7 @@ void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 240-1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
-  htim1.Init.Period = 50-1;
+  htim1.Init.Period = 50-1;  /* 10kHz center-aligned: 1MHz/(2*50)=10kHz, matched to FOC loop */
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -94,7 +97,7 @@ void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 8;
+  sConfigOC.Pulse = TIM1_ADC_TRIGGER_PULSE;
   if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();

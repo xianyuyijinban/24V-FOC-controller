@@ -22,6 +22,8 @@ class SerialWorker(QObject):
         self._serial = None
         self._parser = None
         self._service = None
+        self._packet_count = 0
+        self._unparsed_rx_notice_budget = 5
 
     @pyqtSlot()
     def start(self):
@@ -43,9 +45,9 @@ class SerialWorker(QObject):
         ports = [port.device for port in list_ports.comports()]
         self.ports_updated.emit(ports)
         if ports:
-            self.log_line.emit("INFO", f"Detected ports: {', '.join(ports)}")
+            self.log_line.emit("INFO", f"检测到串口：{', '.join(ports)}")
         else:
-            self.log_line.emit("INFO", "No serial ports detected.")
+            self.log_line.emit("INFO", "未检测到串口。")
 
     @pyqtSlot(str, int)
     def connect_port(self, port_name: str, baud_rate: int):
@@ -54,15 +56,21 @@ class SerialWorker(QObject):
             self._serial = serial.Serial(port=port_name, baudrate=baud_rate, timeout=0.05)
             self._parser = FOCDataParser()
             self._parser.set_packet_callback(self._handle_packet)
-            self._service = SerialService(serial_port=self._serial, parser=self._parser)
+            self._service = SerialService(
+                serial_port=self._serial,
+                parser=self._parser,
+                diagnostic_callback=self._handle_diagnostic_line,
+            )
+            self._packet_count = 0
+            self._unparsed_rx_notice_budget = 5
             self.connection_changed.emit(True)
-            self.log_line.emit("INFO", f"Connected to {port_name} @ {baud_rate}.")
+            self.log_line.emit("INFO", f"已连接到 {port_name} @ {baud_rate}。")
         except Exception as exc:
             self._serial = None
             self._parser = None
             self._service = None
             self.connection_changed.emit(False)
-            self.log_line.emit("ERROR", f"Failed to open {port_name}: {exc}")
+            self.log_line.emit("ERROR", f"打开 {port_name} 失败：{exc}")
 
     @pyqtSlot()
     def disconnect_port(self):
@@ -72,24 +80,25 @@ class SerialWorker(QObject):
                 if self._serial.is_open:
                     self._serial.close()
             except Exception as exc:
-                self.log_line.emit("ERROR", f"Failed to close port cleanly: {exc}")
+                self.log_line.emit("ERROR", f"关闭串口时出现异常：{exc}")
         self._serial = None
         self._parser = None
         self._service = None
+        self._packet_count = 0
         self.connection_changed.emit(False)
         if was_connected:
-            self.log_line.emit("INFO", "Serial port disconnected.")
+            self.log_line.emit("INFO", "串口已断开。")
 
     @pyqtSlot(str)
     def send_command(self, command: str):
         if self._service is None:
-            self.log_line.emit("ERROR", "Cannot send command while disconnected.")
+            self.log_line.emit("ERROR", "当前未连接，无法发送命令。")
             return
         try:
             self._service.send_command(command)
             self.log_line.emit("TX", command.strip())
         except Exception as exc:
-            self.log_line.emit("ERROR", f"Command send failed: {exc}")
+            self.log_line.emit("ERROR", f"命令发送失败：{exc}")
             self.disconnect_port()
 
     def _poll_serial(self):
@@ -101,14 +110,24 @@ class SerialWorker(QObject):
             if waiting:
                 payload = self._serial.read(waiting)
                 if payload:
-                    self._service.handle_bytes(payload)
+                    before_packets = self._packet_count
+                    read_result = self._service.handle_bytes(payload)
+                    if (
+                        self._packet_count == before_packets
+                        and read_result.diagnostic_lines == 0
+                        and self._unparsed_rx_notice_budget > 0
+                    ):
+                        preview = payload[:32].hex(" ")
+                        suffix = " ..." if len(payload) > 32 else ""
+                        self.log_line.emit("RX", f"收到 {len(payload)} 字节，但还没有解析成遥测包：{preview}{suffix}")
+                        self._unparsed_rx_notice_budget -= 1
         except Exception as exc:
-            self.log_line.emit("ERROR", f"Serial read failed: {exc}")
+            self.log_line.emit("ERROR", f"串口读取失败：{exc}")
             self.disconnect_port()
 
     def _handle_packet(self, packet):
+        self._packet_count += 1
         self.packet_received.emit(packet)
-        self.log_line.emit(
-            "RX",
-            f"{packet.timestamp} ms | state={packet.foc_state} | speed={packet.speed:.2f} rad/s",
-        )
+
+    def _handle_diagnostic_line(self, line: str):
+        self.log_line.emit("RX", line)

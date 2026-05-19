@@ -15,8 +15,8 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
   - Torque Control (Current Loop) / 力矩控制（电流环）
   - Speed Control (Speed + Current Loop) / 速度控制（速度+电流环）
   - Position Control (Position + Speed + Current Loop) / 位置控制（位置+速度+电流环）
-- **Motor Parameter Identification / 电机参数识别**: Rs, Ld, Lq, Ke, J, Pn
-- **Communication / 通信**: UART1 (115200 bps), Text Protocol / 文本协议
+- **Motor Parameter Identification / 电机参数识别**: configured Pn + Rs, Ld/Lq fallback, Ke, J, encoder direction/zero verification / 手动配置极对数，并识别/验证 Rs、电感默认值、Ke、J、编码器方向与零位
+- **Communication / 通信**: UART1 (230400 bps), Compact `N/F` ASCII frames + detailed fault text / 紧凑 `N/F` ASCII 帧 + 详细故障文本
 - **Encoder**: TLE5012B (SPI interface) / TLE5012B 磁编码器
 - **Driver**: DRV8350S (Three-phase gate driver) / DRV8350S 三相栅极驱动
 - **PWM Frequency / PWM频率**: 20kHz
@@ -40,12 +40,38 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 
 ---
 
+## Current Baseline / 当前基线
+
+- Baseline date: 2026-05-06.
+- Bench motor constants: 12V supply, 8.8 ohm phase resistance, 11 pole pairs, 74KV.
+- Current sampling contract: low-side sampling frontend is inverted in firmware through `ADC_CURRENT_POLARITY = -1.0f`.
+- Control baseline: torque, speed, and position modes share the same user-frame direction convention; speed and position defaults are conservative for the 12V bench motor.
+- Current-loop tuning command contract: `CMD:PI_CURRENT,kp,ki` treats `ki` as continuous-time Ki and firmware divides it by `FOC_CONTROL_FREQ` before storing the per-sample PI gain.
+- Position command ordering: UART command queue keeps `CMD:MODE,2` and `CMD:PREF,<rad>` in FIFO order, so a position reference cannot jump ahead of mode selection and be overwritten by position-mode hold seeding.
+- Host GUI baseline: default pole-pair input is 11, 12V voltage limits are 9.0V/16.0V, and boot/diagnostic text lines are shown without blocking compact telemetry parsing.
+- Verified locally with pytest and Keil ARMCC5. Keil flash log for this baseline reported `Erase Done`, `Programming Done`, `Verify OK`, and `Application running`.
+
+---
+
+## 2026-05-16 Sync Notes
+
+- Host parser now accepts detailed diagnostic snapshots headed by either `FOC Diagnostic Snapshot` or the legacy `FAULT DETECTED` banner, and it only marks a packet as an active fault when the payload contains a real fault source.
+- Detailed snapshots can populate motor parameters in the Identify tab: Rs, Ld, Lq, Ke, pole pairs, and encoder direction. The GUI falls back to the known 12V bench motor constants when firmware has not reported fresh values yet.
+- The Identify tab uses a compact status/parameter/action layout and requests `CMD:FAULT_DETAIL` after connection and after identification completes, so the latest firmware-side parameter snapshot is pulled into the host view.
+- Runtime telemetry packets no longer flood the RX log. Log rendering is batched on a timer, while fault details remain separated in the fault log.
+- Current, speed, and position target commands are blocked unless the motor is both unlocked and enabled, reducing accidental motion commands during setup.
+- Firmware fault-detail formatting now emits a non-fault diagnostic title when no shutdown fault is active, while preserving the fault banner and action checklist for real faults.
+- Repository hygiene: generated DOCX render images and local Keil output text files are ignored; project documentation for upload should be consolidated into this root `README.md`.
+
+---
+
 ## Bench Bring-Up Note / 台架启动说明
 
-- 当前固件重新回到临时台架恢复配置：`SystemClock_Config()` 使用内部 `HSI 64MHz + PLL1`，目标仍保持 `SYSCLK = 480MHz`，优先保证板子先稳定启动进入主循环。
+- 当前主固件优先使用 `25MHz HSE + PLL1`；若外部晶振启动失败，会自动回退到 `HSI 64MHz + PLL1`，目标仍保持 `SYSCLK = 480MHz`，优先保证复位后能进入主循环并保持 `UART1` 可调试。
 - `FDCAN` 继续通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化；本轮台架重点只看 `SPI1 / SPI3 / UART1` 主链路，`I2C/CAN` 不参与联调。
-- 这套 `HSI` 配置保持 `TIM1` 输出时钟 `240MHz`、`SPI123` 时钟 `192MHz` 不变，因此 `TIM1 PSC/ARR` 和 `SPI1/SPI3` 分频保持现值，不额外修改。
-- 待板子跑通后，再单独回到 `HSE` 路径继续处理外部晶振问题。
+- 当前板的 `USART1 <-> CH340` 连接需要开启 `USART1` advanced-feature `SWAP`，不要在未改板前把该配置关掉。
+- 若 `DRV8350S` 启动期 SPI 读写失败，主固件现在会保留 `UART1` 和主循环继续运行，并通过故障上传报告 `DRV8350S` 通信故障；不要再把这类启动期外设异常直接做成 `Error_Handler()` 死循环，否则上位机将完全收不到包。
+- 同样地，`DrvUart_Init()` 之后若 `USART1 RX DMA/IDLE`、`ADC` 校准、`TIM1 Base/OC4` 触发链或 `ADC DMA` 启动失败，主固件也不再直接卡死；会继续保留 `UART1 TX` 和主循环，用故障包把启动失败原因上传到上位机。
 - 当前推荐烧录/调试探头：`CMSIS-DAP`（SWD）。
 
 ---
@@ -63,8 +89,8 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 | DRV8350S_nSCS | PA4 | DRV8350S SPI Chip Select |
 | DRV8350S_ENABLE | PE14 | DRV8350S Enable (DRV_EN) |
 | SPI3_SCK | PC10 | TLE5012 Clock |
-| SPI3_MISO | PC11 | TLE5012 Data Out |
-| SPI3_MOSI | PC12 | TLE5012 Data In |
+| SPI3_MISO / DATA | PC11 | TLE5012 shared DATA receive phase |
+| SPI3_MOSI / DATA | PC12 | TLE5012 shared DATA command phase |
 | TLE5012_NSS | PA15 | TLE5012 software chip select (active low) |
 | MOD2 | PB12 | Local identify start/abort button (active low) |
 | MOD1 | PB13 | Local demo-mode toggle button (active low) |
@@ -85,7 +111,7 @@ Field-Oriented Control (FOC) motor driver for joint servo applications based on 
 - `TIM1` 控制环现在只消费“当前控制周期内完成”的 ADC 帧；单次缺帧会计数并上报，连续缺帧会升级为 `FOC_FAULT_ADC_SAMPLING`。
 - UART 状态/故障上传现在包含 ADC 帧序号、帧年龄、缺帧计数、无效窗口计数、原始电流 ADC 值以及换算后的 `Ia/Ib/Ic/Vbus`。
 - UART 故障首报路径使用 `1536B` 发送缓冲区，且故障格式化改为整数快路径，避免故障态浮点 `printf` 把首个大故障快照卡在串口发送前。
-- TLE5012 的 `DATA` 线方向切换现在通过直接修改 `PC11/PC12` 的 `MODER` 完成，不再在 `TIM1` 高优先级路径里调用 `HAL_GPIO_Init()`。
+- TLE5012 编码器板 `CN2.5/CN2.6` 共用同一根 `DATA` 网；`PC12` 只在命令阶段驱动，`PC11` 只在响应阶段接收，方向切换通过直接修改 `PC11/PC12` 的 `MODER` 完成。
 - UART 正常/故障文本会额外输出编码器 `Safety` 字节和 `Reset` 状态，用来暴露 TLE5012 `Safety Word bit15` 的复位/看门狗异常。
 
 ---
@@ -123,6 +149,8 @@ python -m HostComputer.gui_app
 # Package the Host GUI into a Windows app / 将上位机GUI打包为Windows应用
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1
 ```
+
+- 若使用仓库内 `MDK-ARM/24V FOC Controller.uvprojx` 通过 `Keil/ARMCC5` 重编译，不要再向 linker misc 人工追加 `--scanf_support=...`；当前工程直接使用标准 `sscanf()` 解析 `CMD:VBUS_LIMIT`、`IREF/SREF/PREF`、`PI_CURRENT/PI_SPEED/PD_POS` 等浮点串口命令，错误的 linker 选项只会触发 `L3900U` 导致目标文件无法生成。
 
 ---
 
@@ -193,10 +221,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1
   - 连接/上锁状态提醒
   - `START IDENTIFY` / `STOP IDENTIFY` / `CLEAR FAULT`
   - 识别事件与状态快照日志
+  - `已识别 / 未识别`、`堵转授权`、`开环试转激活态` 三个状态位
 - `Advanced Control`
   - 力矩模式 `Id_ref / Iq_ref`
   - 速度模式 `speed`
   - 位置模式 `position`
+  - 保护阈值：欠压/过压阈值下发与固件确认显示
+  - ADC噪声测试：发送 `CMD:ADC_NOISE,n`，显示 `A/B/C/VBUS` 原始码 `min/max/mean/pp/std`
   - 本地 preset 保存/加载
 - `Loop Parameters`
   - 电流环 / 速度环 `Kp / Ki`
@@ -222,6 +253,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1
 - 打包工具：`PyInstaller`（由脚本自动安装）
 - 输出目录：`dist/24V_FOC_Host/`
 - 主程序：`dist/24V_FOC_Host/24V_FOC_Host.exe`
+- 环境检查：如果 `PyInstaller / PyQt6 / pyqtgraph / pyserial / numpy` 已安装，脚本会直接 skip `pip install`
+- 旧包清理：脚本在新包构建成功后，会自动删除历史目录 `dist_rebuilt/24V_FOC_Host/`
 - 推荐流程：
   - `python -m unittest discover -s HostComputer -p "test_*.py" -v`
   - `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`
@@ -251,10 +284,27 @@ parser.feed_data(serial_data)
 ## Communication Protocol / 通信协议
 
 ### UART Settings / 串口设置
-- **Baud Rate / 波特率**: 115200 bps
+- **Baud Rate / 波特率**: 230400 bps
 - **Data Bits / 数据位**: 8
 - **Parity / 校验**: None
 - **Stop Bits / 停止位**: 1
+
+### Upload Frames / 上传帧格式
+
+- 正常实时遥测使用紧凑单行帧，normal telemetry interval is 20ms / 50Hz：`N,timestamp_ms,foc_state,angle_deg,speed_rad_s,Id,Iq,Vbus,fault_flags,encoder_detected,motor_identified,stall_mode_armed,stall_open_loop_active,app_warning_flags,app_fault_code,control_mode,Id_ref,speed_ref,pos_ref_rad,Iq_ref,Vd,Vq,Ia,Ib,Ic,identify_state,identify_error,undervoltage_limit_v,overvoltage_limit_v`
+- 三相电流高速曲线使用轻量单行帧，phase current telemetry interval is 5ms / 200Hz：`C,timestamp_ms,Ia,Ib,Ic`
+- 故障摘要使用紧凑单行帧：`F,timestamp_ms,foc_state,fault_flags,drv_comm_fault,encoder_detected,stall_open_loop_active,fault1,vgs2,last_rx,app_warning_flags,app_fault_code,identify_state,identify_error,Vbus,undervoltage_limit_v,overvoltage_limit_v`
+- 详细故障报告仍保留原有人类可读文本格式，但只在新的故障边沿发送一次，并按小块分片上传，避免堵塞实时链路。
+- 正常状态包也会额外上报 `app_warning_flags`；目前 bit0=`欠压告警`、bit1=`过压告警`。普通电压越限只作为告警显示，不再直接停机。
+- `app_fault_code` 对应 `FOC_FaultCode_t`；即使 `DRV fault_flags == 0`，只要应用层进入 `FOC_STATE_FAULT`，上位机也必须把它显示为故障激活，而不是“正常”。
+- 上位机解析 `N/F` 紧凑帧时，`undervoltage_limit_v / overvoltage_limit_v` 固定取末尾两个十进制字段；即使中间插入新的布尔状态位，也不允许把 UV/OV 读串位。
+
+Examples / 示例:
+
+```text
+N,2612,3,12.34,5.67,0.120,0.456,11.98,0x00000000,1,0,1,0,18.00,28.00
+F,2650,7,0x00000020,1,0,1,0x07FF,0x07FF,0xFFFF,11.98,18.00,28.00
+```
 
 ### Command Format / 命令格式
 
@@ -265,13 +315,18 @@ parser.feed_data(serial_data)
 | Enable | `CMD:ENABLE,1` | Enable motor / 使能电机 |
 | Disable | `CMD:ENABLE,0` | Disable motor / 禁用电机 |
 | Set Mode | `CMD:MODE,n` | 0=Torque, 1=Speed, 2=Position |
+| Stall Authorize | `CMD:STALL_MODE,0/1` | Authorize / cancel bench stall open-loop startup / 授权或取消堵转开环试转 |
 | Set Current | `CMD:IREF,id,iq` | Set Id_ref, Iq_ref |
 | Set Speed | `CMD:SREF,speed` | Set speed target (rad/s) |
 | Set Position | `CMD:PREF,pos` | Set position target (rad) |
-| Identify | `CMD:IDENTIFY,1` | Start parameter identification |
-| Set Vbus Limits | `CMD:VBUS_LIMIT,uv,ov` | Update runtime undervoltage / overvoltage thresholds |
+| Set Pole Pairs | `CMD:MOTOR_PN,pn` | Configure motor pole pairs before identification; valid range 1~50 |
+| Identify | `CMD:IDENTIFY,1` | Start parameter identification and direction/zero verification |
+| Set Vbus Limits | `CMD:VBUS_LIMIT,uv,ov` | Update runtime undervoltage / overvoltage warning thresholds |
+| ADC Noise Test | `CMD:ADC_NOISE,n` | Capture raw ADC noise statistics while motor is not working; `n` is clamped to 16~4096 |
+| TLE GPIO Diag | `CMD:TLE_GPIO_DIAG,0/1` | Stop / start slow GPIO toggling for TLE5012 CS/SCK/DATA line probing |
+| Fault Detail | `CMD:FAULT_DETAIL` | Re-send the current detailed fault report, including active motor-identification diagnostics while identification is still running |
 | Clear Fault | `CMD:CLEAR_FAULT` | Clear fault status |
-| Set Current PI | `CMD:PI_CURRENT,kp,ki` | Set current loop PI |
+| Set Current PI | `CMD:PI_CURRENT,kp,ki` | Set current loop PI; `ki` is continuous-time Ki and is converted to per-sample Ki in firmware |
 | Set Speed PI | `CMD:PI_SPEED,kp,ki` | Set speed loop PI |
 | Set Position PD | `CMD:PD_POS,kp,kd` | Set position loop PD |
 
@@ -282,8 +337,21 @@ Notes / 说明:
 - 上电后功率级默认锁定；需先发送 `CMD:UNLOCK,1`，再发送 `CMD:ENABLE,1` 或 `CMD:IDENTIFY,1`。
 - Before unlock, `CMD:ENABLE,1` and `CMD:IDENTIFY,1` are ignored by firmware.
 - 在解锁前，固件会忽略 `CMD:ENABLE,1` 与 `CMD:IDENTIFY,1`。
-- `CMD:VBUS_LIMIT,uv,ov` 仅允许在电机未运行、未处于参数识别、PWM 未使能时修改阈值。
-- `CMD:CLEAR_FAULT` 会先刷新实时 `Vbus`、编码器有效位和 `DRV8350S` 读回，再决定是否允许退出故障态。
+- 若电机未识别或编码器离线，上位机会在 `ENABLE` 前提示是否进入 `堵转模式（开环试转）`；确认后会下发 `CMD:STALL_MODE,1`。
+- `堵转模式（开环试转）` 仍受欠压、过压、过流、DRV 故障和 ADC 采样故障保护；该模式下位置环不可用，建议先给小 `Iq_ref`，再给小 `speed` 试转。
+- 若进入堵转模式前未显式下发 `speed_ref / Iq_ref`，固件会自动注入台架默认试转值：`speed_ref = 5.0 rad/s`，`Iq_ref = 0.5 A`，避免“已授权但零指令不转”的假死观感。
+- `CMD:VBUS_LIMIT,uv,ov` 仅允许在电机未运行、未处于参数识别、PWM 未使能时修改阈值；这对值现在定义的是“普通电压告警阈值”。
+- `CMD:MOTOR_PN,pn` 仅用于停机/未识别流程前配置极对数；固件不再通过短距离开环抖动自动反算 `Pn`，参数识别阶段只验证编码器方向、零位和双向真实运动。
+- `CMD:ADC_NOISE,n` 仅允许在电机未运行、未处于参数识别、PWM 未使能时执行；固件不会驱动电机，只统计 `A/B/C/VBUS` 四路原始 ADC 码的 `min/max/mean/pp/std` 并一次性返回，例如 `CMD:ADC_NOISE,4096`。
+- `CMD:TLE_GPIO_DIAG,1` 仅在 PWM 未使能且不处于运行/识别状态时接管 TLE5012 引脚：`PA15=CSQ`、`PC10=SCK`、`PC12=DATA_OUT` 以 500ms 步进低速翻转，`PC11=DATA_IN` 持续采样到 `tle5012_gpio_diag.data_in`；发送 `CMD:TLE_GPIO_DIAG,0` 后恢复 SPI3 三线 SSC 正常读取。
+- TLE GPIO 诊断用于万用表/Keil Watch 排查线序：编码器板 `CN2.5/CN2.6` 共 DATA，因此 `PC12` 输出高低变化时，`PC11` 应跟随变化；若不跟随，优先查控制板连接器、线缆、编码器板 DATA 共网和 `R2 -> U1.4` 路径。
+- ADC 噪声诊断输出的是原始码值：电流通道约 `5.37 mA/LSB`，母线电压约 `8.06 mV/LSB`；台架初筛可先看电流峰峰值是否小于 `5~15 LSB`，若超过 `20 LSB` 优先查模拟地、VDDA、采样时刻和运放噪声。
+- 固件会在告警阈值之外再派生一组内部“严重停机阈值”：`严重欠压 = uv - 1.0V`，`严重过压 = ov + 1.0V`。只有越过严重阈值时才会真正下电进入 `FAULT`。
+- 严重电压故障带 `0.5V` 自动恢复滞回：`严重欠压` 恢复到 `uv - 0.5V` 以上、`严重过压` 回落到 `ov + 0.5V` 以下后，固件会自动退出电压故障态并回到 `READY/IDLE`。
+- `CMD:CLEAR_FAULT` 会先刷新实时 `Vbus`、编码器有效位和 `DRV8350S` 读回，再决定是否允许退出故障态；普通电压告警不会再阻止清故障或重新使能。
+- 上位机默认也应使用 `230400` 波特率；旧的 `115200` 配置不再作为当前默认值。
+- 上位机“高级控制 -> 保护阈值”面板中的输入框是待下发值；“当前阈值”标签显示固件实时上传的实际 `undervoltage_limit_v / overvoltage_limit_v`。
+- 若已连接但尚未收到任何固件包，标签显示“等待固件回传”；若已收到包但阈值字段仍缺失，则显示“未上报阈值（请确认已烧录最新固件）”。
 
 ### Local Demo Buttons / 板载演示按钮
 
@@ -326,9 +394,9 @@ Notes / 说明:
 - 采样故障策略落地：连续采样缺失会触发 `FOC_FAULT_ADC_SAMPLING`，避免闭环在不可信电流反馈上继续运行。
 - UART 诊断增强：正常/故障上传包新增采样触发源、采样时间、帧序号、原始 ADC 三相电流和换算后的 `Ia/Ib/Ic/Vbus`。
 
-### Bench Bring-Up Update / 台架启动更新 (2026-04-05)
+### Bench Bring-Up Update / 台架启动更新 (2026-04-23)
 
-- 时钟启动已重新切回 `HSI 64MHz + PLL1`，用于先让板子稳定运行并继续检查 `SPI1 / SPI3 / UART1`。
+- 时钟启动策略改为“`HSE` 优先，失败自动回退 `HSI 64MHz + PLL1`”，避免外部晶振偶发不起振时，固件在 `SystemClock_Config()` 内直接卡死而导致复位后完全无串口。
 - `FOC_DEBUG_DISABLE_FDCAN_INIT` 继续保留，当前 bench 启动仍然只验证核心时钟与 `TIM1 / ADC / SPI / UART / GPIO` 主链路。
 - 由于 `SYSCLK/AHB/APB/TIM1/SPI123` 目标频率保持不变，`TIM1 PSC/ARR` 和 `SPI1/SPI3` 波特率分频保持原值，不做额外补偿修改。
 - `ADC` 零点校准前会先启动 `TIM1` 基计数器和 `CH4/OC4REF` 触发链，校准完成后再单独使能 `TIM1 UPDATE IRQ`；这样能让 ADC 先拿到采样帧，同时不提前驱动 PWM。

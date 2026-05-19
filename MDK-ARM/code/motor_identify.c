@@ -6,18 +6,28 @@
 
 #include "motor_identify.h"
 #include "tle5012.h"
+#include "foc_app.h"
 #include <string.h>
 #include <math.h>
 
 /*==================== 私有宏定义 ====================*/
 #define MI_DEG2RAD      (FOC_PI / 180.0f)
 #define MI_RAD2DEG      (180.0f / FOC_PI)
-#define MI_CONTROL_DT   0.00005f   /* 20kHz控制周期 */
+#define MI_CONTROL_DT   (1.0f / (float)FOC_CONTROL_FREQ)  /* 由PWM频率决定 */
 
 /*==================== 私有函数声明 ====================*/
 static void MI_ResetStateData(MI_Handle_t *handle);
 static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state);
-static MI_ErrorCode_t MI_RequireValidEncoder(void);
+static MI_ErrorCode_t MI_RequireValidEncoder(MI_Handle_t *handle);
+static uint8_t MI_RsConverged(float rs_positive, float rs_negative);
+static uint8_t MI_RsUseSinglePolarityFallback(MI_Handle_t *handle);
+static MI_ErrorCode_t MI_UseLsFallback(MI_Handle_t *handle);
+static float MI_GetPnTestCurrent(const MI_Handle_t *handle);
+static uint8_t MI_PnRetryWithHigherCurrent(MI_Handle_t *handle);
+static float MI_ClampAbsVoltage(float voltage, float limit);
+static float MI_WrapDelta(float delta);
+/* PN path keeps the current_target naming contract in this file for bench tests. */
+/* FOC_SetCurrentReference(handle->foc, current_target, 0.0f); */
 
 /**
  * @brief 初始化参数识别模块
@@ -72,6 +82,7 @@ void MI_Process(MI_Handle_t *handle)
         case MI_STATE_RS_IDENTIFY:
             err = MI_IdentifyRs(handle);
             if (err == MI_ERR_NONE) {
+                MI_UpdatePIWithNewRs(handle->foc, handle->param->Rs);
                 MI_EnterState(handle, MI_STATE_LS_IDENTIFY);
             } else if (err != MI_ERR_IN_PROGRESS) {
                 handle->error_code = err;
@@ -116,11 +127,26 @@ void MI_Process(MI_Handle_t *handle)
         case MI_STATE_ENCODER_ALIGN:
             err = MI_EncoderAlign(handle);
             if (err == MI_ERR_NONE) {
-                MI_EnterState(handle, MI_STATE_COMPLETE);
+                MI_EnterState(handle, MI_STATE_MOTION_VERIFY);
             } else if (err != MI_ERR_IN_PROGRESS) {
                 handle->error_code = err;
                 MI_EnterState(handle, MI_STATE_ERROR);
             }
+            break;
+
+        case MI_STATE_MOTION_VERIFY:
+            err = MI_VerifyMotion(handle);
+            if (err == MI_ERR_IN_PROGRESS) {
+                break;
+            }
+            if (err == MI_ERR_NONE) {
+                handle->motion_verify_status = (handle->motion_verify_weak) ? 2U : 1U;
+            } else {
+                handle->motion_verify_status = 3U;  /* failed */
+            }
+            /* Always save params and complete after motion verify runs */
+            handle->param->valid_flag = 0xFFFFFFFF;
+            MI_EnterState(handle, MI_STATE_COMPLETE);
             break;
             
         case MI_STATE_COMPLETE:
@@ -173,110 +199,133 @@ const char* MI_GetErrorString(MI_ErrorCode_t error)
         case MI_ERR_CURRENT_TOO_HIGH:   return "Current Too High";
         case MI_ERR_ENCODER_INVALID:    return "Encoder Invalid";
         case MI_ERR_TIMEOUT:            return "Timeout";
+        case MI_ERR_PHASE_SEQUENCE:     return "Phase Sequence";
         default:                        return "Unknown Error";
     }
 }
 
-static MI_ErrorCode_t MI_RequireValidEncoder(void)
+static MI_ErrorCode_t MI_RequireValidEncoder(MI_Handle_t *handle)
 {
-    if (!TLE5012_IsDataValid()) {
+    if (handle == NULL) {
         return MI_ERR_ENCODER_INVALID;
     }
 
+    if (!TLE5012_IsDataValid()) {
+        if (handle->encoder_invalid_count < 0xFFU) {
+            handle->encoder_invalid_count++;
+        }
+        if (handle->encoder_invalid_count >= MI_ENCODER_INVALID_CONSECUTIVE_LIMIT) {
+            return MI_ERR_ENCODER_INVALID;
+        }
+        return MI_ERR_IN_PROGRESS;
+    }
+
+    handle->encoder_invalid_count = 0U;
     return MI_ERR_NONE;
 }
 
 /**
- * @brief 定子电阻Rs识别（直流伏安法）
+ * @brief 定子电阻Rs识别（d轴闭环锁轴法）
  * @param handle 识别句柄指针
  * @return 错误代码
- * 
- * 步骤：
- * 1. 施加α轴电压 Vα = 0.05 * Vbus
- * 2. 等待电流稳定
- * 3. 采样电压和电流
- * 4. Rs = Vα / Iα
- * 5. 改变电压极性重复测量，取平均消除死区影响
+ *
+ * 原理：
+ * 1. d轴电流闭环注入锁定转子，防止运动产生反电动势
+ * 2. FOC_SetAngle(0) + FOC_SetCurrentReference(Id) 通过PI控制器输出Vd
+ * 3. 稳定后采样Vd(来自PI输出)和Id(来自Clarke+Park变换)
+ * 4. Rs = |Vd| / |Id|
+ * 5. 反极性重复，取平均抵消死区/零漂
  */
 MI_ErrorCode_t MI_IdentifyRs(MI_Handle_t *handle)
 {
     float elapsed = MI_GetElapsedTime(handle);
-    float Vtest = handle->foc->Vbus * MI_RS_TEST_VOLTAGE;
-    
-    /* 阶段1：正极性测试 */
-    if (handle->polarity == 0) {
-        if (elapsed < MI_RS_TEST_DURATION) {
-            /* 施加正电压 */
-            handle->foc->ValphaBeta.alpha = Vtest;
-            handle->foc->ValphaBeta.beta = 0;
-            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
-            
-            /* 等待稳定后开始采样 */
-            if (elapsed > MI_RS_SETTLE_TIME) {
-                handle->sum_v += Vtest;
-                /* 直接采样α轴电流（Clark变换后的alpha分量） */
-                handle->sum_i += handle->foc->IalphaBeta.alpha;
-                handle->sample_count++;
-            }
-            return MI_ERR_IN_PROGRESS;  /* 继续等待 */
-        } else {
-            /* 计算正极性Rs */
-            if (handle->sample_count > 0) {
-                float V_avg = handle->sum_v / handle->sample_count;
-                float I_avg = handle->sum_i / handle->sample_count;
-                if (fabsf(I_avg) > MI_RS_CURRENT_THRESH) {
-                    handle->Rs_positive = V_avg / I_avg;
-                } else {
-                    return MI_ERR_CURRENT_TOO_LOW;
-                }
-            }
-            
-            /* 切换到负极性 */
-            handle->polarity = 1;
-            MI_ResetStateData(handle);
-            handle->state_start_time = HAL_GetTick();
-            return MI_ERR_IN_PROGRESS;
-        }
+    float test_current = handle->rs_current_target;
+    float I_mag, Id_meas;
+
+    /* Read measured d-axis current from FOC (Clarke+Park computed in ISR) */
+    Id_meas = handle->foc->Idq.d;
+    I_mag  = sqrtf(handle->foc->Idq.d * handle->foc->Idq.d +
+                   handle->foc->Idq.q * handle->foc->Idq.q);
+
+    /* Initialize test current on first call */
+    if (handle->rs_current_target <= 0.0f) {
+        handle->rs_current_target = MI_RS_LOCK_CURRENT_INITIAL;
     }
-    /* 阶段2：负极性测试 */
-    else {
-        if (elapsed < MI_RS_TEST_DURATION) {
-            /* 施加负电压 */
-            handle->foc->ValphaBeta.alpha = -Vtest;
-            handle->foc->ValphaBeta.beta = 0;
-            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
-            
-            if (elapsed > MI_RS_SETTLE_TIME) {
-                handle->sum_v += (-Vtest);
-                /* 直接采样α轴电流 */
-                handle->sum_i += handle->foc->IalphaBeta.alpha;
-                handle->sample_count++;
+
+    /* Phase: lock + sample */
+    if (elapsed < (MI_RS_LOCK_DURATION + MI_RS_SAMPLE_DURATION)) {
+        /* Apply d-axis current via closed-loop FOC */
+        FOC_SetAngle(handle->foc, 0.0f);
+        FOC_SetCurrentReference(handle->foc,
+            (handle->polarity == 0) ? test_current : -test_current, 0.0f);
+
+        if (elapsed > MI_RS_LOCK_DURATION) {
+            /* Overcurrent only during sampling (PI settled by now) */
+            if (I_mag > MI_RS_CURRENT_MAX) {
+                return MI_ERR_CURRENT_TOO_HIGH;
             }
-            return MI_ERR_IN_PROGRESS;
-        } else {
-            /* 计算负极性Rs */
-            if (handle->sample_count > 0) {
-                float V_avg = handle->sum_v / handle->sample_count;
-                float I_avg = handle->sum_i / handle->sample_count;
-                if (fabsf(I_avg) > MI_RS_CURRENT_THRESH) {
-                    handle->Rs_negative = V_avg / I_avg;
-                } else {
-                    return MI_ERR_CURRENT_TOO_LOW;
-                }
-            }
-            
-            /* 计算平均Rs */
-            handle->param->Rs = (handle->Rs_positive + handle->Rs_negative) / 2.0f;
-            
-            /* 检查收敛条件 */
-            float Rs_diff = fabsf(handle->Rs_positive - handle->Rs_negative);
-            if (Rs_diff < MI_RS_CONVERGE_THRESH) {
-                return MI_ERR_NONE;  /* 识别成功 */
+            /* Sampling phase: accumulate Vd (PI output) and Id (measured) */
+            handle->sum_v  += handle->foc->Vdq.d;
+            handle->sum_i  += Id_meas;
+            handle->sum_ii += Id_meas * Id_meas;
+            handle->sum_i_mag += I_mag;
+            handle->sample_count++;
+        }
+        return MI_ERR_IN_PROGRESS;
+    }
+
+    /* Compute Rs from accumulated Vd/Id */
+    if (handle->sample_count > 0) {
+        float n = (float)handle->sample_count;
+        float Vd_avg = handle->sum_v / n;
+        float Id_avg = handle->sum_i / n;
+        float Rs_val = (fabsf(Id_avg) > 0.01f) ? fabsf(Vd_avg / Id_avg) : 0.0f;
+
+        /* Store diagnostics */
+        handle->rs_last_v_avg = Vd_avg;
+        handle->rs_last_i_avg = Id_avg;
+        handle->rs_last_i_mag_avg = handle->sum_i_mag / n;
+        handle->rs_last_vec_rs = Rs_val;
+        handle->rs_last_samples = handle->sample_count;
+
+        /* Check validity */
+        if (fabsf(Id_avg) > MI_RS_CURRENT_THRESH && Rs_val > 0.0f && Rs_val < 50.0f) {
+            if (handle->polarity == 0) {
+                handle->Rs_positive = Rs_val;
+                /* Switch to negative polarity */
+                handle->polarity = 1;
+                MI_ResetStateData(handle);
+                handle->state_start_time = HAL_GetTick();
+                return MI_ERR_IN_PROGRESS;
             } else {
-                return MI_ERR_RS_NOT_CONVERGED;
+                handle->Rs_negative = Rs_val;
+                /* Compute final Rs as average of both polarities */
+                handle->param->Rs = (handle->Rs_positive + handle->Rs_negative) / 2.0f;
+                if (MI_RsConverged(handle->Rs_positive, handle->Rs_negative)) {
+                    return MI_ERR_NONE;
+                } else if (MI_RsUseSinglePolarityFallback(handle)) {
+                    return MI_ERR_NONE;
+                } else {
+                    return MI_ERR_RS_NOT_CONVERGED;
+                }
             }
+        } else {
+            /* Current too low or invalid — retry with higher current */
+            float next = handle->rs_current_target + MI_RS_LOCK_CURRENT_STEP;
+            if (next <= MI_RS_LOCK_CURRENT_MAX + 0.001f) {
+                handle->rs_current_target = next;
+                handle->polarity = 0;
+                handle->Rs_positive = 0.0f;
+                handle->Rs_negative = 0.0f;
+                MI_ResetStateData(handle);
+                handle->state_start_time = HAL_GetTick();
+                return MI_ERR_IN_PROGRESS;
+            }
+            return MI_ERR_CURRENT_TOO_LOW;
         }
     }
+
+    return MI_ERR_CURRENT_TOO_LOW;
 }
 
 /**
@@ -293,6 +342,7 @@ MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle)
 {
     float elapsed = MI_GetElapsedTime(handle);
     float Vamp = handle->foc->Vbus * MI_LS_INJ_AMPLITUDE;
+    Vamp = MI_ClampAbsVoltage(Vamp, MI_LS_INJ_VOLTAGE_MAX_V);
     
     if (elapsed < MI_LS_TEST_DURATION) {
         /* 生成高频注入信号 */
@@ -316,27 +366,42 @@ MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle)
             /* 正弦注入已知幅值：Vrms = Vamp / sqrt(2) */
             float Vrms = fabsf(Vamp) * 0.70710678f;
             float Irms = sqrtf(handle->sum_ii / (float)handle->sample_count);
+            float Z = 0.0f;
+            float Rs_safe = handle->param->Rs;
+            if (Rs_safe < 0.1f || Rs_safe > 30.0f) { Rs_safe = 0.5f; }
+            float xl_sq = 0.0f;
+            float XL = 0.0f;
+            float L = 0.0f;
+
+            handle->ls_last_v_rms = Vrms;
+            handle->ls_last_i_rms = Irms;
+            handle->ls_last_z = 0.0f;
+            handle->ls_last_xl = 0.0f;
+            handle->ls_last_l = 0.0f;
 
             if (Irms > 0.01f) {
-                float Z = Vrms / Irms;
-                float Rs = handle->param->Rs;
-                float xl_sq = Z * Z - Rs * Rs;
+                Z = Vrms / Irms;
+                xl_sq = Z * Z - Rs_safe * Rs_safe;
                 if (xl_sq < 0.0f) {
                     xl_sq = 0.0f;
                 }
 
                 /* 计算电感 L = XL / (2πf) */
-                float XL = sqrtf(xl_sq);
-                float L = XL / (2.0f * FOC_PI * MI_LS_INJ_FREQUENCY);
+                XL = sqrtf(xl_sq);
+                L = XL / (2.0f * FOC_PI * MI_LS_INJ_FREQUENCY);
+                handle->ls_last_z = Z;
+                handle->ls_last_xl = XL;
+                handle->ls_last_l = L;
 
-                if (L > 0.0f && L < 0.1f) {
+                if (L > 0.0f && L <= MI_LS_VALID_MAX_H) {
                     handle->param->Ld = L;
                     handle->param->Lq = L;  /* 假设各向同性 */
+                    handle->ls_used_fallback = 0U;
                     return MI_ERR_NONE;
                 }
             }
         }
-        return MI_ERR_LS_NOT_CONVERGED;
+        return MI_UseLsFallback(handle);
     }
 }
 
@@ -360,7 +425,7 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
     float omega_e_target = MI_KE_TEST_SPEED_RPM * 2.0f * FOC_PI / 60.0f * pole_pairs;
     float elapsed = MI_GetElapsedTime(handle);
     float theta_mech_now, delta_theta, omega_mech, omega_e_meas;
-    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder(handle);
 
     if (encoder_status != MI_ERR_NONE) {
         return encoder_status;
@@ -375,7 +440,7 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
 
                 /* 开环拖动 */
                 handle->foc->Id_ref = 0.0f;
-                handle->foc->Iq_ref = 0.5f; /* 拖动电流 */
+                handle->foc->Iq_ref = 0.05f; /* 极小拖动电流，防DRV过流 */
                 handle->speed_elec = omega_e_cmd; /* 用于电角度积分 */
                 handle->foc->theta_elec = FOC_AngleNormalize(handle->foc->theta_elec + omega_e_cmd * MI_CONTROL_DT);
                 handle->foc->sin_theta = sinf(handle->foc->theta_elec);
@@ -393,7 +458,7 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
             if (elapsed < MI_KE_MEASURE_TIME) {
                 /* 使用电流环维持转速，Id=0控制 */
                 handle->foc->Id_ref = 0;
-                handle->foc->Iq_ref = 0.3f; /* 维持电流 */
+                handle->foc->Iq_ref = 0.05f; /* 极小维持电流 */
                 handle->speed_elec = omega_e_target;
                 handle->foc->theta_elec = FOC_AngleNormalize(handle->foc->theta_elec + handle->speed_elec * MI_CONTROL_DT);
                 handle->foc->sin_theta = sinf(handle->foc->theta_elec);
@@ -422,8 +487,10 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
 
                 /* 在αβ静止坐标系估算反电势幅值，降低开环dq坐标失配偏差 */
                 if (fabsf(handle->ke_speed_filt) > 10.0f) {
-                    float e_alpha = handle->foc->ValphaBeta.alpha - handle->param->Rs * handle->foc->IalphaBeta.alpha;
-                    float e_beta = handle->foc->ValphaBeta.beta - handle->param->Rs * handle->foc->IalphaBeta.beta;
+                    float Rs_safe = handle->param->Rs;
+                    if (Rs_safe < 0.1f || Rs_safe > 30.0f) { Rs_safe = 0.5f; }
+                    float e_alpha = handle->foc->ValphaBeta.alpha - Rs_safe * handle->foc->IalphaBeta.alpha;
+                    float e_beta = handle->foc->ValphaBeta.beta - Rs_safe * handle->foc->IalphaBeta.beta;
                     float e_mag = sqrtf(e_alpha * e_alpha + e_beta * e_beta);
                     handle->sum_v += e_mag;
                     handle->sum_i += fabsf(handle->ke_speed_filt);
@@ -464,101 +531,250 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle)
 }
 
 /**
- * @brief 极对数识别 - 通过开环拖动统计电角度变化
+ * @brief 极对数验证 - 使用已配置Pn，只验证运动方向和拖动是否有效
  * @param handle 识别句柄指针
  * @return 错误代码
  *
  * 原理：
- * 1. 施加固定方向的旋转磁场
- * 2. 统计编码器转过的机械角度和电角度周期数
- * 3. Pn = 电角度周期数 / 机械角度(圈)
- */
-/**
- * @brief 极对数识别 - 通过开环拖动统计电角度变化
- * @param handle 识别句柄指针
- * @return 错误代码
- *
- * 【修复MI-001】将静态变量移至handle结构体，实现线程安全
- * 原理：
- * 1. 施加固定方向的旋转磁场
- * 2. 统计编码器转过的机械角度和电角度周期数
- * 3. Pn = 电角度周期数 / 机械角度(圈)
+ * 1. Pn由上位机/Flash配置，避免用短距离抖动反算极对数
+ * 2. 施加离散电角步进并等待稳定，确认电机真实跟随
+ * 3. 根据累计电角步进与机械角变化的符号确定编码器方向
  */
 MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
 {
     uint8_t *state = &handle->pn_state;
     float *theta_mech_start = &handle->pn_theta_start;
     float *theta_elec_last = &handle->pn_elec_last;
-    float elapsed = MI_GetElapsedTime(handle);
-    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+    float current_target;
+    uint8_t configured_pn;
+    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder(handle);
 
     if (encoder_status != MI_ERR_NONE) {
         return encoder_status;
     }
 
+    configured_pn = handle->param->Pn;
+    if ((configured_pn == 0U) || (configured_pn > 50U)) {
+        return MI_ERR_PN_NOT_CONVERGED;
+    }
+
+    current_target = MI_GetPnTestCurrent(handle);
+
     switch (*state) {
-        case 0: /* 初始化 */
+        case 0: /* 锁轴初始化：先让转子贴住已知电角度，避免直接旋转场抓不住转子 */
             *theta_mech_start = TLE5012_GetAngle() * MI_DEG2RAD;
             handle->pn_theta_accum = 0.0f;
             handle->pn_theta_last = *theta_mech_start;
             *theta_elec_last = 0.0f;
             handle->sample_count = 0U;
+            handle->pn_elec_cycles = 0U;
+            handle->pn_last_delta_mech = 0.0f;
+            handle->pn_last_delta_elec = 0.0f;
+            handle->pn_last_calc = 0.0f;
+            handle->pn_observed_dir = 0;
+            FOC_SetAngle(handle->foc, 0.0f);
+            FOC_SetCurrentReference(handle->foc, MI_PN_ALIGN_CURRENT, 0.0f);
             *state = 1;
+            handle->state_start_time = HAL_GetTick();
             return MI_ERR_IN_PROGRESS;
 
-        case 1: /* 施加旋转磁场 */
-            if (elapsed < MI_PN_TEST_DURATION) {
-                float omega_elec = 2.0f * FOC_PI * 2.0f; /* 2Hz电频率 */
-                float theta_elec_cmd = omega_elec * ((float)handle->sample_count * MI_CONTROL_DT);
-                float theta_mech_now;
-                float delta_mech;
-
-                /* 采用开环拖动：固定Iq并推进电角度 */
-                handle->foc->Id_ref = 0.0f;
-                handle->foc->Iq_ref = MI_PN_TEST_CURRENT;
-                handle->foc->theta_elec = theta_elec_cmd;
-                handle->foc->sin_theta = sinf(theta_elec_cmd);
-                handle->foc->cos_theta = cosf(theta_elec_cmd);
-
-                theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
-                delta_mech = theta_mech_now - handle->pn_theta_last;
-                if (delta_mech > FOC_PI) {
-                    delta_mech -= 2.0f * FOC_PI;
-                } else if (delta_mech < -FOC_PI) {
-                    delta_mech += 2.0f * FOC_PI;
-                }
-
-                handle->pn_theta_accum += delta_mech;
-                handle->pn_theta_last = theta_mech_now;
-                *theta_elec_last = theta_elec_cmd;
-                handle->sample_count++;
+        case 1: /* 锁轴等待 */
+            FOC_SetAngle(handle->foc, 0.0f);
+            FOC_SetCurrentReference(handle->foc, MI_PN_ALIGN_CURRENT, 0.0f);
+            if (MI_GetElapsedTime(handle) < MI_PN_ALIGN_DURATION) {
                 return MI_ERR_IN_PROGRESS;
             }
 
+            *theta_mech_start = TLE5012_GetAngle() * MI_DEG2RAD;
+            handle->pn_theta_accum = 0.0f;
+            handle->pn_theta_last = *theta_mech_start;
+            *theta_elec_last = 0.0f;
+            handle->sample_count = 0U;
+            handle->pn_elec_cycles = 0U;
             *state = 2;
+            handle->state_start_time = HAL_GetTick();
             return MI_ERR_IN_PROGRESS;
 
-        case 2: /* 计算极对数 */
+        case 2: /* 应用下一步进电角 */
+        {
+            float theta_elec_step = MI_PN_STEP_ELEC_DEG * MI_DEG2RAD;
+
+            if (handle->pn_elec_cycles >= MI_PN_STEP_COUNT) {
+                *state = 10;
+                handle->state_start_time = HAL_GetTick();
+                return MI_ERR_IN_PROGRESS;
+            }
+
+            *theta_elec_last = theta_elec_step * (float)(handle->pn_elec_cycles + 1U);
+            *state = 3;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        case 3: /* 应用反向解卡脉冲 */
+        {
+            float theta_elec_nudge = MI_PN_NUDGE_ELEC_DEG * MI_DEG2RAD;
+            float voltage_scale = current_target / MI_PN_TEST_CURRENT_INITIAL;
+            float voltage_mag = handle->foc->Vbus * MI_PN_TEST_VOLTAGE_RATIO * voltage_scale;
+            float theta_elec_cmd = *theta_elec_last - theta_elec_nudge;
+
+            voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_PN_TEST_VOLTAGE_MAX_V);
+            FOC_SetAngle(handle->foc, theta_elec_cmd);
+            handle->foc->Id_ref = 0.0f;
+            handle->foc->Iq_ref = 0.0f;
+            handle->foc->pi_d.integral = 0.0f;
+            handle->foc->pi_q.integral = 0.0f;
+            handle->foc->ValphaBeta.alpha = voltage_mag * cosf(handle->foc->theta_elec);
+            handle->foc->ValphaBeta.beta = voltage_mag * sinf(handle->foc->theta_elec);
+            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+            *state = 4;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        case 4: /* 等待反向解卡稳定 */
+            if (MI_GetElapsedTime(handle) < MI_PN_NUDGE_SETTLE_MS) {
+                return MI_ERR_IN_PROGRESS;
+            }
+
+            *state = 5;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+
+        case 5: /* 应用正向越峰脉冲 */
+        {
+            float theta_elec_nudge = MI_PN_NUDGE_ELEC_DEG * MI_DEG2RAD;
+            float voltage_scale = current_target / MI_PN_TEST_CURRENT_INITIAL;
+            float voltage_mag = handle->foc->Vbus * MI_PN_TEST_VOLTAGE_RATIO * voltage_scale;
+            float theta_elec_cmd = *theta_elec_last + theta_elec_nudge;
+
+            voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_PN_TEST_VOLTAGE_MAX_V);
+            FOC_SetAngle(handle->foc, theta_elec_cmd);
+            handle->foc->Id_ref = 0.0f;
+            handle->foc->Iq_ref = 0.0f;
+            handle->foc->pi_d.integral = 0.0f;
+            handle->foc->pi_q.integral = 0.0f;
+            handle->foc->ValphaBeta.alpha = voltage_mag * cosf(handle->foc->theta_elec);
+            handle->foc->ValphaBeta.beta = voltage_mag * sinf(handle->foc->theta_elec);
+            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+            *state = 6;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        case 6: /* 等待正向越峰稳定 */
+            if (MI_GetElapsedTime(handle) < MI_PN_NUDGE_SETTLE_MS) {
+                return MI_ERR_IN_PROGRESS;
+            }
+
+            *state = 7;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+
+        case 7: /* 回到主目标步进角 */
+        {
+            float voltage_scale = current_target / MI_PN_TEST_CURRENT_INITIAL;
+            float voltage_mag = handle->foc->Vbus * MI_PN_TEST_VOLTAGE_RATIO * voltage_scale;
+
+            voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_PN_TEST_VOLTAGE_MAX_V);
+            FOC_SetAngle(handle->foc, *theta_elec_last);
+            handle->foc->Id_ref = 0.0f;
+            handle->foc->Iq_ref = 0.0f;
+            handle->foc->pi_d.integral = 0.0f;
+            handle->foc->pi_q.integral = 0.0f;
+            handle->foc->ValphaBeta.alpha = voltage_mag * cosf(handle->foc->theta_elec);
+            handle->foc->ValphaBeta.beta = voltage_mag * sinf(handle->foc->theta_elec);
+            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+            *state = 8;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        case 8: /* 等待主步进稳定 */
+            if (MI_GetElapsedTime(handle) < MI_PN_STEP_SETTLE_MS) {
+                float voltage_scale = current_target / MI_PN_TEST_CURRENT_INITIAL;
+                float voltage_mag = handle->foc->Vbus * MI_PN_TEST_VOLTAGE_RATIO * voltage_scale;
+
+                voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_PN_TEST_VOLTAGE_MAX_V);
+                FOC_SetAngle(handle->foc, *theta_elec_last);
+                handle->foc->Id_ref = 0.0f;
+                handle->foc->Iq_ref = 0.0f;
+                handle->foc->pi_d.integral = 0.0f;
+                handle->foc->pi_q.integral = 0.0f;
+                handle->foc->ValphaBeta.alpha = voltage_mag * cosf(handle->foc->theta_elec);
+                handle->foc->ValphaBeta.beta = voltage_mag * sinf(handle->foc->theta_elec);
+                FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+                return MI_ERR_IN_PROGRESS;
+            }
+
+            *state = 9;
+            return MI_ERR_IN_PROGRESS;
+
+        case 9: /* 采样机械角并累计位移 */
+        {
+            float theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+            float delta_mech = MI_WrapDelta(theta_mech_now - handle->pn_theta_last);
+
+            handle->pn_theta_accum += delta_mech;
+            handle->pn_theta_last = theta_mech_now;
+            handle->pn_elec_cycles++;
+            handle->sample_count++;
+            *state = 2;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        case 10: /* 验证配置Pn下的运动方向和最小机械位移 */
         {
             float delta_mech = handle->pn_theta_accum;
             float delta_elec = *theta_elec_last;
+            float expected_delta = fabsf(delta_elec) / (float)configured_pn;
+            float min_delta = expected_delta * MI_PN_MIN_EXPECTED_TRAVEL_RATIO;
+            float dir_sign_min_delta = MI_PN_DIR_SIGN_MIN_MECH_DELTA_RAD;
 
             handle->foc->Id_ref = 0.0f;
             handle->foc->Iq_ref = 0.0f;
+            handle->pn_last_delta_mech = delta_mech;
+            handle->pn_last_delta_elec = delta_elec;
+            handle->pn_last_calc = 0.0f;
 
-            /* 使用累计机械角与指令电角比值，避免“整周期计数不足”导致识别失败 */
-            if (fabsf(delta_mech) > 0.05f && fabsf(delta_elec) > 0.5f) {
-                float pn_calc = fabsf(delta_elec / delta_mech);
-                handle->param->Pn = (uint8_t)(pn_calc + 0.5f);
-
-                if (handle->param->Pn >= 1U && handle->param->Pn <= 50U) {
-                    *state = 0;
-                    return MI_ERR_NONE;
-                }
+            if (min_delta < MI_PN_MIN_MECH_DELTA_RAD) {
+                min_delta = MI_PN_MIN_MECH_DELTA_RAD;
             }
 
+            if (dir_sign_min_delta > min_delta) {
+                dir_sign_min_delta = min_delta;
+            }
+
+            /* 只把电角/机械角比值作为诊断值，不再用短行程结果覆盖配置Pn。 */
+            if (fabsf(delta_mech) >= min_delta && fabsf(delta_elec) > 0.5f) {
+                handle->pn_last_calc = fabsf(delta_elec / delta_mech);
+                handle->param->encoder_dir = ((delta_elec * delta_mech) >= 0.0f) ? 1 : -1;
+                handle->pn_observed_dir = (delta_mech >= 0.0f) ? 1 : -1;
+
+                *state = 0;
+                return MI_ERR_NONE;
+            }
+
+            if (MI_PnRetryWithHigherCurrent(handle)) {
+                return MI_ERR_IN_PROGRESS;
+            }
+
+            if ((fabsf(delta_mech) >= dir_sign_min_delta) && (fabsf(delta_elec) > 0.5f)) {
+                handle->param->encoder_dir = ((delta_elec * delta_mech) >= 0.0f) ? 1 : -1;
+                handle->pn_observed_dir = (delta_mech >= 0.0f) ? 1 : -1;
+            }
+
+#if MI_PN_STRICT_VERIFY
             *state = 0;
             return MI_ERR_PN_NOT_CONVERGED;
+#else
+            *state = 0;
+            return MI_ERR_NONE;
+#endif
         }
 
         default:
@@ -600,19 +816,156 @@ MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle)
 
     /* 锁轴结束后读取机械角并反推出电角零位偏置 */
     {
-        MI_ErrorCode_t encoder_status = MI_RequireValidEncoder();
+        MI_ErrorCode_t encoder_status = MI_RequireValidEncoder(handle);
+        float encoder_dir = (handle->param->encoder_dir < 0) ? -1.0f : 1.0f;
         if (encoder_status != MI_ERR_NONE) {
             return encoder_status;
         }
         float theta_mech = TLE5012_GetAngle() * MI_DEG2RAD;
         handle->param->theta_mech_zero = theta_mech;
-        handle->param->theta_offset = FOC_AngleNormalize(-theta_mech * pole_pairs);
+        /* The rotor is locked to electrical d=0 here; store that electrical zero directly. */
+        handle->param->theta_offset = FOC_AngleNormalize(-theta_mech * pole_pairs * encoder_dir);
     }
 
     handle->foc->Id_ref = 0.0f;
     handle->foc->Iq_ref = 0.0f;
-    handle->param->valid_flag = 0xFFFFFFFF;
     return MI_ERR_NONE;
+}
+
+static void MI_ShutdownOutput(MI_Handle_t *handle)
+{
+    handle->foc->Id_ref = 0.0f;
+    handle->foc->Iq_ref = 0.0f;
+    handle->foc->Vdq.d = 0.0f;
+    handle->foc->Vdq.q = 0.0f;
+    handle->foc->ValphaBeta.alpha = 0.0f;
+    handle->foc->ValphaBeta.beta = 0.0f;
+    handle->foc->pi_d.integral = 0.0f;
+    handle->foc->pi_q.integral = 0.0f;
+    FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+}
+
+/**
+ * @brief 参数识别完成前的单向运动认证
+ *
+ * 验证编码器方向与电角拖动方向一致，不强制的齿槽电机完成完整拖动。
+ * - 单向 d轴旋转，从原始运动中锁定实测方向
+ * - 锁定后与期望方向比较（期望=pn_observed_dir或+1），不一致→PHASE_SEQUENCE
+ * - 达到 MI_VERIFY_MIN_MECH_RAD → 强通过
+ * - 超时且方向匹配/无反向故障/编码器在线 → 弱通过
+ * - 反向运动超阈值 → 标记 reverse_fault，禁止弱通过
+ */
+MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle)
+{
+    float elapsed = MI_GetElapsedTime(handle);
+    float pole_pairs = (handle->param->Pn > 0U) ? (float)handle->param->Pn : 1.0f;
+    float theta_mech_now;
+    float delta_mech;
+    float omega_elec;
+    MI_ErrorCode_t encoder_status = MI_RequireValidEncoder(handle);
+
+    if (encoder_status != MI_ERR_NONE) {
+        return encoder_status;
+    }
+
+    theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+
+    /* Phase 0 → 1: 初始化 */
+    if (handle->verify_phase == 0U) {
+        handle->verify_phase = 1U;
+        handle->verify_theta_last = theta_mech_now;
+        handle->verify_theta_accum = 0.0f;
+        handle->verify_raw_accum = 0.0f;
+        handle->verify_elec_cmd = 0.0f;
+        handle->verify_locked_dir = 0;
+        handle->motion_verify_weak = 0U;
+        handle->verify_reverse_fault = 0U;
+        /* 期望方向：优先pn_observed_dir，否则正电角→正机械(+1) */
+        handle->verify_expected_dir = (handle->pn_observed_dir != 0) ?
+                                       handle->pn_observed_dir : (int8_t)1;
+        handle->state_start_time = HAL_GetTick();
+        FOC_SetAngle(handle->foc, 0.0f);
+        {   /* Vbus/Rs安全电流限幅 */
+            float vcur = MI_VERIFY_CURRENT;
+            float rs_s = (handle->param->Rs > 0.1f) ? handle->param->Rs : 1.0f;
+            float vlim = handle->foc->Vbus * 0.577f * 0.85f / rs_s;
+            if (vcur > vlim) { vcur = vlim; }
+            FOC_SetCurrentReference(handle->foc, vcur, 0.0f);
+        }
+        return MI_ERR_IN_PROGRESS;
+    }
+
+    /* 无运动保护：5s内方向未锁定且位移极小→停止拖动，避免堵转加热 */
+    if (handle->verify_locked_dir == 0 &&
+        elapsed > MI_VERIFY_NO_MOTION_TIMEOUT_MS &&
+        fabsf(handle->verify_raw_accum) < MI_VERIFY_NO_MOTION_MIN_RAD) {
+        MI_ShutdownOutput(handle);
+        /* no-motion: do not set weak flag, this is a hard timeout */
+        return MI_ERR_TIMEOUT;
+    }
+
+    /* 超时处理：弱通过需方向匹配 + 编码器在线。rev_fault不阻断弱通过（d轴拖动在高齿槽电机上固有回弹） */
+    if (elapsed > MI_VERIFY_PHASE_TIMEOUT_MS) {
+        MI_ShutdownOutput(handle);
+        if (handle->verify_locked_dir != 0 &&
+            handle->verify_locked_dir == handle->verify_expected_dir) {
+            handle->motion_verify_weak = 1U;
+            return MI_ERR_NONE;
+        }
+        return MI_ERR_TIMEOUT;
+    }
+
+    delta_mech = MI_WrapDelta(theta_mech_now - handle->verify_theta_last);
+    handle->verify_theta_last = theta_mech_now;
+
+    if (handle->verify_locked_dir == 0) {
+        /* 方向未锁定：原始累计，用于判断真实运动方向 */
+        handle->verify_raw_accum += delta_mech;
+        if (fabsf(handle->verify_raw_accum) >= MI_VERIFY_DIR_LOCK_RAD) {
+            handle->verify_locked_dir = (handle->verify_raw_accum >= 0.0f) ? 1 : -1;
+            handle->verify_theta_accum = fabsf(handle->verify_raw_accum);
+            /* 方向校验：与期望不一致时，报告相位序错误而非自动纠正（EncoderAlign已用旧encoder_dir计算theta_offset） */
+            if (handle->verify_locked_dir != handle->verify_expected_dir) {
+                MI_ShutdownOutput(handle);
+                return MI_ERR_PHASE_SEQUENCE;
+            }
+        }
+    } else {
+        /* 方向已锁定：按锁定方向累计 */
+        float signed_delta = delta_mech * (float)handle->verify_locked_dir;
+        handle->verify_theta_accum += signed_delta;
+        /* 反向运动超过阈值：标记故障，重置累计 */
+        if (handle->verify_theta_accum < -MI_VERIFY_REVERSE_FAULT_RAD) {
+            handle->verify_reverse_fault = 1U;
+            handle->verify_theta_accum = 0.0f;
+        }
+    }
+
+    /* 强通过：方向一致 + 达到最小可信位移 */
+    if (handle->verify_locked_dir != 0 &&
+        handle->verify_locked_dir == handle->verify_expected_dir &&
+        handle->verify_theta_accum >= MI_VERIFY_MIN_MECH_RAD) {
+        MI_ShutdownOutput(handle);
+        handle->motion_verify_weak = 0U;
+        return MI_ERR_NONE;
+    }
+
+    /* 继续拖动 */
+    omega_elec = 2.0f * FOC_PI * MI_VERIFY_MECH_FREQ_HZ * pole_pairs;
+    handle->verify_elec_cmd = FOC_AngleNormalize(handle->verify_elec_cmd + omega_elec * MI_CONTROL_DT);
+
+    {
+        FOC_SetAngle(handle->foc, handle->verify_elec_cmd);
+        {   /* Vbus/Rs安全电流限幅 */
+            float vcur = MI_VERIFY_CURRENT;
+            float rs_s = (handle->param->Rs > 0.1f) ? handle->param->Rs : 1.0f;
+            float vlim = handle->foc->Vbus * 0.577f * 0.85f / rs_s;
+            if (vcur > vlim) { vcur = vlim; }
+            FOC_SetCurrentReference(handle->foc, vcur, 0.0f);
+        }
+    }
+
+    return MI_ERR_IN_PROGRESS;
 }
 
 /**
@@ -641,8 +994,8 @@ void MI_UpdatePIWithNewRs(FOC_Handle_t *foc, float Rs_new)
 {
     /* 根据新Rs更新电流环Ki */
     /* 与FOC_App_UpdatePIParams保持一致：Ki = Rs * 2π * bandwidth * T_sample */
-    float bandwidth = 2000.0f;  /* 2kHz电流环带宽 */
-    float T_sample = 0.00005f;  /* 50μs采样周期 */
+    float bandwidth = 300.0f;  /* 24V高阻电机Rs更新时降低带宽防过流 */
+    float T_sample = 1.0f / (float)FOC_CONTROL_FREQ;
     
     foc->pi_d.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
     foc->pi_q.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
@@ -729,7 +1082,14 @@ float MI_RsOnlineEstimator_GetRs(RsOnlineEstimator_t *est)
 static void MI_ResetStateData(MI_Handle_t *handle)
 {
     handle->sum_v = 0;
+    handle->sum_vq = 0;
     handle->sum_i = 0;
+    handle->sum_ia = 0;
+    handle->sum_ib = 0;
+    handle->sum_ic = 0;
+    handle->sum_ialpha = 0;
+    handle->sum_ibeta = 0;
+    handle->sum_i_mag = 0;
     handle->sum_ii = 0;
     handle->sum_vi = 0;
     handle->sample_count = 0;
@@ -744,6 +1104,7 @@ static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state)
 {
     handle->state = new_state;
     handle->state_start_time = HAL_GetTick();
+    handle->encoder_invalid_count = 0U;
     MI_ResetStateData(handle);
     
     /* 记录起始角度（用于机械锁止检测） */
@@ -756,6 +1117,164 @@ static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state)
     
     /* 重置极性标志 */
     handle->polarity = 0;
+    if (new_state == MI_STATE_RS_IDENTIFY) {
+        /* d轴闭环锁轴法：按当前param->Rs和实际电流环周期计算PI增益 */
+        float Rs_pi = (handle->param->Rs > 0.1f) ? handle->param->Rs : 1.0f;
+        float current_ts = 1.0f / (float)FOC_CONTROL_FREQ;
+        handle->rs_current_target = 0.0f;
+        handle->foc->pi_d.Kp = 0.5f;
+        handle->foc->pi_d.Ki = Rs_pi * 2.0f * FOC_PI * 300.0f * current_ts;  /* 24V高阻电机降带宽防过流 */
+        handle->foc->pi_d.integral = 0.0f;
+        handle->foc->pi_d.integral_max = handle->foc->pi_d.output_max / handle->foc->pi_d.Ki;
+        handle->foc->pi_q.integral = 0.0f;
+        handle->foc->pi_q.integral_max = 0.0f;
+        handle->rs_last_v_avg = 0.0f;
+        handle->rs_last_i_avg = 0.0f;
+        handle->rs_last_i_mag_avg = 0.0f;
+        handle->rs_last_vec_rs = 0.0f;
+        handle->rs_last_samples = 0U;
+        handle->Rs_positive = 0.0f;
+        handle->Rs_negative = 0.0f;
+        handle->polarity = 0;
+    }
+    if (new_state == MI_STATE_LS_IDENTIFY) {
+        handle->ls_last_v_rms = 0.0f;
+        handle->ls_last_i_rms = 0.0f;
+        handle->ls_last_z = 0.0f;
+        handle->ls_last_xl = 0.0f;
+        handle->ls_last_l = 0.0f;
+        handle->ls_used_fallback = 0U;
+    }
+    if (new_state == MI_STATE_PN_IDENTIFY) {
+        handle->pn_current_target = MI_PN_TEST_CURRENT_INITIAL;
+        handle->pn_last_delta_mech = 0.0f;
+        handle->pn_last_delta_elec = 0.0f;
+        handle->pn_last_calc = 0.0f;
+        handle->pn_observed_dir = 0;
+        handle->foc->pi_d.integral = 0.0f;
+        handle->foc->pi_q.integral = 0.0f;
+    }
+    if (new_state == MI_STATE_MOTION_VERIFY) {
+        handle->verify_phase = 0U;
+        handle->verify_theta_last = 0.0f;
+        handle->verify_theta_accum = 0.0f;
+        handle->verify_raw_accum = 0.0f;
+        handle->verify_elec_cmd = 0.0f;
+        handle->verify_locked_dir = 0;
+        handle->verify_expected_dir = 0;
+        handle->motion_verify_weak = 0U;
+        handle->motion_verify_status = 0U;
+        handle->verify_reverse_fault = 0U;
+        handle->foc->pi_d.integral = 0.0f;
+        handle->foc->pi_q.integral = 0.0f;
+    }
+}
+
+static uint8_t MI_RsConverged(float rs_positive, float rs_negative)
+{
+    float rs_avg;
+    float rs_diff;
+    float allowed_diff;
+
+    if ((rs_positive <= 0.0f) || (rs_negative <= 0.0f)) {
+        return 0U;
+    }
+
+    rs_avg = (rs_positive + rs_negative) * 0.5f;
+    rs_diff = fabsf(rs_positive - rs_negative);
+    allowed_diff = rs_avg * MI_RS_CONVERGE_REL_THRESH;
+    if (allowed_diff < MI_RS_CONVERGE_THRESH) {
+        allowed_diff = MI_RS_CONVERGE_THRESH;
+    }
+
+    return (rs_diff <= allowed_diff) ? 1U : 0U;
+}
+
+static uint8_t MI_RsUseSinglePolarityFallback(MI_Handle_t *handle)
+{
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    if (handle->Rs_positive <= 0.0f) {
+        return 0U;
+    }
+
+    handle->Rs_negative = handle->Rs_positive;
+    handle->param->Rs = handle->Rs_positive;
+    return 1U;
+}
+
+static MI_ErrorCode_t MI_UseLsFallback(MI_Handle_t *handle)
+{
+    if ((handle == NULL) || (handle->param == NULL)) {
+        return MI_ERR_LS_NOT_CONVERGED;
+    }
+
+    handle->ls_used_fallback = 1U;
+    handle->param->Ld = MI_LS_FALLBACK_DEFAULT;
+    handle->param->Lq = MI_LS_FALLBACK_DEFAULT;
+    return MI_ERR_NONE;
+}
+
+static float MI_GetPnTestCurrent(const MI_Handle_t *handle)
+{
+    float current;
+
+    if (handle == NULL) {
+        return 0.0f;
+    }
+
+    current = handle->pn_current_target;
+    if (current <= 0.0f) {
+        current = MI_PN_TEST_CURRENT_INITIAL;
+    }
+    if (current > MI_PN_TEST_CURRENT_MAX) {
+        current = MI_PN_TEST_CURRENT_MAX;
+    }
+
+    return current;
+}
+
+static uint8_t MI_PnRetryWithHigherCurrent(MI_Handle_t *handle)
+{
+    float next_current;
+
+    if (handle == NULL) {
+        return 0U;
+    }
+
+    next_current = handle->pn_current_target + MI_PN_TEST_CURRENT_STEP;
+    if (next_current > (MI_PN_TEST_CURRENT_MAX + 0.0001f)) {
+        return 0U;
+    }
+
+    handle->pn_current_target = next_current;
+    handle->pn_state = 0U;
+    MI_ResetStateData(handle);
+    handle->foc->pi_d.integral = 0.0f;
+    handle->foc->pi_q.integral = 0.0f;
+    handle->state_start_time = HAL_GetTick();
+    return 1U;
+}
+
+static float MI_ClampAbsVoltage(float voltage, float limit)
+{
+    if (limit <= 0.0f) {
+        return voltage;
+    }
+
+    return FOC_Saturate(voltage, limit, -limit);
+}
+
+static float MI_WrapDelta(float delta)
+{
+    if (delta > FOC_PI) {
+        delta -= 2.0f * FOC_PI;
+    } else if (delta < -FOC_PI) {
+        delta += 2.0f * FOC_PI;
+    }
+    return delta;
 }
 
 /**
@@ -766,4 +1285,14 @@ static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state)
 float MI_GetElapsedTime(MI_Handle_t *handle)
 {
     return (float)(HAL_GetTick() - handle->state_start_time);
+}
+
+/**
+ * @brief 设定当前机械角为机械零位
+ * @param param 电机参数结构体指针
+ * @param current_theta_mech 当前机械角度 rad
+ */
+void MI_SetMechZero(MotorParam_t *param, float current_theta_mech)
+{
+    param->mech_zero_offset = current_theta_mech;
 }

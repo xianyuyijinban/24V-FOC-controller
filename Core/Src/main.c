@@ -43,6 +43,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define FOC_EXT_SPI_POWERUP_DELAY_MS 20U
+#define FOC_PWR_VOSRDY_TIMEOUT_MS 10U
 
 /* USER CODE END PD */
 
@@ -54,7 +55,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static uint8_t s_system_clock_fallback_to_hsi = 0U;
 
 
 /* USER CODE END PV */
@@ -63,11 +64,137 @@
 void SystemClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
+static void Main_RecordDrvStartupCommFault(void);
+static void Main_RecordStartupFault(uint32_t faultBit, FOC_FaultCode_t faultCode);
+static void Main_BootUartSend(const char *text, uint16_t len);
+static HAL_StatusTypeDef SystemClock_TryConfigureHse(void);
+static HAL_StatusTypeDef SystemClock_TryConfigureHsi(void);
+static HAL_StatusTypeDef SystemClock_ApplyCommonBusConfig(void);
+static HAL_StatusTypeDef SystemClock_WaitForVosReady(uint32_t timeoutMs);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void Main_RecordDrvStartupCommFault(void)
+{
+  drv8350s.runtime.spiError = 1U;
+  drv8350s.runtime.commFaultActive = 1U;
+  drv8350s.runtime.commValidated = 0U;
+  drv8350s.runtime.isFaultActive = 1U;
+  drv8350s.runtime.faultFlags |= DRV8350S_COMM_FAULT_BIT;
+  drv8350s.runtime.lastRxFrame = 0xFFFFU;
+  drv8350s.runtime.regFaultStatus1 = 0U;
+  drv8350s.runtime.regVgsStatus2 = 0U;
+  drv8350s.runtime.regDriverCtrl = 0U;
+  drv8350s.runtime.regOcpCtrl = 0U;
+
+  g_foc_app.fault_code = FOC_FAULT_DRV8350S;
+  g_foc_app.state = FOC_STATE_FAULT;
+}
+
+static void Main_RecordStartupFault(uint32_t faultBit, FOC_FaultCode_t faultCode)
+{
+  drv8350s.runtime.isFaultActive = 1U;
+  drv8350s.runtime.faultFlags |= faultBit;
+  drv8350s.runtime.commValidated = 0U;
+
+  g_foc_app.fault_code = faultCode;
+  g_foc_app.state = FOC_STATE_FAULT;
+}
+
+static void Main_BootUartSend(const char *text, uint16_t len)
+{
+  if ((text == NULL) || (len == 0U) || (huart1.Instance != USART1)) {
+    return;
+  }
+
+  (void)HAL_UART_Transmit(&huart1, (uint8_t*)text, len, 20U);
+}
+
+static HAL_StatusTypeDef SystemClock_ApplyCommonBusConfig(void)
+{
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
+                                RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+
+  return HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4);
+}
+
+static HAL_StatusTypeDef SystemClock_WaitForVosReady(uint32_t timeoutMs)
+{
+  uint32_t start = HAL_GetTick();
+
+  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY))
+  {
+    if ((HAL_GetTick() - start) > timeoutMs)
+    {
+      return HAL_TIMEOUT;
+    }
+  }
+
+  return HAL_OK;
+}
+
+static HAL_StatusTypeDef SystemClock_TryConfigureHse(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 5;
+  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 5;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_2;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
+
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  return SystemClock_ApplyCommonBusConfig();
+}
+
+static HAL_StatusTypeDef SystemClock_TryConfigureHsi(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 60;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 5;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
+
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  return SystemClock_ApplyCommonBusConfig();
+}
 
 /* USER CODE END 0 */
 
@@ -77,8 +204,8 @@ static void MPU_Config(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
+  uint8_t startupControlReady = 1U;
 
   /* USER CODE END 1 */
 
@@ -94,23 +221,35 @@ int main(void)
 
   /* USER CODE END Init */
 
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  Main_BootUartSend("BOOT,EARLY_UART\r\n", 17U);
+
   /* Configure the system clock */
   SystemClock_Config();
+  if (s_system_clock_fallback_to_hsi != 0U)
+  {
+    Main_BootUartSend("BOOT,CLOCK_HSI_FALLBACK\r\n", 25U);
+  }
+  Main_BootUartSend("BOOT,CLOCK_READY\r\n", 18U);
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_DMA_Init();
+  /* DEBUG: PB0 scope probe for TIM1_UP ISR frequency measurement */
+  { GPIO_InitTypeDef g = {0}; g.Pin = GPIO_PIN_0; g.Mode = GPIO_MODE_OUTPUT_PP; g.Pull = GPIO_NOPULL; g.Speed = GPIO_SPEED_FREQ_VERY_HIGH; HAL_GPIO_Init(GPIOB, &g); }
+  MX_USART1_UART_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
   MX_SPI1_Init();
-  MX_USART1_UART_Init();
+  Main_BootUartSend("BOOT,USART_READY\r\n", 18U);
   MX_FDCAN1_Init();
   MX_I2C1_Init();
   MX_SPI3_Init();
+  Main_BootUartSend("BOOT,PERIPH_READY\r\n", 19U);
   /* USER CODE BEGIN 2 */
   HAL_Delay(FOC_EXT_SPI_POWERUP_DELAY_MS);
   TLE5012_Init();
@@ -121,77 +260,101 @@ int main(void)
   
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
+  Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   
 	if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t*)urR_data, sizeof(urR_data)) != HAL_OK) {
-		Error_Handler();
+		Main_RecordStartupFault(DRV8350S_FW_UART_RX_FAULT_BIT, FOC_FAULT_PARAM_INVALID);
 	}
 	/* 仅使用IDLE/TC事件，禁用HT回调避免重复处理 */
-	__HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
+	if (huart1.hdmarx != NULL) {
+		__HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
+	}
 	
 	/* ADC校准 - STM32H7必须在使用前进行校准 */
 	if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET, ADC_SINGLE_ENDED) != HAL_OK) {
-		Error_Handler();
+		Main_RecordStartupFault(DRV8350S_FW_ADC_CAL_FAULT_BIT, FOC_FAULT_ADC_SAMPLING);
+		startupControlReady = 0U;
 	}
 	
 	/* 初始化ADC采样模块 */
-	ADC_Sampling_Init(&hadc1);
+	if (ADC_Sampling_Init(&hadc1) != 0) {
+		Main_RecordStartupFault(DRV8350S_FW_ADC_CAL_FAULT_BIT, FOC_FAULT_ADC_SAMPLING);
+		startupControlReady = 0U;
+	}
 
 	/* 提前启动TIM1计数器和CH4内部比较输出，仅用于ADC触发。
 	 * 这里不启动PWM通道，也不使能更新中断，因此不会驱动功率级。
 	 */
-	if (HAL_TIM_Base_Start(&htim1) != HAL_OK) {
-		Error_Handler();
+	if (startupControlReady && (HAL_TIM_Base_Start(&htim1) != HAL_OK)) {
+		Main_RecordStartupFault(DRV8350S_FW_TIM_TRIG_FAULT_BIT, FOC_FAULT_PARAM_INVALID);
+		startupControlReady = 0U;
 	}
-	if (HAL_TIM_OC_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
-		Error_Handler();
+	if (startupControlReady && (HAL_TIM_OC_Start(&htim1, TIM_CHANNEL_4) != HAL_OK)) {
+		Main_RecordStartupFault(DRV8350S_FW_TIM_TRIG_FAULT_BIT, FOC_FAULT_PARAM_INVALID);
+		startupControlReady = 0U;
 	}
 	
 	/* 启动ADC DMA采样 */
-	if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_data, 4) != HAL_OK) {
-		Error_Handler();
+	if (startupControlReady && (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_data, 4) != HAL_OK)) {
+		Main_RecordStartupFault(DRV8350S_FW_ADC_DMA_FAULT_BIT, FOC_FAULT_ADC_SAMPLING);
+		startupControlReady = 0U;
 	}
 	/* 仅在DMA全传输完成时处理采样，避免半缓冲期读到混合帧 */
 	if (hadc1.DMA_Handle != NULL) {
 		__HAL_DMA_DISABLE_IT(hadc1.DMA_Handle, DMA_IT_HT);
 	}
 
-	/* ADC电流零点校准（超时会自动回退到默认偏置） */
-	(void)ADC_Sampling_Calibrate(200);
-	
 	if (DRV8350S_Init(&drv8350s, &hspi1, &htim1, 
                       GPIOA, 
-                      GPIO_PIN_4) != 0) {
-        Error_Handler();
-    }
+                      GPIO_PIN_4) == 0) {
 
-	/* 仅给DRV8350S芯片上电用于寄存器配置/故障诊断，栅极仍保持关闭。 */
-	HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
-	HAL_Delay(2);
+		/* 仅给DRV8350S芯片上电用于寄存器配置/故障诊断，栅极仍保持关闭。 */
+		HAL_GPIO_WritePin(GPIOE, GPIO_PIN_14, GPIO_PIN_SET);
+		HAL_Delay(2);
 											
-	DRV8350S_Config_t config;
-	DRV8350S_SetDefaultConfig(&config);
+		DRV8350S_Config_t config;
+		DRV8350S_SetDefaultConfig(&config);
 
-	/* 根据你的硬件调整 */
-	config.pwmMode = DRV8350S_PWM_MODE_6X;           /* 6x PWM 模式 */
-	config.idriveP_hs = DRV8350S_IDRIVE_1000MA;      /* 1A source */
-	config.idriveN_hs = DRV8350S_IDRIVE_1000MA;      /* 1A sink */
-	config.tdrive = DRV8350S_TDRIVE_4000NS;          /* 4us */
-	config.ocpMode = DRV8350S_OCP_MODE_RETRY;        /* retry mode */
-	config.vdsLvl = 0x01;                            /* 0.07V typ */
+		/* 根据你的硬件调整 */
+		config.pwmMode = DRV8350S_PWM_MODE_6X;           /* 6x PWM 模式 */
+		config.idriveP_hs = DRV8350S_IDRIVE_1000MA;      /* 1A source */
+		config.idriveN_hs = DRV8350S_IDRIVE_1000MA;      /* 1A sink */
+		config.tdrive = DRV8350S_TDRIVE_4000NS;          /* 4us */
+		config.ocpMode = DRV8350S_OCP_MODE_RETRY;        /* retry mode */
+		config.vdsLvl = 0x09;                            /* 0.6V typ，避免12V台架开环识别阶段过早触发VDS OCP */
 
-	if (DRV8350S_Configure(&drv8350s, &config) != 0) {
-			Error_Handler();
+		if (DRV8350S_Configure(&drv8350s, &config) == 0) {
+			/* 上电默认保持功率级关闭：
+			 * 1) 关闭栅极驱动，确保MOS不导通
+			 * 2) 保持DRV_EN上电，便于持续诊断和故障上传
+			 * 真正使能由 FOC_App_Enable() 统一管理
+			 */
+			(void)DRV8350S_DisableGateDrivers(&drv8350s);
+		} else {
+			Main_RecordDrvStartupCommFault();
+		}
+	} else {
+		Main_RecordDrvStartupCommFault();
 	}
-	
-	/* 上电默认保持功率级关闭：
-	 * 1) 关闭栅极驱动，确保MOS不导通
-	 * 2) 保持DRV_EN上电，便于持续诊断和故障上传
-	 * 真正使能由 FOC_App_Enable() 统一管理
-	 */
-	(void)DRV8350S_DisableGateDrivers(&drv8350s);
+  Main_BootUartSend((g_foc_app.fault_code == FOC_FAULT_NONE) ? "BOOT,DRV_READY\r\n" : "BOOT,DRV_FAIL\r\n",
+                    (g_foc_app.fault_code == FOC_FAULT_NONE) ? 16U : 15U);
 
-  __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
-  __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
+	/* ADC电流零点校准（超时会自动回退到默认偏置）。
+	 * 必须放在DRV_EN上电并完成寄存器配置之后，确保电流采样前端偏置已经稳定。
+	 */
+	if (startupControlReady) {
+		if (ADC_Sampling_Calibrate(200) != 0) {
+			Main_RecordStartupFault(DRV8350S_FW_ADC_CAL_FAULT_BIT, FOC_FAULT_ADC_SAMPLING);
+			startupControlReady = 0U;
+		}
+	}
+  Main_BootUartSend(startupControlReady ? "BOOT,ADC_READY\r\n" : "BOOT,ADC_FAIL\r\n",
+                    startupControlReady ? 16U : 15U);
+
+  if (startupControlReady) {
+    __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+    __HAL_TIM_ENABLE_IT(&htim1, TIM_IT_UPDATE);
+  }
   
   /* 注意：速度环/位置环已移至TIM1中断分频：
    * - 速度环: 2kHz (20kHz/10)
@@ -201,6 +364,7 @@ int main(void)
   // HAL_TIM_Base_Start_IT(&htim2);  /* 已禁用 - 使用TIM1分频代替 */
   
   /* USER CODE END 2 */
+  Main_BootUartSend("BOOT,MAIN_LOOP\r\n", 16U);
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -242,9 +406,6 @@ int main(void)
   */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
-
   /** Supply configuration update enable
   */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
@@ -253,50 +414,29 @@ void SystemClock_Config(void)
   */
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
-
-  __HAL_RCC_SYSCFG_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
-
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
-
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 60;
-  RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 5;
-  RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
-  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  if (SystemClock_WaitForVosReady(FOC_PWR_VOSRDY_TIMEOUT_MS) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+  __HAL_RCC_SYSCFG_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (SystemClock_WaitForVosReady(FOC_PWR_VOSRDY_TIMEOUT_MS) != HAL_OK)
   {
     Error_Handler();
+  }
+
+  s_system_clock_fallback_to_hsi = 0U;
+
+  if (SystemClock_TryConfigureHse() != HAL_OK)
+  {
+    s_system_clock_fallback_to_hsi = 1U;
+    HAL_RCC_DeInit();
+    if (SystemClock_TryConfigureHsi() != HAL_OK)
+    {
+      Error_Handler();
+    }
   }
 }
 
@@ -341,6 +481,7 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  Main_BootUartSend("BOOT,ERROR_HANDLER\r\n", 20U);
   __disable_irq();
   while (1)
   {

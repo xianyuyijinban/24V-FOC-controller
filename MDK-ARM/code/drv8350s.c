@@ -62,6 +62,9 @@ int8_t DRV8350S_Init(DRV8350S_Handle_t* handle,
     handle->runtime.lastRxFrame = 0U;
     handle->runtime.commFaultActive = 0U;
     handle->runtime.commValidated = 0U;
+    handle->runtime.latchedFaultFlags = 0U;
+    handle->runtime.latchedFaultStatus1 = 0U;
+    handle->runtime.latchedVgsStatus2 = 0U;
 
     return 0;
 }
@@ -138,6 +141,9 @@ int8_t DRV8350S_Configure(DRV8350S_Handle_t* handle, const DRV8350S_Config_t* co
     handle->runtime.commValidated = 0U;
     handle->runtime.lastRxFrame = 0U;
     handle->runtime.faultFlags = 0U;
+    handle->runtime.latchedFaultFlags = 0U;
+    handle->runtime.latchedFaultStatus1 = 0U;
+    handle->runtime.latchedVgsStatus2 = 0U;
     handle->runtime.isFaultActive = 0U;
 
     /* First, unlock registers */
@@ -606,6 +612,11 @@ uint32_t DRV8350S_GetFaultFlags(DRV8350S_Handle_t* handle)
     return handle->runtime.faultFlags;
 }
 
+uint8_t DRV8350S_ShouldHardShutdown(uint32_t faultFlags)
+{
+    return ((faultFlags & DRV8350S_HARD_SHUTDOWN_FAULT_MASK) != 0U) ? 1U : 0U;
+}
+
 void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle)
 {
     uint32_t faults = 0U;
@@ -644,6 +655,12 @@ void DRV8350S_UpdateFaultState(DRV8350S_Handle_t* handle)
         handle->runtime.commFaultActive = 0U;
     } else {
         handle->runtime.commFaultActive = 0U;
+    }
+
+    if ((faults != 0U) && (handle->runtime.latchedFaultFlags == 0U)) {
+        handle->runtime.latchedFaultFlags = faults;
+        handle->runtime.latchedFaultStatus1 = handle->runtime.regFaultStatus1;
+        handle->runtime.latchedVgsStatus2 = handle->runtime.regVgsStatus2;
     }
 
     handle->runtime.faultFlags = faults;
@@ -905,6 +922,12 @@ static void DRV8350S_ParseFaultStatus(DRV8350S_Handle_t* handle)
     if (fs2 & (1U << 2))  faults |= DRV8350S_VGS_LB_BIT;
     if (fs2 & (1U << 1))  faults |= DRV8350S_VGS_HC_BIT;
     if (fs2 & (1U << 0))  faults |= DRV8350S_VGS_LC_BIT;
+
+    if ((faults != 0U) && (handle->runtime.latchedFaultFlags == 0U)) {
+        handle->runtime.latchedFaultFlags = faults;
+        handle->runtime.latchedFaultStatus1 = fs1;
+        handle->runtime.latchedVgsStatus2 = fs2;
+    }
 
     handle->runtime.faultFlags = faults;
     handle->runtime.isFaultActive = (faults != 0);

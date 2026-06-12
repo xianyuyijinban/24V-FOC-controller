@@ -30,7 +30,7 @@ extern "C" {
 #define FOC_FF_ENABLE_FRICTION   1   /* P3: 库仑+粘滞摩擦前馈 (Phase D2: enabled) */
 #define FOC_FF_COULOMB_DEADBAND_RADPS 0.05f /* 库仑摩擦死区速度 */
 #define FOC_FF_FRICTION_MAX_A    0.50f /* 摩擦前馈最大补偿电流 A */
-#define FOC_FF_ENABLE_COGGING    0   /* P0: 齿槽转矩LUT前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_ENABLE_COGGING    1   /* P0: 齿槽转矩LUT前馈 (Phase P0: collect + diagnose) */
 #define FOC_COGGING_LUT_SIZE     264 /* LCM(24,22) for 24N22P motor */
 #define FOC_FF_COGGING_MAX_A     0.30f /* 齿槽前馈最大补偿电流 A */
 #define FOC_FF_ENABLE_OBSERVER   0   /* P4: 负载转矩观测器 (默认关闭，需调参) */

@@ -58,11 +58,11 @@ extern "C" {
 #define MI_PN_MIN_MECH_DELTA_RAD 0.15f      /* Minimum accumulated mechanical travel for PN diagnostics. */
 
 /* 转动惯量识别 — 恒电流加速+滑行法 */
-#define MI_J_ACCEL_IQ_A             0.60f   /* 加速电流 A (moderate: verified with 1.0A) */
+#define MI_J_ACCEL_IQ_A             0.45f   /* 加速电流 A (V4回调: 已验证0.60/1.0可行) */
 #define MI_J_ACCEL_SETTLE_MS        100     /* 加速前稳定时间 ms */
 #define MI_J_ACCEL_TIMEOUT_MS       5000    /* 加速超时 ms */
-#define MI_J_ACCEL_SPEED_LOW_RADPS  0.8f    /* 测量窗下限 rad/s */
-#define MI_J_ACCEL_SPEED_HIGH_RADPS 3.0f    /* 测量窗上限 rad/s */
+#define MI_J_ACCEL_SPEED_LOW_RADPS  1.0f    /* 测量窗下限 rad/s */
+#define MI_J_ACCEL_SPEED_HIGH_RADPS 4.0f    /* 测量窗上限 rad/s */
 #define MI_J_COAST_TIMEOUT_MS       6000    /* 滑行超时 ms */
 #define MI_J_VALID_MIN              1e-7f   /* J最小有效值 kg·m² */
 #define MI_J_VALID_MAX              0.1f    /* J最大有效值 kg·m² */

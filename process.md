@@ -359,3 +359,14 @@
 - Commit: f0c5218
 - 遗留：UART FAULT_DETAIL长文本被N-frame交叠破坏ParamDiag行，J精确值不可读；需修UART分块或加JDiag短响应命令
 - Recurrence policy: 新增识别状态时必须在foc_app.c两处旁路列表中注册，否则电流闭环不会执行。
+
+## [2026-06-13 01:00] P0齿槽LUT采集启动 + COGGING direct_svpwm修复
+- Problem: COGGING阶段运行33s但LUT始终cog_valid=0。根因与J阶段同类：`MI_STATE_COGGING_IDENTIFY`不在`identify_direct_svpwm`列表，开环拖动电压被FOC_Run覆盖；同时Idq未更新（Park变换只在FOC_Run内执行），binning读到过期Iq。
+- Resolution:
+  1. `foc_app.c` direct_svpwm列表加`MI_STATE_COGGING_IDENTIFY`
+  2. `foc_app.c` current_feedback_valid旁路加`MI_STATE_COGGING_IDENTIFY`
+  3. `foc_app.c` identify路径新增Park变换调用，确保Idq实时更新
+  4. JDIAG扩展cog_valid/cog_size/cog_min/cog_max字段
+- 当前状态：固件v2已烧录，COGGING阶段33s执行完毕，但cog_valid仍为0——LUT保存逻辑或采集数据有效性问题待查。
+- 遗留：Param_SaveCoggingLUT返回值检查、采集bin填充率诊断、COGGING_TIMEOUT/电压参数调整
+- Commit: (pending)

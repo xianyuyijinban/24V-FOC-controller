@@ -348,3 +348,14 @@
 - Prevention: PN识别中enc_dir应始终从pn_observed_dir推断，不依赖δθ_elec符号。识别后必须执行CMD:HOME设零位。任何修改motor_identify.c PN路径后需重跑 `build.ps1 + pyocd load + reidentify + HOME + PREF序列` 验证。
 - Commit: (pending)
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-06-12 23:10] J识别闭环电流通路修复
+- Problem: J识别阶段Iq_ref=1.0A但实测Iq≈0.021A，电机只能转到~0.2rad/s，永远跨不过最低阈值0.5rad/s。根因：`foc_app.c` 的 `current_feedback_valid` 旁路列表（RS/LS/ENCODER_ALIGN/MOTION_VERIFY）没有 `MI_STATE_J_IDENTIFY`，低边窗口门控在J阶段持续清零电压输出，电流环从未执行。
+- Resolution:
+  1. `foc_app.c` 两处加 `MI_STATE_J_IDENTIFY`：`current_feedback_valid` 旁路（line 344）+ 电流重构旁路（line 375）
+  2. `motor_identify.c`：`speed_abs = fabsf(j_speed_mech)` 替代所有阈值比较（enc_dir=-1时机械速度为负）；`MI_EnterState(MI_STATE_J_IDENTIFY)` 清零 j_state/speed_mech/theta_prev/accel_*/coast_*
+  3. `motor_identify.h`：J参数中间档 IQ=0.60A, LOW=0.8, HIGH=3.0 rad/s, TIMEOUT=5s（已验证1.0A可行后回调）
+- 验证：J阶段从<1s变为完整5s（加速+滑行），P2惯性门禁 blk=1→blk=0，P3摩擦前馈@3rad/s = 0.051A（B已识别非零）
+- Commit: f0c5218
+- 遗留：UART FAULT_DETAIL长文本被N-frame交叠破坏ParamDiag行，J精确值不可读；需修UART分块或加JDiag短响应命令
+- Recurrence policy: 新增识别状态时必须在foc_app.c两处旁路列表中注册，否则电流闭环不会执行。

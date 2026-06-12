@@ -249,6 +249,7 @@ typedef struct {
     float j_accel_v_end;        /* 测量窗口结束速度 rad/s */
     uint32_t j_accel_t_start;   /* 测量窗口起始时间 ms */
     uint32_t j_accel_t_end;     /* 测量窗口结束时间 ms */
+    uint32_t j_accel_cycle_start; /* 测量窗口起始控制周期计数 */
     float j_coast_v_start;      /* 滑行起始速度 rad/s */
     float j_coast_v_end;        /* 滑行结束速度 rad/s */
     uint32_t j_coast_t_start;   /* 滑行起始时间 ms */

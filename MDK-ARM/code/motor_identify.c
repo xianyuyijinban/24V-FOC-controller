@@ -965,11 +965,13 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
         handle->j_accel_iq_sum += handle->foc->Idq.q;
         handle->j_accel_iq_count += 1.0f;
 
-        /* Speed crosses LOW threshold (abs) → record window start */
+        /* Speed crosses LOW threshold (abs) → record window start.
+         * Use j_accel_iq_count (control cycles) for sub-ms timing resolution. */
         if ((handle->j_accel_t_start == 0U) &&
             (speed_abs >= MI_J_ACCEL_SPEED_LOW_RADPS)) {
             handle->j_accel_v_start = speed_abs;
             handle->j_accel_t_start = now_ms;
+            handle->j_accel_cycle_start = (uint32_t)handle->j_accel_iq_count;
         }
 
         /* Speed crosses HIGH threshold (abs) → record window end, compute J */
@@ -979,11 +981,13 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
             handle->j_accel_v_end = speed_abs;
             handle->j_accel_t_end = now_ms;
 
-            elapsed_s = (float)(handle->j_accel_t_end - handle->j_accel_t_start) * 0.001f;
-            if ((elapsed_s > 0.01f) && (handle->j_accel_iq_count > 0.0f)) {
+            /* elapsed from control cycles (50us each at 20kHz) */
+            elapsed_s = (float)((uint32_t)handle->j_accel_iq_count - handle->j_accel_cycle_start)
+                      / (float)FOC_CONTROL_FREQ;
+            if ((elapsed_s > 0.0001f) && (handle->j_accel_iq_count > 0.0f)) {
                 float Iq_avg = handle->j_accel_iq_sum / handle->j_accel_iq_count;
                 float dv = handle->j_accel_v_end - handle->j_accel_v_start;
-                if (dv > 0.1f) {
+                if (dv > 0.05f) {
                     handle->param->J = Kt * fabsf(Iq_avg) * elapsed_s / dv;
                     if (handle->param->J < MI_J_VALID_MIN) handle->param->J = MI_J_VALID_MIN;
                     if (handle->param->J > MI_J_VALID_MAX) handle->param->J = MI_J_VALID_MAX;
@@ -1607,6 +1611,7 @@ static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state)
     if (new_state == MI_STATE_J_IDENTIFY) {
         handle->j_state = 0U;
         handle->j_speed_mech = 0.0f;
+        handle->j_accel_cycle_start = 0U;
         handle->j_theta_prev = 0.0f;
         handle->j_theta_prev_init = 0U;
         handle->j_accel_iq_sum = 0.0f;

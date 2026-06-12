@@ -1253,7 +1253,7 @@ void DrvUart_Process(void)
         }
     }
 
-    if (!s_txBusy && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
+    if (!s_txBusy && s_faultDetailLen == 0U && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_NORMAL);
         len = DrvUart_FormatPhaseCurrent(&packet, s_txBuf, DRV_UART_BUF_SIZE);
         if (len > 0) {
@@ -1264,7 +1264,7 @@ void DrvUart_Process(void)
         }
     }
 
-    if (!s_txBusy && (currentTime - s_lastUploadTime) >= s_uploadInterval) {
+    if (!s_txBusy && s_faultDetailLen == 0U && (currentTime - s_lastUploadTime) >= s_uploadInterval) {
         /* Runtime telemetry continues in fault state so the GUI can still plot angle/current. */
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_NORMAL);
         
@@ -1340,6 +1340,41 @@ bool DrvUart_UploadFault(void)
         return DrvUart_StartSend(len);
     }
     
+    return false;
+}
+
+/**
+ * @brief Upload J/B identification diagnostic compact line
+ */
+bool DrvUart_UploadJDiag(void)
+{
+    extern FOC_AppHandle_t g_foc_app;
+    extern MI_Handle_t g_mi_handle;  /* may not exist — use g_foc_app.mi_handle */
+    int16_t len;
+    char jText[20], bText[20], tcText[20];
+
+    if (s_huart == NULL || s_drvHandle == NULL) {
+        return false;
+    }
+
+    if (s_txBusy) {
+        return false;
+    }
+
+    DrvUart_FormatFixed(jText, sizeof(jText), g_foc_app.motor_param.J, 8U);
+    DrvUart_FormatFixed(bText, sizeof(bText), g_foc_app.motor_param.B, 8U);
+    DrvUart_FormatFixed(tcText, sizeof(tcText), g_foc_app.motor_param.Tc, 6U);
+
+    len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
+                   "JDIAG,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX\r\n",
+                   jText, bText, tcText,
+                   (int)g_foc_app.motor_param.encoder_dir,
+                   (unsigned long)g_foc_app.motor_param.valid_flag);
+
+    if (len > 0 && len < DRV_UART_BUF_SIZE) {
+        return DrvUart_StartSend((uint16_t)len);
+    }
+
     return false;
 }
 

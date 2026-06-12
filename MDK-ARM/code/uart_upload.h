@@ -254,6 +254,12 @@ void DrvUart_UploadImmediate(void);
 bool DrvUart_UploadFault(void);
 
 /**
+ * @brief 上传J/B识别诊断短报文（非阻塞）
+ * @return true 开始发送, false 发送忙
+ */
+bool DrvUart_UploadJDiag(void);
+
+/**
  * @brief 设置上传使能/禁用
  */
 void DrvUart_SetEnable(bool enable);

@@ -829,6 +829,10 @@ static void UART_CommandExecute(const char *cmd)
         DrvUart_UploadImmediate();
         return;
     }
+    if (strcmp(cmd, "CMD:JDIAG") == 0) {
+        DrvUart_UploadJDiag();
+        return;
+    }
 
     if (sscanf(cmd, "CMD:UNLOCK,%ld", &int_arg) == 1) {
         if (int_arg != 0) {

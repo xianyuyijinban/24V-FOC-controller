@@ -342,6 +342,7 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         handle->enable_identify &&
         (handle->mi_handle.state == MI_STATE_LS_IDENTIFY ||
          handle->mi_handle.state == MI_STATE_RS_IDENTIFY ||
+         handle->mi_handle.state == MI_STATE_J_IDENTIFY ||
          handle->mi_handle.state == MI_STATE_ENCODER_ALIGN ||
          handle->mi_handle.state == MI_STATE_MOTION_VERIFY)) {
         current_feedback_valid = 1U;
@@ -372,6 +373,7 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
           (handle->mi_handle.state == MI_STATE_LS_IDENTIFY ||
            handle->mi_handle.state == MI_STATE_RS_IDENTIFY ||
            handle->mi_handle.state == MI_STATE_ENCODER_ALIGN ||
+           handle->mi_handle.state == MI_STATE_J_IDENTIFY ||
            handle->mi_handle.state == MI_STATE_MOTION_VERIFY)) &&
         (low_side_valid_count == 2U)) {
         if (adc->lowSideValidA == 0U) {

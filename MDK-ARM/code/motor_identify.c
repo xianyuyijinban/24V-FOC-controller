@@ -925,6 +925,9 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
                              + alpha_j * (speed_mech_now - handle->j_speed_mech);
     }
 
+    /* Use absolute speed for thresholds — enc_dir may cause negative rotation. */
+    float speed_abs = fabsf(handle->j_speed_mech);
+
     Kt = handle->param->Ke;  /* N·m/A = V/(rad/s) for PMSM */
     if (Kt < 1e-10f) {
         /* Fallback: no valid Ke, use defaults */
@@ -962,18 +965,18 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
         handle->j_accel_iq_sum += handle->foc->Idq.q;
         handle->j_accel_iq_count += 1.0f;
 
-        /* Speed crosses LOW threshold → record window start */
+        /* Speed crosses LOW threshold (abs) → record window start */
         if ((handle->j_accel_t_start == 0U) &&
-            (handle->j_speed_mech >= MI_J_ACCEL_SPEED_LOW_RADPS)) {
-            handle->j_accel_v_start = handle->j_speed_mech;
+            (speed_abs >= MI_J_ACCEL_SPEED_LOW_RADPS)) {
+            handle->j_accel_v_start = speed_abs;
             handle->j_accel_t_start = now_ms;
         }
 
-        /* Speed crosses HIGH threshold → record window end, compute J */
+        /* Speed crosses HIGH threshold (abs) → record window end, compute J */
         if ((handle->j_accel_t_end == 0U) &&
             (handle->j_accel_t_start != 0U) &&
-            (handle->j_speed_mech >= MI_J_ACCEL_SPEED_HIGH_RADPS)) {
-            handle->j_accel_v_end = handle->j_speed_mech;
+            (speed_abs >= MI_J_ACCEL_SPEED_HIGH_RADPS)) {
+            handle->j_accel_v_end = speed_abs;
             handle->j_accel_t_end = now_ms;
 
             elapsed_s = (float)(handle->j_accel_t_end - handle->j_accel_t_start) * 0.001f;
@@ -1004,18 +1007,18 @@ MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
             return MI_ERR_IN_PROGRESS;
         }
 
-        /* Speed crosses high threshold → record coast start */
+        /* Speed crosses high threshold (abs, decaying) → record coast start */
         if ((handle->j_coast_t_start == 0U) &&
-            (handle->j_speed_mech <= (MI_J_ACCEL_SPEED_HIGH_RADPS * 0.9f))) {
-            handle->j_coast_v_start = handle->j_speed_mech;
+            (speed_abs <= (MI_J_ACCEL_SPEED_HIGH_RADPS * 0.9f))) {
+            handle->j_coast_v_start = speed_abs;
             handle->j_coast_t_start = now_ms;
         }
 
-        /* Speed crosses low threshold → record coast end, compute B */
+        /* Speed crosses low threshold (abs, decaying) → record coast end, compute B */
         if ((handle->j_coast_t_end == 0U) &&
             (handle->j_coast_t_start != 0U) &&
-            (handle->j_speed_mech <= MI_J_ACCEL_SPEED_LOW_RADPS)) {
-            handle->j_coast_v_end = handle->j_speed_mech;
+            (speed_abs <= MI_J_ACCEL_SPEED_LOW_RADPS)) {
+            handle->j_coast_v_end = speed_abs;
             handle->j_coast_t_end = now_ms;
 
             elapsed_s = (float)(handle->j_coast_t_end - handle->j_coast_t_start) * 0.001f;
@@ -1600,6 +1603,22 @@ static void MI_EnterState(MI_Handle_t *handle, MI_State_t new_state)
         handle->verify_reverse_fault = 0U;
         handle->foc->pi_d.integral = 0.0f;
         handle->foc->pi_q.integral = 0.0f;
+    }
+    if (new_state == MI_STATE_J_IDENTIFY) {
+        handle->j_state = 0U;
+        handle->j_speed_mech = 0.0f;
+        handle->j_theta_prev = 0.0f;
+        handle->j_theta_prev_init = 0U;
+        handle->j_accel_iq_sum = 0.0f;
+        handle->j_accel_iq_count = 0.0f;
+        handle->j_accel_v_start = 0.0f;
+        handle->j_accel_v_end = 0.0f;
+        handle->j_accel_t_start = 0U;
+        handle->j_accel_t_end = 0U;
+        handle->j_coast_v_start = 0.0f;
+        handle->j_coast_v_end = 0.0f;
+        handle->j_coast_t_start = 0U;
+        handle->j_coast_t_end = 0U;
     }
 }
 

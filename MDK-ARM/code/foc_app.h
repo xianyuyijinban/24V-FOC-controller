@@ -22,12 +22,12 @@ extern "C" {
 /*==================== 配置参数 ====================*/
 
 /* 前馈使能开关 (BEMF解耦在 foc_core.h) */
-#define FOC_FF_ENABLE_INERTIA    0   /* P2: 加速度/惯量前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_ENABLE_INERTIA    1   /* P2: 加速度/惯量前馈 (Phase D3: enabled) */
 #define FOC_FF_INERTIA_MAX_A     0.50f /* 惯量前馈最大补偿电流 A */
 #define FOC_FF_INERTIA_J_MIN     1.0e-6f /* P2门禁: J合理下限 kg·m² */
 #define FOC_FF_INERTIA_J_MAX     0.01f  /* P2门禁: J合理上限 kg·m² */
 #define FOC_FF_INERTIA_B_MAX     0.05f  /* P2门禁: B合理上限 N·m·s/rad */
-#define FOC_FF_ENABLE_FRICTION   0   /* P3: 库仑+粘滞摩擦前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_ENABLE_FRICTION   1   /* P3: 库仑+粘滞摩擦前馈 (Phase D2: enabled) */
 #define FOC_FF_COULOMB_DEADBAND_RADPS 0.05f /* 库仑摩擦死区速度 */
 #define FOC_FF_FRICTION_MAX_A    0.50f /* 摩擦前馈最大补偿电流 A */
 #define FOC_FF_ENABLE_COGGING    0   /* P0: 齿槽转矩LUT前馈 (v4_safe_baseline: 默认关闭) */

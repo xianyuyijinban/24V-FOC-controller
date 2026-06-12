@@ -22,7 +22,7 @@ extern "C" {
 #define FOC_2PI_DIV3        2.09439510239f   /* 2π/3 */
 
 /*==================== 前馈使能开关 ====================*/
-#define FOC_FF_ENABLE_BEMF       0   /* P1: BEMF解耦前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_ENABLE_BEMF       1   /* P1: BEMF解耦前馈 (Phase D1: enabled) */
 
 /*==================== 数据结构 ====================*/
 

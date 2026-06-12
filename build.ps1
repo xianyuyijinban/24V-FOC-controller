@@ -4,7 +4,7 @@
 $ErrorActionPreference = "Stop"
 
 # Toolchain
-$GCC_PATH = "C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.2 rel1\bin"
+$GCC_PATH = "C:\ProgramData\chocolatey\lib\gcc-arm-embedded\tools\gcc-arm-none-eabi-10.3-2021.10\bin"
 $CC = "$GCC_PATH\arm-none-eabi-gcc.exe"
 $LD = "$GCC_PATH\arm-none-eabi-gcc.exe"
 $OBJCOPY = "$GCC_PATH\arm-none-eabi-objcopy.exe"

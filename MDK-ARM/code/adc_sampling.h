@@ -30,13 +30,13 @@ extern "C" {
  *   - 运放增益：15倍 (Rf/Rin = 15kΩ/1kΩ)
  *   - 输出偏置：VCC/2 = 1.65V (双极性信号，可测正负电流)
  * 计算公式推导：
- *   下管采样前端输出相对FOC相电流定义为反相，运行态Q轴验证要求 Vq 与 Iq 同向。
  *   先按ADC码计算幅值，再通过 ADC_CURRENT_POLARITY 统一修正符号。
+ *   Bench torque sign test requires +Iq_ref to produce the expected mechanical direction.
  */
 #define R_SHUNT             0.01f       /* 采样电阻 10mΩ */
 #define AMP_GAIN            15.0f       /* 运放差分增益 */
 #define K_CURRENT           (1.0f / (R_SHUNT * AMP_GAIN))  /* 6.667 A/V */
-#define ADC_CURRENT_POLARITY (-1.0f)    /* 下管采样前端相对FOC相电流定义为反相 */
+#define ADC_CURRENT_POLARITY (-1.0f)    /* Low-side shunt inverts sense polarity; -1.0 restores correct FOC current sign. */
 
 /* 母线电压采样电路参数（电阻分压）
  * 电路结构：

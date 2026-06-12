@@ -6,6 +6,7 @@
 
 #include "param_storage.h"
 #include <string.h>
+#include <stddef.h>
 
 /*==================== CRC32表（标准多项式 0x04C11DB7）====================*/
 static const uint32_t crc32_table[256] = {
@@ -76,11 +77,16 @@ ParamStatus_t Param_Init(void)
  */
 ParamStatus_t Param_Load(MotorParam_t *param)
 {
+    ParamPackage_t *package;
+    uint32_t stored_size;
+    uint32_t crc_calc;
+    const uint32_t current_valid_flag_offset = (uint32_t)offsetof(MotorParam_t, valid_flag);
+
     if (param == NULL) {
         return PARAM_ERR_INVALID;
     }
 
-    ParamPackage_t *package = (ParamPackage_t *)PARAM_FLASH_ADDR;
+    package = (ParamPackage_t *)PARAM_FLASH_ADDR;
     
     /* 检查魔数 */
     if (package->header.magic != PARAM_MAGIC_NUMBER) {
@@ -88,25 +94,37 @@ ParamStatus_t Param_Load(MotorParam_t *param)
     }
     
     /* 检查版本 */
-    if ((package->header.version != PARAM_VERSION) &&
-        (package->header.version != PARAM_VERSION_PRE_ALIGN_D_AXIS)) {
+    if (package->header.version != PARAM_VERSION) {
+        return PARAM_ERR_INVALID;
+    }
+
+    stored_size = package->header.size;
+    if ((stored_size == 0U) || (stored_size > sizeof(MotorParam_t))) {
         return PARAM_ERR_INVALID;
     }
     
     /* 计算并验证CRC32 */
-    uint32_t crc_calc = Param_CalculateCRC32(&package->motor, sizeof(MotorParam_t));
+    crc_calc = Param_CalculateCRC32(&package->motor, stored_size);
     if (crc_calc != package->header.crc32) {
         return PARAM_ERR_CRC;
     }
     
     /* 复制参数 */
-    memcpy(param, &package->motor, sizeof(MotorParam_t));
+    Param_SetDefault(param);
+    memcpy(param, &package->motor, stored_size);
 
-    if (package->header.version == PARAM_VERSION_PRE_ALIGN_D_AXIS) {
-        param->theta_offset = FOC_AngleNormalize(param->theta_offset + (0.5f * FOC_PI));
-        param->valid_flag = 0xFFFFFFFF;
+    if (stored_size <= current_valid_flag_offset) {
+        param->valid_flag = 0U;
+        param->mech_zero_offset = 0.0f;
+    } else {
+        if ((param->mech_zero_offset >= (-2.0f * FOC_PI)) &&
+            (param->mech_zero_offset <= (2.0f * FOC_PI))) {
+            param->mech_zero_offset = FOC_AngleNormalize(param->mech_zero_offset);
+        } else {
+            param->mech_zero_offset = 0.0f;
+        }
     }
-    
+
     return PARAM_OK;
 }
 
@@ -157,6 +175,95 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
 }
 
 /**
+ * @brief 保存齿槽转矩LUT到Flash（与Param_Save共享同一扇区）
+ * @param table 齿槽补偿值数组 (A)
+ * @param size  表项数
+ * @return 状态码
+ */
+ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size)
+{
+    ParamStatus_t status;
+    uint32_t write_size;
+    uint32_t crc;
+    uint32_t header[4];
+
+    if (table == NULL || size == 0U || size > PARAM_COGGING_LUT_FLOATS) {
+        return PARAM_ERR_INVALID;
+    }
+
+    write_size = (uint32_t)size * sizeof(float);
+
+    /* Build header: magic, size, CRC, reserved */
+    crc = Param_CalculateCRC32(table, write_size);
+    header[0] = 0x434F4747;  /* "COGG" */
+    header[1] = (uint32_t)size;
+    header[2] = crc;
+    header[3] = 0U;
+
+    /* Unlock flash and write header + table */
+    HAL_FLASH_Unlock();
+
+    status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, header, sizeof(header));
+    if (status != PARAM_OK) {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR + sizeof(header),
+                              (const uint32_t *)table, write_size);
+
+    HAL_FLASH_Lock();
+    return status;
+}
+
+/**
+ * @brief 从Flash加载齿槽转矩LUT
+ * @param table 输出缓冲区
+ * @param size  输出实际表项数
+ * @return 状态码
+ */
+ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size)
+{
+    const uint32_t *header;
+    uint32_t magic, stored_size_u32;
+    uint32_t crc_stored, crc_calc;
+    uint32_t read_size;
+    const float *stored_table;
+
+    if (table == NULL || size == NULL) {
+        return PARAM_ERR_INVALID;
+    }
+
+    *size = 0U;
+
+    header = (const uint32_t *)PARAM_COGGING_FLASH_ADDR;
+    magic = header[0];
+    stored_size_u32 = header[1];
+    crc_stored = header[2];
+
+    if (magic != 0x434F4747) {
+        return PARAM_ERR_INVALID;  /* No cogging LUT stored */
+    }
+
+    if (stored_size_u32 == 0U || stored_size_u32 > (uint32_t)PARAM_COGGING_LUT_FLOATS) {
+        return PARAM_ERR_INVALID;
+    }
+
+    read_size = stored_size_u32 * sizeof(float);
+    stored_table = (const float *)(PARAM_COGGING_FLASH_ADDR + 16U);
+
+    crc_calc = Param_CalculateCRC32(stored_table, read_size);
+    if (crc_calc != crc_stored) {
+        return PARAM_ERR_CRC;
+    }
+
+    memcpy(table, stored_table, read_size);
+    *size = (uint16_t)stored_size_u32;
+
+    return PARAM_OK;
+}
+
+/**
  * @brief 检查参数是否有效
  * @param param 电机参数结构体指针
  * @return 1有效，0无效
@@ -199,6 +306,12 @@ uint32_t Param_GetInvalidFlags(const MotorParam_t *param)
     if (param->J < 0 || param->J > 1.0f) {
         flags |= PARAM_INVALID_J;
     }
+    if (param->Tc < 0.0f || param->Tc > 1.0f) {
+        flags |= PARAM_INVALID_TC;
+    }
+    if (param->B < 0.0f || param->B > 0.1f) {
+        flags |= PARAM_INVALID_B;
+    }
 
     return flags;
 }
@@ -217,12 +330,14 @@ void Param_SetDefault(MotorParam_t *param)
     param->Lq = 0.0005f;        /* 0.5mH */
     param->Ke = 0.129f;         /* 0.129 V/(rad/s) = 60/(2pi*74KV) */
     param->Pn = 11;             /* 11对极（24N22P） */
-    param->encoder_dir = 1;
+    param->encoder_dir = -1;    /* V4 baseline: 编码器方向默认反向 */
     param->J = 0.0001f;         /* 0.0001 kg·m² */
     param->B = 0.001f;          /* 0.001 N·m·s/rad */
+    param->Tc = 0.0f;           /* 库仑摩擦默认关闭 */
     param->theta_offset = 0.0f;
     param->theta_mech_zero = 0.0f;
-    param->valid_flag = 0xFFFFFFFF;
+    param->mech_zero_offset = 0.0f;
+    param->valid_flag = 0x00000000;
 }
 
 /**

@@ -61,6 +61,8 @@ class FOCDataPacket:
     motor_param_ke: Optional[float] = None
     motor_param_pn: Optional[int] = None
     motor_param_encoder_dir: Optional[int] = None
+    motor_param_theta_offset: Optional[float] = None
+    motor_param_mech_zero: Optional[float] = None
     phase_current_only: bool = False
     
     # 原始文本
@@ -582,6 +584,15 @@ class FOCDataParser:
                 packet.motor_param_pn = int(param_diag_match.group(5))
                 packet.motor_param_encoder_dir = int(param_diag_match.group(6))
 
+            # 解析 ThetaDiag 行: offset 和 zero
+            theta_diag_match = re.search(
+                r'ThetaDiag:.*?offset=([\d.\-]+)\s*rad.*?zero=([\d.\-]+)\s*rad',
+                text,
+            )
+            if theta_diag_match:
+                packet.motor_param_theta_offset = float(theta_diag_match.group(1))
+                packet.motor_param_mech_zero = float(theta_diag_match.group(2))
+
             # Detailed diagnostic snapshots may reuse the historical
             # "FAULT DETECTED" envelope even while the controller is RUNNING.
             # Treat the packet as a fault only when the payload carries a real
@@ -595,6 +606,23 @@ class FOCDataParser:
         except Exception as e:
             print(f"Packet parse error: {e}")
             print(f"Text: {text[:200]}...")
+
+
+def control_to_user_angle(pos_ref_control: float, encoder_dir: int) -> float:
+    """将固件内部控制帧的pos_ref逆转换为用户角度（rad）。
+
+    固件FOC_App_SetPositionRef会将用户PREF乘以encoder_dir再归一化存储，
+    上位机显示时需要做逆转换。encoder_dir=-1时乘(-1)等于取反再归一化。
+    """
+    import math
+    dir_f = float(encoder_dir) if encoder_dir != 0 else 1.0
+    raw = pos_ref_control * dir_f
+    # 归一化到 [0, 2π)
+    two_pi = 2.0 * math.pi
+    raw = raw - two_pi * math.floor(raw / two_pi)
+    if raw < 0.0:
+        raw += two_pi
+    return raw
 
 
 class CommandBuilder:
@@ -624,6 +652,11 @@ class CommandBuilder:
     def set_motor_pn(pole_pairs: int) -> str:
         """设置电机极对数"""
         return f"CMD:MOTOR_PN,{int(pole_pairs)}\n"
+
+    @staticmethod
+    def set_encoder_dir(direction: int) -> str:
+        """设置编码器方向（+1 或 -1）"""
+        return f"CMD:ENCODER_DIR,{int(direction)}\n"
     
     @staticmethod
     def set_current_ref(id_ref: float, iq_ref: float) -> str:

@@ -283,6 +283,31 @@ void FOC_SetCurrentResistance(FOC_Handle_t *foc, float resistance_ohm)
 }
 
 /**
+ * @brief 设置BEMF解耦前馈参数
+ * @param foc FOC句柄指针
+ * @param Ld d轴电感 (H)
+ * @param Lq q轴电感 (H)
+ * @param Ke 反电动势常数 V/(rad/s)
+ */
+void FOC_SetBemfParams(FOC_Handle_t *foc, float Ld, float Lq, float Ke)
+{
+    foc->bemf_Ld = (Ld > 0.0f) ? Ld : 0.0f;
+    foc->bemf_Lq = (Lq > 0.0f) ? Lq : 0.0f;
+    foc->bemf_Ke = (Ke >= 0.0f) ? Ke : 0.0f;
+    foc->bemf_enabled = (foc->bemf_Ld > 0.0f && foc->bemf_Lq > 0.0f) ? 1U : 0U;
+}
+
+/**
+ * @brief 设置电角速度（用于BEMF解耦）
+ * @param foc FOC句柄指针
+ * @param omega_elec_radps 电角速度 (rad/s)
+ */
+void FOC_SetOmegaElec(FOC_Handle_t *foc, float omega_elec_radps)
+{
+    foc->omega_elec_radps = omega_elec_radps;
+}
+
+/**
  * @brief 设置电角度
  * @param foc FOC句柄指针
  * @param theta_elec 电角度 (rad)
@@ -381,6 +406,18 @@ void FOC_Run(FOC_Handle_t *foc)
     }
     vd_cmd = (foc->current_resistance_ohm * foc->Id_ref) + FOC_PI_Update(&foc->pi_d, error_d);
     vq_cmd = (foc->current_resistance_ohm * foc->Iq_ref) + FOC_PI_Update(&foc->pi_q, error_q);
+
+    /* Step 3.2: BEMF解耦前馈（P1）
+     * Vd_ff = -omega_e * Lq * Iq_ref   (q轴交叉耦合抵消)
+     * Vq_ff = +omega_e * (Ld * Id_ref + Ke)  (反电动势 + d轴交叉耦合)
+     */
+#if FOC_FF_ENABLE_BEMF
+    if (foc->bemf_enabled) {
+        float omega_e = foc->omega_elec_radps;
+        vd_cmd += -omega_e * foc->bemf_Lq * foc->Iq_ref;
+        vq_cmd +=  omega_e * (foc->bemf_Ld * foc->Id_ref + foc->bemf_Ke);
+    }
+#endif
 
     /* Step 3.5: 电压矢量限幅（Vd/Vq联合限幅）+ 反算抗积分饱和 */
     vd_sat = vd_cmd;

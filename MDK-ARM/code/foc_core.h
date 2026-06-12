@@ -21,6 +21,9 @@ extern "C" {
 #define FOC_SQRT3_DIV2      0.86602540378f   /* √3/2 */
 #define FOC_2PI_DIV3        2.09439510239f   /* 2π/3 */
 
+/*==================== 前馈使能开关 ====================*/
+#define FOC_FF_ENABLE_BEMF       0   /* P1: BEMF解耦前馈 (v4_safe_baseline: 默认关闭) */
+
 /*==================== 数据结构 ====================*/
 
 /* 三相静止坐标系 (ABC) */
@@ -91,7 +94,14 @@ typedef struct {
 
     /* Current-loop feedforward */
     float current_resistance_ohm;
-    
+
+    /* BEMF decoupling feedforward (P1) */
+    float omega_elec_radps;     /* 电角速度 rad/s */
+    float bemf_Ld;              /* d轴电感 H */
+    float bemf_Lq;              /* q轴电感 H */
+    float bemf_Ke;              /* 反电动势常数 V/(rad/s) */
+    uint8_t bemf_enabled;       /* 1 = BEMF解耦使能 */
+
     /* 状态 */
     uint8_t enabled;
 } FOC_Handle_t;
@@ -115,6 +125,8 @@ float FOC_PI_Update(FOC_PI_Controller_t *pi, float error);
 void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q);
 void FOC_SetCurrentReference(FOC_Handle_t *foc, float Id_ref, float Iq_ref);
 void FOC_SetCurrentResistance(FOC_Handle_t *foc, float resistance_ohm);
+void FOC_SetBemfParams(FOC_Handle_t *foc, float Ld, float Lq, float Ke);
+void FOC_SetOmegaElec(FOC_Handle_t *foc, float omega_elec_radps);
 void FOC_SetAngle(FOC_Handle_t *foc, float theta_elec);
 void FOC_SetVbus(FOC_Handle_t *foc, float Vbus);
 void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic);

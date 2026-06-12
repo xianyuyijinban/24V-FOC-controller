@@ -24,7 +24,9 @@ extern "C" {
 /* 参数魔数（用于验证数据有效性） */
 #define PARAM_MAGIC_NUMBER      0x4D4F544F  /* "MOTO" */
 #define PARAM_VERSION_PRE_ALIGN_D_AXIS   0x00010003
-#define PARAM_VERSION           0x00010004  /* 版本 1.4：编码器对齐零点改为d轴电零位 */
+#define PARAM_VERSION_D_AXIS_ALIGN       0x00010004
+#define PARAM_VERSION_MECH_ZERO_OFFSET   0x00010005
+#define PARAM_VERSION           0x00010009  /* Version 1.9: +Tc (coulomb friction), +FF (BEMF/inertia/friction/cogging) */
 
 /* 最大重试次数 */
 #define PARAM_MAX_RETRY         3
@@ -41,6 +43,8 @@ extern "C" {
 #define PARAM_INVALID_PN          (1UL << 5)
 #define PARAM_INVALID_ENCODER_DIR (1UL << 6)
 #define PARAM_INVALID_J           (1UL << 7)
+#define PARAM_INVALID_TC          (1UL << 8)
+#define PARAM_INVALID_B           (1UL << 9)
 
 /*==================== 数据结构 ====================*/
 
@@ -92,6 +96,13 @@ const char* Param_GetStatusString(ParamStatus_t status);
 /* Flash操作 */
 ParamStatus_t Param_EraseSector(void);
 ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t size);
+
+/* 齿槽LUT存储 (P0 feedforward) */
+#define PARAM_COGGING_FLASH_OFFSET  ((uint32_t)sizeof(ParamPackage_t))
+#define PARAM_COGGING_LUT_FLOATS    264
+#define PARAM_COGGING_FLASH_ADDR    (PARAM_FLASH_ADDR + PARAM_COGGING_FLASH_OFFSET)
+ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size);
+ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size);
 
 #ifdef __cplusplus
 }

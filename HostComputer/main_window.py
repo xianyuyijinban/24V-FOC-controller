@@ -64,6 +64,7 @@ try:
         apply_packet_effects,
         build_adc_noise_command,
         build_current_ref_command,
+        build_encoder_dir_command,
         build_loop_gain_command,
         build_motor_pn_command,
         build_position_ref_command,
@@ -102,6 +103,7 @@ except ImportError:
         apply_packet_effects,
         build_adc_noise_command,
         build_current_ref_command,
+        build_encoder_dir_command,
         build_loop_gain_command,
         build_motor_pn_command,
         build_position_ref_command,
@@ -145,8 +147,8 @@ class HostMainWindow(QMainWindow):
     KNOWN_MOTOR_LQ_H = 0.0005
     KNOWN_MOTOR_KE = 0.129
     KNOWN_MOTOR_ENCODER_DIR = -1
-    KNOWN_MOTOR_THETA_OFFSET = 2.856
-    KNOWN_MOTOR_THETA_ZERO = -2.358
+    KNOWN_MOTOR_THETA_OFFSET = 0.0
+    KNOWN_MOTOR_THETA_ZERO = 0.0
 
     def __init__(self, profile_path: Path | str | None = None):
         super().__init__()
@@ -535,9 +537,7 @@ class HostMainWindow(QMainWindow):
         self.identify_start_page_button = QPushButton("开始识别")
         self.identify_stop_page_button = QPushButton("停止识别")
         self.identify_clear_fault_button = QPushButton("清除故障")
-        self.identify_start_page_button.clicked.connect(
-            lambda: self._dispatch_command(CommandBuilder.start_identify(), identify_note="已请求开始识别。")
-        )
+        self.identify_start_page_button.clicked.connect(self._request_start_identify)
         self.identify_stop_page_button.clicked.connect(
             lambda: self._dispatch_command(CommandBuilder.stop_identify(), identify_note="已请求停止识别。")
         )
@@ -557,8 +557,19 @@ class HostMainWindow(QMainWindow):
         motor_layout.addWidget(QLabel("Pn"))
         motor_layout.addWidget(self.motor_pn_input)
         motor_layout.addWidget(self.motor_pn_apply_button)
-        self.identify_motor_base_group.hide()
         layout.addWidget(self.identify_motor_base_group)
+
+        self.identify_encoder_dir_group = QGroupBox("编码器方向")
+        encoder_dir_layout = QHBoxLayout(self.identify_encoder_dir_group)
+        self.encoder_dir_combo = QComboBox()
+        self.encoder_dir_combo.addItems(["-1 (负向)", "+1 (正向)"])
+        self.encoder_dir_combo.setCurrentIndex(0)  # default -1
+        self.encoder_dir_apply_button = QPushButton("应用编码器方向")
+        self.encoder_dir_apply_button.clicked.connect(self._apply_encoder_dir)
+        encoder_dir_layout.addWidget(QLabel("方向"))
+        encoder_dir_layout.addWidget(self.encoder_dir_combo)
+        encoder_dir_layout.addWidget(self.encoder_dir_apply_button)
+        layout.addWidget(self.identify_encoder_dir_group)
 
         log_group = QGroupBox("识别进度 / 日志")
         log_layout = QVBoxLayout(log_group)
@@ -857,6 +868,7 @@ class HostMainWindow(QMainWindow):
         self.identify_stop_page_button.setEnabled(state["can_identify_stop"])
         self.identify_clear_fault_button.setEnabled(state["can_clear_fault"])
         self.motor_pn_apply_button.setEnabled(can_edit_vbus_limits(self._state))
+        self.encoder_dir_apply_button.setEnabled(can_edit_vbus_limits(self._state))
 
         target_enabled = state["can_send_target"]
         for button in (
@@ -1200,6 +1212,49 @@ class HostMainWindow(QMainWindow):
         )
         self._show_notification("INFO", f"已发送电机极对数：Pn={pole_pairs}。")
 
+    def _apply_encoder_dir(self):
+        idx = self.encoder_dir_combo.currentIndex()
+        direction = -1 if idx == 0 else 1
+        command = CommandBuilder.set_encoder_dir(direction)
+        self._state.encoder_dir = direction
+        self._dispatch_command(
+            command,
+            identify_note=f"已设置编码器方向：{direction}",
+        )
+        self._show_notification("INFO", f"已发送编码器方向：{direction}。")
+
+    def _request_start_identify(self):
+        """发送完整的识别序列: MOTOR_PN → ENCODER_DIR → UNLOCK → IDENTIFY"""
+        if not self._state.is_connected:
+            self.handle_log_line("ERROR", "当前未连接，命令已拦截。")
+            return
+
+        # Step 1: Set motor pole pairs
+        try:
+            pn_cmd = build_motor_pn_command(self.motor_pn_input.text())
+        except ValueError as exc:
+            self._show_notification("ERROR", f"极对数无效: {exc}")
+            return
+        self._record_identify_event("识别流程：设置极对数...")
+        self.command_requested.emit(pn_cmd)
+
+        # Step 2: Set encoder direction
+        idx = self.encoder_dir_combo.currentIndex()
+        direction = -1 if idx == 0 else 1
+        self._state.encoder_dir = direction
+        self._record_identify_event(f"识别流程：设置编码器方向={direction}...")
+        self.command_requested.emit(CommandBuilder.set_encoder_dir(direction))
+
+        # Step 3: Unlock power stage
+        self._record_identify_event("识别流程：解锁功率级...")
+        self.command_requested.emit(CommandBuilder.unlock_power(True))
+
+        # Step 4: Start identify
+        self._record_identify_event("识别流程：开始识别...")
+        self.command_requested.emit(CommandBuilder.start_identify())
+
+        self._show_notification("INFO", "已发送识别序列：Pn → 编码器方向 → 解锁 → 开始识别。")
+
     def _send_home(self):
         self._dispatch_command(CommandBuilder.set_home())
         self._show_notification("INFO", "已发送设置零点命令，等待固件确认...")
@@ -1405,8 +1460,20 @@ class HostMainWindow(QMainWindow):
         self.motor_param_ke_value.setText(f"{ke_value:.6f}")
         self.motor_param_pn_value.setText(str(int(pn_value)))
         self.motor_param_encoder_dir_value.setText(str(int(encoder_dir_value)))
-        self.motor_param_theta_offset_value.setText(f"{self.KNOWN_MOTOR_THETA_OFFSET:.6f}")
-        self.motor_param_theta_zero_value.setText(f"{self.KNOWN_MOTOR_THETA_ZERO:.6f}")
+
+        theta_offset = (
+            packet.motor_param_theta_offset
+            if packet and packet.motor_param_theta_offset is not None
+            else self.KNOWN_MOTOR_THETA_OFFSET
+        )
+        mech_zero = (
+            packet.motor_param_mech_zero
+            if packet and packet.motor_param_mech_zero is not None
+            else self.KNOWN_MOTOR_THETA_ZERO
+        )
+        self.motor_param_theta_offset_value.setText(f"{theta_offset:.6f}")
+        self.motor_param_theta_zero_value.setText(f"{mech_zero:.6f}")
+        self.home_offset_value.setText(f"{mech_zero:.6f} rad")
 
     def _clear_runtime_snapshot(self):
         self.packet_timestamp_value.setText("--")

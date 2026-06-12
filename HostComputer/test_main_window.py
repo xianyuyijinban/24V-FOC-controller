@@ -56,7 +56,9 @@ class TestHostMainWindow(unittest.TestCase):
         window = self._window()
 
         self.assertEqual(window.identify_param_group.title(), "识别状态 / 电机参数")
-        self.assertTrue(window.identify_motor_base_group.isHidden())
+        self.assertFalse(window.identify_motor_base_group.isHidden())
+        self.assertFalse(window.identify_encoder_dir_group.isHidden())
+        # identify_param_group unchanged: status + params + actions = 3 widgets
         self.assertEqual(window.identify_param_group.layout().count(), 3)
         self.assertIs(window.identify_connection_value.parent(), window.identify_status_panel)
         self.assertIs(window.motor_param_rs_value.parent(), window.identify_params_panel)
@@ -71,8 +73,9 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(window.motor_param_ke_value.text(), "0.129000")
         self.assertEqual(window.motor_param_pn_value.text(), "11")
         self.assertEqual(window.motor_param_encoder_dir_value.text(), "-1")
-        self.assertEqual(window.motor_param_theta_offset_value.text(), "2.856000")
-        self.assertEqual(window.motor_param_theta_zero_value.text(), "-2.358000")
+        # KNOWN_MOTOR_THETA_OFFSET and KNOWN_MOTOR_THETA_ZERO updated to 0.0 (firmware reports actual values)
+        self.assertEqual(window.motor_param_theta_offset_value.text(), "0.000000")
+        self.assertEqual(window.motor_param_theta_zero_value.text(), "0.000000")
 
     def test_vbus_plot_channel_is_available(self):
         window = self._window()

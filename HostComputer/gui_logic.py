@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Optional
 
 try:
-    from .data_parser import CommandBuilder, FOCDataPacket
+    from .data_parser import CommandBuilder, FOCDataPacket, control_to_user_angle
 except ImportError:
-    from data_parser import CommandBuilder, FOCDataPacket
+    from data_parser import CommandBuilder, FOCDataPacket, control_to_user_angle
 
 
 MODE_LABELS = {
@@ -70,7 +70,7 @@ PLOT_CHANNELS = (
     "Vq",
 )
 DEFAULT_PROFILE_PATH = Path.home() / ".24v_foc_host_gui.json"
-GUI_PROFILE_SCHEMA_VERSION = 3
+GUI_PROFILE_SCHEMA_VERSION = 4
 POSITION_DEG_MIN = 0.0
 POSITION_DEG_MAX = 360.0
 FAULT_ERROR_KEYWORDS = (
@@ -120,15 +120,15 @@ class AdcNoiseResult:
 
 
 def _default_current_tuning() -> LoopTuning:
-    return LoopTuning(kp=0.3, ki=0.0)
+    return LoopTuning(kp=0.03, ki=0.5)
 
 
 def _default_speed_tuning() -> LoopTuning:
-    return LoopTuning(kp=0.3, ki=0.0)
+    return LoopTuning(kp=0.10, ki=0.0)
 
 
 def _default_position_tuning() -> PositionLoopTuning:
-    return PositionLoopTuning(kp=4.0, kd=0.12)
+    return PositionLoopTuning(kp=2.0, kd=0.08)
 
 
 @dataclass
@@ -216,20 +216,37 @@ class GuiProfile:
 
     @staticmethod
     def _migrate_12v_bench_defaults(profile: "GuiProfile"):
-        old_current = LoopTuning(kp=0.2, ki=0.01)
-        old_speed = LoopTuning(kp=1.0, ki=0.1)
-        old_position = PositionLoopTuning(kp=10.0, kd=0.10)
+        old_current_defaults = (
+            LoopTuning(kp=0.2, ki=0.01),
+            LoopTuning(kp=0.3, ki=0.0),
+        )
+        old_speed_defaults = (
+            LoopTuning(kp=1.0, ki=0.1),
+            LoopTuning(kp=0.3, ki=0.0),
+        )
+        old_position_defaults = (
+            PositionLoopTuning(kp=10.0, kd=0.10),
+            PositionLoopTuning(kp=4.0, kd=0.12),
+        )
 
-        if profile.current_pi == old_current:
+        if any(GuiProfile._loop_tuning_matches(profile.current_pi, old) for old in old_current_defaults):
             profile.current_pi = _default_current_tuning()
-        if profile.speed_pi == old_speed:
+        if any(GuiProfile._loop_tuning_matches(profile.speed_pi, old) for old in old_speed_defaults):
             profile.speed_pi = _default_speed_tuning()
-        if profile.position_pd == old_position:
+        if any(GuiProfile._position_tuning_matches(profile.position_pd, old) for old in old_position_defaults):
             profile.position_pd = _default_position_tuning()
         if profile.undervoltage_limit == 9.0:
             profile.undervoltage_limit = 18.0
         if profile.overvoltage_limit == 16.0:
             profile.overvoltage_limit = 30.0
+
+    @staticmethod
+    def _loop_tuning_matches(left: LoopTuning, right: LoopTuning) -> bool:
+        return math.isclose(left.kp, right.kp) and math.isclose(left.ki, right.ki)
+
+    @staticmethod
+    def _position_tuning_matches(left: PositionLoopTuning, right: PositionLoopTuning) -> bool:
+        return math.isclose(left.kp, right.kp) and math.isclose(left.kd, right.kd)
 
 
 @dataclass
@@ -243,6 +260,7 @@ class HostAppState:
     stall_mode_armed: bool = False
     stall_open_loop_active: bool = False
     encoder_detected: Optional[bool] = None
+    encoder_dir: int = -1
     foc_state: Optional[int] = None
     fault_active: bool = False
     available_ports: list[str] = field(default_factory=list)
@@ -258,12 +276,20 @@ class RollingPlotBuffer:
 
     def append_packet(self, packet: FOCDataPacket):
         previous = dict(self._rows[-1]) if self._rows else {}
+        # Firmware stores pos_ref in control frame (multiplied by encoder_dir).
+        # Convert back to user-facing degrees for display.
+        enc_dir = (
+            packet.motor_param_encoder_dir
+            if packet.motor_param_encoder_dir is not None
+            else -1
+        )
+        user_pos_rad = control_to_user_angle(packet.pos_ref, enc_dir)
         row = {
             "timestamp_ms": float(packet.timestamp),
             "angle": float(packet.angle),
             "speed": float(packet.speed),
             "speed_ref": float(packet.speed_ref),
-            "pos_ref_deg": radians_to_degrees(packet.pos_ref),
+            "pos_ref_deg": radians_to_degrees(user_pos_rad),
             "Vbus": float(packet.vbus),
             "Ia": float(packet.Ia),
             "Ib": float(packet.Ib),
@@ -380,6 +406,13 @@ def build_vbus_limit_command(undervoltage_raw: str, overvoltage_raw: str) -> str
     if overvoltage <= undervoltage:
         raise ValueError("过压阈值必须 > 欠压阈值。")
     return CommandBuilder.set_vbus_limits(undervoltage, overvoltage)
+
+
+def build_encoder_dir_command(dir_raw: str) -> str:
+    direction = parse_float_field(dir_raw, "编码器方向", minimum=-1.0, maximum=1.0)
+    if abs(direction) < 0.5:
+        raise ValueError("编码器方向必须是 +1 或 -1。")
+    return CommandBuilder.set_encoder_dir(int(direction))
 
 
 def build_motor_pn_command(pole_pairs_raw: str) -> str:
@@ -579,6 +612,8 @@ def apply_packet_effects(state: HostAppState, packet: FOCDataPacket):
     state.stall_mode_armed = bool(packet.stall_mode_armed)
     state.stall_open_loop_active = bool(packet.stall_open_loop_active)
     state.encoder_detected = packet.encoder_detected
+    if packet.motor_param_encoder_dir is not None:
+        state.encoder_dir = int(packet.motor_param_encoder_dir)
     if state.foc_state == FOC_STATE_PARAM_IDENTIFY:
         state.identify_active = True
         state.motor_enabled = False
@@ -591,7 +626,13 @@ def apply_packet_effects(state: HostAppState, packet: FOCDataPacket):
 
 
 def packet_snapshot(packet: FOCDataPacket) -> dict[str, str]:
-    pos_ref_deg = radians_to_degrees(packet.pos_ref)
+    enc_dir = (
+        packet.motor_param_encoder_dir
+        if packet.motor_param_encoder_dir is not None
+        else -1
+    )
+    user_pos_rad = control_to_user_angle(packet.pos_ref, enc_dir)
+    pos_ref_deg = radians_to_degrees(user_pos_rad)
     return {
         "timestamp": f"{packet.timestamp} ms",
         "angle": f"{packet.angle:.2f} deg",

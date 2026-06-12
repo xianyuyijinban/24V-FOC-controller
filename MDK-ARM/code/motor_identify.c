@@ -26,6 +26,7 @@ static float MI_GetPnTestCurrent(const MI_Handle_t *handle);
 static uint8_t MI_PnRetryWithHigherCurrent(MI_Handle_t *handle);
 static float MI_ClampAbsVoltage(float voltage, float limit);
 static float MI_WrapDelta(float delta);
+static void MI_ApplyVerifyVoltageVector(MI_Handle_t *handle, float theta_elec);
 /* PN path keeps the current_target naming contract in this file for bench tests. */
 /* FOC_SetCurrentReference(handle->foc, current_target, 0.0f); */
 
@@ -144,16 +145,51 @@ void MI_Process(MI_Handle_t *handle)
             } else {
                 handle->motion_verify_status = 3U;  /* failed */
             }
-            /* Always save params and complete after motion verify runs */
-            handle->param->valid_flag = 0xFFFFFFFF;
-            MI_EnterState(handle, MI_STATE_COMPLETE);
+            {
+                uint8_t sanity_ok = 1U;
+
+                if (handle->pn_observed_dir == 0) {
+                    sanity_ok = 0U;
+                } else if (err == MI_ERR_NONE) {
+                    /* Strong or weak motion verify pass. */
+                } else if (handle->verify_locked_dir != 0) {
+                    /* Direction locked before timeout; acceptable for high-cogging motors. */
+                } else {
+                    sanity_ok = 0U;
+                }
+
+                if (sanity_ok) {
+                    handle->param->valid_flag = 0xFFFFFFFF;
+#if FOC_FF_ENABLE_COGGING
+                    MI_EnterState(handle, MI_STATE_COGGING_IDENTIFY);
+#else
+                    MI_EnterState(handle, MI_STATE_COMPLETE);
+#endif
+                } else {
+                    handle->param->valid_flag = 0x00000000U;
+                    handle->error_code = (err != MI_ERR_NONE) ? err : MI_ERR_PN_NOT_CONVERGED;
+                    MI_EnterState(handle, MI_STATE_ERROR);
+                }
+            }
             break;
-            
+
+        case MI_STATE_COGGING_IDENTIFY:
+            err = MI_IdentifyCogging(handle);
+            if (err == MI_ERR_NONE) {
+                MI_EnterState(handle, MI_STATE_COMPLETE);
+            } else if (err == MI_ERR_IN_PROGRESS) {
+                /* continue */
+            } else {
+                /* Cogging ID failure is non-fatal; continue to complete */
+                MI_EnterState(handle, MI_STATE_COMPLETE);
+            }
+            break;
+
         case MI_STATE_COMPLETE:
         case MI_STATE_ERROR:
             /* 终态，不执行任何操作 */
             break;
-            
+
         default:
             break;
     }
@@ -545,20 +581,15 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
     uint8_t *state = &handle->pn_state;
     float *theta_mech_start = &handle->pn_theta_start;
     float *theta_elec_last = &handle->pn_elec_last;
-    float current_target;
-    uint8_t configured_pn;
     MI_ErrorCode_t encoder_status = MI_RequireValidEncoder(handle);
 
     if (encoder_status != MI_ERR_NONE) {
         return encoder_status;
     }
 
-    configured_pn = handle->param->Pn;
-    if ((configured_pn == 0U) || (configured_pn > 50U)) {
+    if ((handle->param->Pn == 0U) || (handle->param->Pn > 50U)) {
         return MI_ERR_PN_NOT_CONVERGED;
     }
-
-    current_target = MI_GetPnTestCurrent(handle);
 
     switch (*state) {
         case 0: /* 锁轴初始化：先让转子贴住已知电角度，避免直接旋转场抓不住转子 */
@@ -597,20 +628,73 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
 
         case 2: /* 应用下一步进电角 */
         {
-            float theta_elec_step = MI_PN_STEP_ELEC_DEG * MI_DEG2RAD;
+            float micro_theta_elec_step = MI_PN_STEP_ELEC_DEG * MI_DEG2RAD;
+            float micro_current = MI_GetPnTestCurrent(handle);
+            float micro_voltage_scale = micro_current / MI_PN_TEST_CURRENT_INITIAL;
+            float micro_voltage_mag = handle->foc->Vbus * MI_PN_TEST_VOLTAGE_RATIO * micro_voltage_scale;
+            float micro_theta_elec_target;
+            uint32_t micro_step_index = handle->pn_elec_cycles;
 
-            if (handle->pn_elec_cycles >= MI_PN_STEP_COUNT) {
-                *state = 10;
-                handle->state_start_time = HAL_GetTick();
+            if (micro_step_index >= MI_PN_STEP_COUNT) {
+                handle->foc->Id_ref = 0.0f;
+                handle->foc->Iq_ref = 0.0f;
+                handle->pn_last_delta_mech = handle->pn_theta_accum;
+                handle->pn_last_delta_elec = *theta_elec_last;
+                if ((fabsf(handle->pn_theta_accum) > 0.001f) &&
+                    (fabsf(*theta_elec_last) > 0.5f)) {
+                    handle->pn_last_calc = fabsf(*theta_elec_last / handle->pn_theta_accum);
+                } else {
+                    handle->pn_last_calc = 0.0f;
+                }
+                *state = 0;
+
+#if MI_PN_AUTO_UPDATE_ENCODER_DIR
+                if ((fabsf(handle->pn_theta_accum) >= MI_PN_MIN_MECH_DELTA_RAD) &&
+                    TLE5012_IsDataValid()) {
+                    handle->pn_observed_dir = (handle->pn_theta_accum >= 0.0f) ? 1 : -1;
+                    handle->param->encoder_dir = handle->pn_observed_dir;
+                }
+#endif
+                handle->pn_observed_dir = (handle->pn_theta_accum >= 0.0f) ? 1 : -1;
+                handle->param->encoder_dir = handle->pn_observed_dir;
+                return MI_ERR_NONE;
+            }
+
+            micro_theta_elec_target = micro_theta_elec_step * (float)(micro_step_index + 1U);
+            *theta_elec_last = micro_theta_elec_target;
+            micro_voltage_mag = MI_ClampAbsVoltage(micro_voltage_mag, MI_PN_TEST_VOLTAGE_MAX_V);
+            FOC_SetAngle(handle->foc, micro_theta_elec_target);
+            handle->foc->Id_ref = 0.0f;
+            handle->foc->Iq_ref = 0.0f;
+            handle->foc->pi_d.integral = 0.0f;
+            handle->foc->pi_q.integral = 0.0f;
+            handle->foc->ValphaBeta.alpha = micro_voltage_mag * cosf(handle->foc->theta_elec);
+            handle->foc->ValphaBeta.beta = micro_voltage_mag * sinf(handle->foc->theta_elec);
+            FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+            *state = 8;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+
+        }
+
+        case 8:
+            if (MI_GetElapsedTime(handle) < MI_PN_STEP_SETTLE_MS) {
+                return MI_ERR_IN_PROGRESS;
+            }
+            {
+                float theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+                float delta_mech = MI_WrapDelta(theta_mech_now - handle->pn_theta_last);
+
+                handle->pn_theta_accum += delta_mech;
+                handle->pn_theta_last = theta_mech_now;
+                handle->pn_elec_cycles++;
+                handle->sample_count++;
+                *state = 2;
                 return MI_ERR_IN_PROGRESS;
             }
 
-            *theta_elec_last = theta_elec_step * (float)(handle->pn_elec_cycles + 1U);
-            *state = 3;
-            handle->state_start_time = HAL_GetTick();
-            return MI_ERR_IN_PROGRESS;
-        }
-
+#if 0
         case 3: /* 应用反向解卡脉冲 */
         {
             float theta_elec_nudge = MI_PN_NUDGE_ELEC_DEG * MI_DEG2RAD;
@@ -752,8 +836,12 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
             /* 只把电角/机械角比值作为诊断值，不再用短行程结果覆盖配置Pn。 */
             if (fabsf(delta_mech) >= min_delta && fabsf(delta_elec) > 0.5f) {
                 handle->pn_last_calc = fabsf(delta_elec / delta_mech);
-                handle->param->encoder_dir = ((delta_elec * delta_mech) >= 0.0f) ? 1 : -1;
                 handle->pn_observed_dir = (delta_mech >= 0.0f) ? 1 : -1;
+                /* encoder_dir = pn_observed_dir when delta_elec > 0 (forward drive).
+                 * Using sign(delta_elec*delta_mech) would give +1 when both are negative,
+                 * which assigns the wrong sign when the PN sweep drives elec backwards.
+                 * Fix: encoder_dir tracks physical mechanical direction for positive Iq. */
+                handle->param->encoder_dir = handle->pn_observed_dir;
 
                 *state = 0;
                 return MI_ERR_NONE;
@@ -764,8 +852,8 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
             }
 
             if ((fabsf(delta_mech) >= dir_sign_min_delta) && (fabsf(delta_elec) > 0.5f)) {
-                handle->param->encoder_dir = ((delta_elec * delta_mech) >= 0.0f) ? 1 : -1;
                 handle->pn_observed_dir = (delta_mech >= 0.0f) ? 1 : -1;
+                handle->param->encoder_dir = handle->pn_observed_dir;
             }
 
 #if MI_PN_STRICT_VERIFY
@@ -777,6 +865,7 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
 #endif
         }
 
+#endif
         default:
             *state = 0;
             return MI_ERR_PN_NOT_CONVERGED;
@@ -788,12 +877,181 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle)
  * @param handle 识别句柄指针
  * @return 错误代码
  */
+/**
+ * @brief 转动惯量J和粘滞摩擦B识别 — 恒电流加速+滑行法
+ * @param handle 识别句柄指针
+ * @return 错误代码
+ *
+ * 方法:
+ *   Phase 1 (ACCEL): 施加恒定Iq, 测量机械速度从 LOW→HIGH 阈值的时间
+ *     J = Kt * Iq_avg * Δt / Δv
+ *   Phase 2 (COAST): Iq置零, 测量速度从 HIGH→LOW 的自然衰减
+ *     B = J * (v_high - v_low) / (Δt * v_avg)
+ */
 MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle)
 {
-    /* 简化实现：使用默认值 */
-    handle->param->J = 0.0001f;  /* 默认值 kg·m² */
-    handle->param->B = 0.001f;   /* 默认值 N·m·s/rad */
-    return MI_ERR_NONE;
+    MI_ErrorCode_t encoder_status;
+    float theta_mech_now;
+    float delta_theta;
+    float speed_mech_now;
+    float Kt;
+    uint32_t now_ms;
+    float elapsed_s;
+
+    /* Read encoder */
+    encoder_status = MI_RequireValidEncoder(handle);
+    if (encoder_status != MI_ERR_NONE) {
+        return encoder_status;
+    }
+    theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+
+    /* Compute instantaneous mechanical speed from encoder delta */
+    if (!handle->j_theta_prev_init) {
+        handle->j_theta_prev = theta_mech_now;
+        handle->j_theta_prev_init = 1U;
+        speed_mech_now = 0.0f;
+    } else {
+        delta_theta = MI_WrapDelta(theta_mech_now - handle->j_theta_prev);
+        handle->j_theta_prev = theta_mech_now;
+        speed_mech_now = delta_theta * (float)FOC_CONTROL_FREQ;
+    }
+
+    /* Low-pass filter speed (same as speed loop LPF at 20Hz) */
+    {
+        const float Ts = 1.0f / (float)FOC_CONTROL_FREQ;
+        const float wc = 2.0f * FOC_PI * 20.0f;
+        const float alpha_j = (wc * Ts) / (1.0f + wc * Ts);
+        handle->j_speed_mech = handle->j_speed_mech
+                             + alpha_j * (speed_mech_now - handle->j_speed_mech);
+    }
+
+    Kt = handle->param->Ke;  /* N·m/A = V/(rad/s) for PMSM */
+    if (Kt < 1e-10f) {
+        /* Fallback: no valid Ke, use defaults */
+        handle->param->J = 0.0001f;
+        handle->param->B = 0.001f;
+        return MI_ERR_J_NOT_CONVERGED;
+    }
+
+    switch (handle->j_state) {
+    case 0: /* INIT — start acceleration */
+        handle->j_accel_iq_sum = 0.0f;
+        handle->j_accel_iq_count = 0.0f;
+        handle->j_accel_v_start = 0.0f;
+        handle->j_accel_v_end = 0.0f;
+        handle->j_accel_t_start = 0U;
+        handle->j_accel_t_end = 0U;
+        handle->j_coast_v_start = 0.0f;
+        handle->j_coast_v_end = 0.0f;
+        handle->j_coast_t_start = 0U;
+        handle->j_coast_t_end = 0U;
+        handle->foc->Id_ref = 0.0f;
+        handle->foc->Iq_ref = MI_J_ACCEL_IQ_A;
+        handle->j_state = 1;
+        return MI_ERR_IN_PROGRESS;
+
+    case 1: /* ACCEL — measure speed ramp */
+        now_ms = HAL_GetTick();
+        if (MI_GetElapsedTime(handle) > (float)MI_J_ACCEL_TIMEOUT_MS) {
+            handle->param->J = 0.0001f;
+            handle->param->B = 0.001f;
+            handle->foc->Iq_ref = 0.0f;
+            return MI_ERR_J_NOT_CONVERGED;
+        }
+        /* Accumulate Iq for averaging */
+        handle->j_accel_iq_sum += handle->foc->Idq.q;
+        handle->j_accel_iq_count += 1.0f;
+
+        /* Speed crosses LOW threshold → record window start */
+        if ((handle->j_accel_t_start == 0U) &&
+            (handle->j_speed_mech >= MI_J_ACCEL_SPEED_LOW_RADPS)) {
+            handle->j_accel_v_start = handle->j_speed_mech;
+            handle->j_accel_t_start = now_ms;
+        }
+
+        /* Speed crosses HIGH threshold → record window end, compute J */
+        if ((handle->j_accel_t_end == 0U) &&
+            (handle->j_accel_t_start != 0U) &&
+            (handle->j_speed_mech >= MI_J_ACCEL_SPEED_HIGH_RADPS)) {
+            handle->j_accel_v_end = handle->j_speed_mech;
+            handle->j_accel_t_end = now_ms;
+
+            elapsed_s = (float)(handle->j_accel_t_end - handle->j_accel_t_start) * 0.001f;
+            if ((elapsed_s > 0.01f) && (handle->j_accel_iq_count > 0.0f)) {
+                float Iq_avg = handle->j_accel_iq_sum / handle->j_accel_iq_count;
+                float dv = handle->j_accel_v_end - handle->j_accel_v_start;
+                if (dv > 0.1f) {
+                    handle->param->J = Kt * fabsf(Iq_avg) * elapsed_s / dv;
+                    if (handle->param->J < MI_J_VALID_MIN) handle->param->J = MI_J_VALID_MIN;
+                    if (handle->param->J > MI_J_VALID_MAX) handle->param->J = MI_J_VALID_MAX;
+                } else {
+                    handle->param->J = 0.0001f;
+                }
+            }
+
+            /* Transition to coast phase */
+            handle->foc->Iq_ref = 0.0f;
+            handle->j_state = 2;
+        }
+        return MI_ERR_IN_PROGRESS;
+
+    case 2: /* COAST — measure speed decay for B */
+        now_ms = HAL_GetTick();
+        if (MI_GetElapsedTime(handle) > (float)(MI_J_ACCEL_TIMEOUT_MS + MI_J_COAST_TIMEOUT_MS)) {
+            /* Timeout: use J from accel, B default */
+            handle->param->B = 0.001f;
+            handle->j_state = 3;
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        /* Speed crosses high threshold → record coast start */
+        if ((handle->j_coast_t_start == 0U) &&
+            (handle->j_speed_mech <= (MI_J_ACCEL_SPEED_HIGH_RADPS * 0.9f))) {
+            handle->j_coast_v_start = handle->j_speed_mech;
+            handle->j_coast_t_start = now_ms;
+        }
+
+        /* Speed crosses low threshold → record coast end, compute B */
+        if ((handle->j_coast_t_end == 0U) &&
+            (handle->j_coast_t_start != 0U) &&
+            (handle->j_speed_mech <= MI_J_ACCEL_SPEED_LOW_RADPS)) {
+            handle->j_coast_v_end = handle->j_speed_mech;
+            handle->j_coast_t_end = now_ms;
+
+            elapsed_s = (float)(handle->j_coast_t_end - handle->j_coast_t_start) * 0.001f;
+            if ((elapsed_s > 0.01f) && (handle->param->J > MI_J_VALID_MIN)) {
+                float dv = handle->j_coast_v_start - handle->j_coast_v_end;
+                float v_avg = (handle->j_coast_v_start + handle->j_coast_v_end) * 0.5f;
+                if ((dv > 0.01f) && (v_avg > 0.1f)) {
+                    handle->param->B = handle->param->J * dv / (elapsed_s * v_avg);
+                    if (handle->param->B < MI_B_VALID_MIN) handle->param->B = MI_B_VALID_MIN;
+                    if (handle->param->B > MI_B_VALID_MAX) handle->param->B = MI_B_VALID_MAX;
+                } else {
+                    handle->param->B = 0.001f;
+                }
+            } else {
+                handle->param->B = 0.001f;
+            }
+
+            handle->j_state = 3;
+        }
+        return MI_ERR_IN_PROGRESS;
+
+    case 3: /* COMPLETE */
+        handle->foc->Iq_ref = 0.0f;
+        handle->foc->Id_ref = 0.0f;
+        /* If J still at invalid default, mark as not converged */
+        if (handle->param->J < MI_J_VALID_MIN || handle->param->J > MI_J_VALID_MAX) {
+            handle->param->J = 0.0001f;
+            handle->param->B = 0.001f;
+            return MI_ERR_J_NOT_CONVERGED;
+        }
+        return MI_ERR_NONE;
+
+    default:
+        handle->j_state = 0;
+        return MI_ERR_IN_PROGRESS;
+    }
 }
 
 /**
@@ -821,6 +1079,9 @@ MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle)
         if (encoder_status != MI_ERR_NONE) {
             return encoder_status;
         }
+        if ((TLE5012_GetCRCErrorCount() > 3U) || (TLE5012_GetSpiErrorCount() > 0U)) {
+            return MI_ERR_ENCODER_INVALID;
+        }
         float theta_mech = TLE5012_GetAngle() * MI_DEG2RAD;
         handle->param->theta_mech_zero = theta_mech;
         /* The rotor is locked to electrical d=0 here; store that electrical zero directly. */
@@ -842,6 +1103,23 @@ static void MI_ShutdownOutput(MI_Handle_t *handle)
     handle->foc->ValphaBeta.beta = 0.0f;
     handle->foc->pi_d.integral = 0.0f;
     handle->foc->pi_q.integral = 0.0f;
+    FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+}
+
+static void MI_ApplyVerifyVoltageVector(MI_Handle_t *handle, float theta_elec)
+{
+    float voltage_mag = handle->foc->Vbus * MI_VERIFY_VOLTAGE_RATIO;
+
+    voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_VERIFY_VOLTAGE_MAX_V);
+    FOC_SetAngle(handle->foc, theta_elec);
+    handle->foc->Id_ref = 0.0f;
+    handle->foc->Iq_ref = 0.0f;
+    handle->foc->Vdq.d = 0.0f;
+    handle->foc->Vdq.q = 0.0f;
+    handle->foc->pi_d.integral = 0.0f;
+    handle->foc->pi_q.integral = 0.0f;
+    handle->foc->ValphaBeta.alpha = voltage_mag * cosf(handle->foc->theta_elec);
+    handle->foc->ValphaBeta.beta = voltage_mag * sinf(handle->foc->theta_elec);
     FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
 }
 
@@ -884,14 +1162,7 @@ MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle)
         handle->verify_expected_dir = (handle->pn_observed_dir != 0) ?
                                        handle->pn_observed_dir : (int8_t)1;
         handle->state_start_time = HAL_GetTick();
-        FOC_SetAngle(handle->foc, 0.0f);
-        {   /* Vbus/Rs安全电流限幅 */
-            float vcur = MI_VERIFY_CURRENT;
-            float rs_s = (handle->param->Rs > 0.1f) ? handle->param->Rs : 1.0f;
-            float vlim = handle->foc->Vbus * 0.577f * 0.85f / rs_s;
-            if (vcur > vlim) { vcur = vlim; }
-            FOC_SetCurrentReference(handle->foc, vcur, 0.0f);
-        }
+        MI_ApplyVerifyVoltageVector(handle, 0.0f);
         return MI_ERR_IN_PROGRESS;
     }
 
@@ -954,18 +1225,172 @@ MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle)
     omega_elec = 2.0f * FOC_PI * MI_VERIFY_MECH_FREQ_HZ * pole_pairs;
     handle->verify_elec_cmd = FOC_AngleNormalize(handle->verify_elec_cmd + omega_elec * MI_CONTROL_DT);
 
-    {
-        FOC_SetAngle(handle->foc, handle->verify_elec_cmd);
-        {   /* Vbus/Rs安全电流限幅 */
-            float vcur = MI_VERIFY_CURRENT;
-            float rs_s = (handle->param->Rs > 0.1f) ? handle->param->Rs : 1.0f;
-            float vlim = handle->foc->Vbus * 0.577f * 0.85f / rs_s;
-            if (vcur > vlim) { vcur = vlim; }
-            FOC_SetCurrentReference(handle->foc, vcur, 0.0f);
-        }
-    }
+    MI_ApplyVerifyVoltageVector(handle, handle->verify_elec_cmd);
 
     return MI_ERR_IN_PROGRESS;
+}
+
+/**
+ * @brief 齿槽转矩LUT识别 — 慢速开环拖动+分bin记录
+ * @param handle 识别句柄指针
+ * @return 错误代码
+ *
+ * 方法: 开环旋转电压矢量以恒定低速拖动电机，记录每个机械角bin的Iq反馈，
+ *       完整一转后做bin平均，生成264-entry补偿LUT存入Flash。
+ */
+MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle)
+{
+    MI_ErrorCode_t encoder_status;
+    float theta_mech_now;
+    float delta_mech;
+    float omega_elec;
+    float pole_pairs;
+    uint32_t elapsed;
+    uint16_t i;
+    float voltage_mag;
+
+    encoder_status = MI_RequireValidEncoder(handle);
+    if (encoder_status != MI_ERR_NONE) {
+        return encoder_status;
+    }
+
+    theta_mech_now = TLE5012_GetAngle() * MI_DEG2RAD;
+    pole_pairs = (handle->param->Pn > 0U) ? (float)handle->param->Pn : 1.0f;
+
+    switch (handle->cg_state) {
+    case 0: /* INIT — reset tracking, start drag */
+        handle->cg_theta_start = theta_mech_now;
+        handle->cg_theta_prev = theta_mech_now;
+        handle->cg_theta_accum = 0.0f;
+        handle->cg_drag_theta_elec = 0.0f;
+        handle->cg_drag_speed_elec = MI_COGGING_DRAG_SPEED_MECH_RADPS * pole_pairs;
+        voltage_mag = handle->foc->Vbus * MI_COGGING_DRAG_VOLTAGE_RATIO;
+        voltage_mag = MI_ClampAbsVoltage(voltage_mag, MI_COGGING_DRAG_VOLTAGE_MAX_V);
+        handle->cg_drag_voltage = voltage_mag;
+        memset(handle->cg_bin_iq_sum, 0, sizeof(handle->cg_bin_iq_sum));
+        memset(handle->cg_bin_count, 0, sizeof(handle->cg_bin_count));
+        handle->cg_state = 1;
+        return MI_ERR_IN_PROGRESS;
+
+    case 1: /* SETTLE — wait for steady motion */
+        /* Apply open-loop rotating voltage vector */
+        handle->cg_drag_theta_elec = FOC_AngleNormalize(
+            handle->cg_drag_theta_elec + handle->cg_drag_speed_elec * MI_CONTROL_DT);
+        handle->foc->Id_ref = 0.0f;
+        handle->foc->Iq_ref = 0.0f;
+        handle->foc->pi_d.integral = 0.0f;
+        handle->foc->pi_q.integral = 0.0f;
+        handle->foc->ValphaBeta.alpha = handle->cg_drag_voltage * cosf(handle->cg_drag_theta_elec);
+        handle->foc->ValphaBeta.beta  = handle->cg_drag_voltage * sinf(handle->cg_drag_theta_elec);
+        FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+        if (MI_GetElapsedTime(handle) > (float)MI_COGGING_SETTLE_MS) {
+            handle->cg_state = 2;
+            handle->state_start_time = HAL_GetTick();
+        }
+        return MI_ERR_IN_PROGRESS;
+
+    case 2: /* RECORD — bin Iq feedback by mechanical angle for one full revolution */
+        elapsed = (uint32_t)MI_GetElapsedTime(handle);
+        if (elapsed > (uint32_t)MI_COGGING_RECORD_TIMEOUT_MS) {
+            /* Timeout: incomplete but use what we have */
+            handle->cg_state = 3;
+            handle->state_start_time = HAL_GetTick();
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        /* Continue open-loop drag */
+        handle->cg_drag_theta_elec = FOC_AngleNormalize(
+            handle->cg_drag_theta_elec + handle->cg_drag_speed_elec * MI_CONTROL_DT);
+        handle->foc->Id_ref = 0.0f;
+        handle->foc->Iq_ref = 0.0f;
+        handle->foc->pi_d.integral = 0.0f;
+        handle->foc->pi_q.integral = 0.0f;
+        handle->foc->ValphaBeta.alpha = handle->cg_drag_voltage * cosf(handle->cg_drag_theta_elec);
+        handle->foc->ValphaBeta.beta  = handle->cg_drag_voltage * sinf(handle->cg_drag_theta_elec);
+        FOC_SVPWM_Generate(&handle->foc->ValphaBeta, handle->foc->Vbus, &handle->foc->svpwm);
+
+        /* Track accumulated mechanical angle */
+        delta_mech = MI_WrapDelta(theta_mech_now - handle->cg_theta_prev);
+        handle->cg_theta_prev = theta_mech_now;
+        handle->cg_theta_accum += delta_mech;
+
+        /* Bin Iq feedback by mechanical angle */
+        {
+            float theta_norm = FOC_AngleNormalize(theta_mech_now);
+            float index_f = (theta_norm + FOC_PI) / (2.0f * FOC_PI) * 264.0f;
+            int idx = (int)index_f;
+            if (idx >= 264) idx = 0;
+            if (idx < 0) idx = 263;
+            handle->cg_bin_iq_sum[idx] += handle->foc->Idq.q;
+            handle->cg_bin_count[idx]++;
+        }
+
+        /* Check if we have completed at least one full revolution */
+        if (handle->cg_theta_accum >= (2.0f * FOC_PI - 0.1f)) {
+            handle->cg_state = 3;
+            handle->state_start_time = HAL_GetTick();
+        }
+        return MI_ERR_IN_PROGRESS;
+
+    case 3: /* COMPUTE — average bins to build LUT */
+    {
+        float cogging_lut[264];
+        float iq_avg_total = 0.0f;
+        uint16_t valid_bins = 0U;
+
+        /* Compute per-bin average and global average */
+        for (i = 0U; i < 264U; i++) {
+            if (handle->cg_bin_count[i] > 0U) {
+                cogging_lut[i] = handle->cg_bin_iq_sum[i] / (float)handle->cg_bin_count[i];
+                iq_avg_total += cogging_lut[i];
+                valid_bins++;
+            } else {
+                cogging_lut[i] = 0.0f;
+            }
+        }
+
+        /* Remove DC component: cogging LUT = (per-bin avg) - (global avg) */
+        if (valid_bins > 0U) {
+            float iq_global_avg = iq_avg_total / (float)valid_bins;
+            for (i = 0U; i < 264U; i++) {
+                if (handle->cg_bin_count[i] > 0U) {
+                    cogging_lut[i] -= iq_global_avg;
+                }
+            }
+        }
+
+        /* If too few valid bins, mark as invalid */
+        if (valid_bins < 130U) {
+            /* Less than half the bins have data; skip saving */
+            handle->cg_state = 4;
+            return MI_ERR_IN_PROGRESS;
+        }
+
+        /* Save to Flash via param_storage */
+        {
+            ParamStatus_t st = Param_SaveCoggingLUT(cogging_lut, 264U);
+            if (st == PARAM_OK) {
+                handle->cg_state = 4;
+                return MI_ERR_IN_PROGRESS;
+            }
+            /* Flash write failed but non-fatal */
+        }
+
+        handle->cg_state = 4;
+        return MI_ERR_IN_PROGRESS;
+    }
+
+    case 4: /* DONE — cleanup */
+        handle->foc->Id_ref = 0.0f;
+        handle->foc->Iq_ref = 0.0f;
+        MI_ShutdownOutput(handle);
+        return MI_ERR_NONE;
+
+    default:
+        handle->cg_state = 0;
+        return MI_ERR_IN_PROGRESS;
+    }
 }
 
 /**
@@ -992,13 +1417,21 @@ uint8_t MI_CheckMechanicalLock(MI_Handle_t *handle)
  */
 void MI_UpdatePIWithNewRs(FOC_Handle_t *foc, float Rs_new)
 {
-    /* 根据新Rs更新电流环Ki */
-    /* 与FOC_App_UpdatePIParams保持一致：Ki = Rs * 2π * bandwidth * T_sample */
-    float bandwidth = 300.0f;  /* 24V高阻电机Rs更新时降低带宽防过流 */
-    float T_sample = 1.0f / (float)FOC_CONTROL_FREQ;
-    
-    foc->pi_d.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
-    foc->pi_q.Ki = Rs_new * 2.0f * FOC_PI * bandwidth * T_sample;
+    (void)Rs_new;
+
+    /* Keep post-Rs control on the conservative bench baseline used at runtime. */
+    FOC_PI_Init(&foc->pi_d,
+                FOC_CURRENT_LOOP_KP_12V_BENCH,
+                FOC_CURRENT_LOOP_KI_12V_BENCH,
+                foc->pi_d.output_max,
+                foc->pi_d.output_min);
+    FOC_PI_Init(&foc->pi_q,
+                FOC_CURRENT_LOOP_KP_12V_BENCH,
+                FOC_CURRENT_LOOP_KI_12V_BENCH,
+                foc->pi_q.output_max,
+                foc->pi_q.output_min);
+    foc->pi_d.integral_sep_thresh = 1.5f;
+    foc->pi_q.integral_sep_thresh = 1.5f;
 }
 
 /**

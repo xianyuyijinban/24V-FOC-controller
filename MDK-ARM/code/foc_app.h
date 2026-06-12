@@ -21,6 +21,23 @@ extern "C" {
 
 /*==================== 配置参数 ====================*/
 
+/* 前馈使能开关 (BEMF解耦在 foc_core.h) */
+#define FOC_FF_ENABLE_INERTIA    0   /* P2: 加速度/惯量前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_INERTIA_MAX_A     0.50f /* 惯量前馈最大补偿电流 A */
+#define FOC_FF_INERTIA_J_MIN     1.0e-6f /* P2门禁: J合理下限 kg·m² */
+#define FOC_FF_INERTIA_J_MAX     0.01f  /* P2门禁: J合理上限 kg·m² */
+#define FOC_FF_INERTIA_B_MAX     0.05f  /* P2门禁: B合理上限 N·m·s/rad */
+#define FOC_FF_ENABLE_FRICTION   0   /* P3: 库仑+粘滞摩擦前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_FF_COULOMB_DEADBAND_RADPS 0.05f /* 库仑摩擦死区速度 */
+#define FOC_FF_FRICTION_MAX_A    0.50f /* 摩擦前馈最大补偿电流 A */
+#define FOC_FF_ENABLE_COGGING    0   /* P0: 齿槽转矩LUT前馈 (v4_safe_baseline: 默认关闭) */
+#define FOC_COGGING_LUT_SIZE     264 /* LCM(24,22) for 24N22P motor */
+#define FOC_FF_COGGING_MAX_A     0.30f /* 齿槽前馈最大补偿电流 A */
+#define FOC_FF_ENABLE_OBSERVER   0   /* P4: 负载转矩观测器 (默认关闭，需调参) */
+#define FOC_FF_OBSERVER_GAIN_L   50.0f /* 观测器收敛率 rad/s */
+#define FOC_FF_OBSERVER_LPF_HZ   10.0f /* 观测器输出LPF截止频率 Hz */
+#define FOC_FF_OBSERVER_MAX_A    1.0f  /* 观测器前馈最大补偿电流 A */
+
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
 #define FOC_PWM_PERIOD          50          /* ARR=49, center-aligned */
@@ -31,15 +48,15 @@ extern "C" {
 #define FOC_SPEED_EST_ACCEL_LIMIT_RAD_PER_S2 60.0f /* 速度估算限斜率，抑制低速编码器离群尖峰 */
 #define FOC_SPEED_STATIC_FRICTION_POS_COMP_A 0.03f /* Rs前馈启用后降低起动补偿，避免低速冲飞 */
 #define FOC_SPEED_STATIC_FRICTION_NEG_COMP_A 0.03f /* Rs前馈启用后正反向使用对称起动补偿 */
-#define FOC_SPEED_POSITIVE_IQ_LIMIT_A 0.25f /* 12V/Rs前馈台架速度模式保守限流 */
-#define FOC_SPEED_NEGATIVE_IQ_LIMIT_A 0.25f /* 12V/Rs前馈台架速度模式保守限流 */
-#define FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A 0.25f /* 位置模式先以保守抓力跑通 */
-#define FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A 0.25f /* 位置模式先以保守抓力跑通 */
-#define FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 1.0f /* 速度给定限斜率，12V台架小步稳定响应 */
-#define FOC_CURRENT_LOOP_KP_12V_BENCH       0.30f /* 12V/8.8R低边采样台架实测零电流稳定基线 */
-#define FOC_CURRENT_LOOP_KI_12V_BENCH       0.1f  /* 小积分消除Id稳态误差（需搭配低分离阈值） */
-#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.03f /* Rs前馈后位置起动补偿只保留小偏置 */
-#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.03f /* Rs前馈后位置起动补偿只保留小偏置 */
+#define FOC_SPEED_POSITIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
+#define FOC_SPEED_NEGATIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
+#define FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
+#define FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
+#define FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 2.0f /* V4 装配基线 */
+#define FOC_CURRENT_LOOP_KP_12V_BENCH       0.03f /* P-only bench baseline: tracks 50mA without q-axis oscillation. */
+#define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* Keep current-loop integral off until polarity and torque sign are verified. */
+#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.05f /* 位置末端小误差静摩擦补偿，帮助闭合最后几度 */
+#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.05f /* 正反向对称补偿，避免零位附近方向偏置 */
 #define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */
 #define FOC_POSITION_PD_KD_DEFAULT 0.12f /* 12V台架位置模式默认速度阻尼 */
 #define FOC_POSITION_PD_KP_SCALE 1.0f   /* 派生增益 */
@@ -77,7 +94,9 @@ extern "C" {
 #define FOC_STALL_OPEN_LOOP_CURRENT_MAX_A            2.0f   /* 堵转开环试转电流上限 */
 #define FOC_STALL_OPEN_LOOP_DEFAULT_SPEED_RAD_PER_S  5.0f   /* 未显式给speed时的默认试转速度 */
 #define FOC_STALL_OPEN_LOOP_DEFAULT_IQ_A             0.5f   /* 未显式给Iq时的默认试转扭矩 */
-#define FOC_POSITION_SPEED_LIMIT_RAD_PER_S           1.0f   /* 位置PD输出速度上限，配合1rad/s^2斜坡 */
+#define FOC_POSITION_SPEED_LIMIT_RAD_PER_S           2.0f   /* V4 装配基线 */
+#define FOC_POSITION_CRUISE_SPEED_RAD_PER_S          0.80f  /* V4 巡航速度下限 */
+#define FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD       0.087f /* V4 巡航切PD阈值 (~5 deg) */
 #define FOC_WARNING_VBUS_UNDERVOLTAGE_BIT (1UL << 0)
 #define FOC_WARNING_VBUS_OVERVOLTAGE_BIT  (1UL << 1)
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */
@@ -128,6 +147,42 @@ typedef struct {
     float output_min;
 } FOC_PositionPD_t;
 
+/* 齿槽转矩LUT (P0 feedforward) */
+typedef struct {
+    float table[FOC_COGGING_LUT_SIZE];  /* Iq补偿值 vs 机械角bin */
+    uint16_t valid_size;                /* 实际有效表项数 */
+    uint8_t  valid;                     /* 1 = LUT已加载且有效 */
+} FOC_CoggingLUT_t;
+
+/* 负载转矩观测器 (P4) — Gopinath型降维扰动观测器 */
+typedef struct {
+    float z;            /* 观测器状态 */
+    float J_hat;        /* 估计惯量 kg·m² */
+    float B_hat;        /* 估计粘滞摩擦 N·m·s/rad */
+    float Kt;           /* 转矩常数 N·m/A */
+    float l;            /* 观测器增益 rad/s */
+    float T_est;        /* 估计扰动转矩 N·m */
+    float T_lpf;        /* 低通滤波后估计值 */
+    uint8_t enabled;    /* 使能标志 */
+} FOC_TorqueObserver_t;
+
+/* 前馈诊断结构体 (FFDiag) */
+typedef struct {
+    float bemf_vd;              /* P1 BEMF解耦 Vd补偿量 V */
+    float bemf_vq;              /* P1 BEMF解耦 Vq补偿量 V */
+    float inertia_iq;           /* P2 惯量前馈 Iq贡献 A */
+    float friction_iq;          /* P3 摩擦前馈 Iq贡献 A */
+    float cogging_iq;           /* P0 齿槽前馈 Iq贡献 A */
+    float observer_iq;          /* P4 观测器前馈 Iq贡献 A */
+    float ff_total_iq;          /* 前馈总Iq贡献 A */
+    uint8_t bemf_enabled;       /* P1 使能状态 */
+    uint8_t inertia_blocked;    /* P2 被门禁阻止 */
+    uint8_t friction_enabled;   /* P3 使能状态 */
+    uint8_t cogging_enabled;    /* P0 使能状态 */
+    uint8_t observer_enabled;   /* P4 使能状态 */
+    uint8_t ff_enc_dir_blocked; /* 因enc_dir != -1阻止所有前馈 */
+} FOC_FFDiag_t;
+
 /* FOC应用层句柄 */
 typedef struct {
     /* 核心FOC */
@@ -162,11 +217,17 @@ typedef struct {
     float Iq_ref;
     float speed_ref;
     float speed_ref_ramped;     /* 速度模式内部限斜率给定 rad/s */
+    float speed_ref_ramped_prev;/* 上一拍速度给定 (惯量前馈加速度计算) */
     float pos_ref;              /* 位置给定 (rad) */
     
     /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
     FOC_PositionPD_t pos_pd;        /* 位置环PD */
+
+    /* 前馈数据 */
+    FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */
+    FOC_TorqueObserver_t torque_obs;/* 负载转矩观测器 (P4) */
+    FOC_FFDiag_t ff_diag;           /* 前馈诊断数据 */
     
     /* 运行时计数 */
     uint32_t control_count;
@@ -185,6 +246,9 @@ typedef struct {
     float position_loop_pd_out_diag;    /* 位置PD输出到速度给定 rad/s */
     uint8_t position_loop_pd_sat_diag;  /* 位置PD输出是否触及速度上限 */
     uint8_t position_loop_speed_ramp_sat_diag; /* 位置模式速度斜坡是否限制给定 */
+    /* V4 轨迹诊断 */
+    uint8_t  traj_active_diag;     /* 巡航模式激活标志 */
+    float    traj_cmd_diag;        /* 最终速度指令 rad/s */
     uint8_t position_loop_iq_pos_sat_diag;     /* 位置模式正向Iq是否触顶 */
     uint8_t position_loop_iq_neg_sat_diag;     /* 位置模式负向Iq是否触底 */
     uint32_t position_pref_cmd_count_diag;     /* 最近PREF命令计数 */
@@ -196,6 +260,7 @@ typedef struct {
     
     /* 使能标志 */
     uint8_t motor_identified;      /* 0=未识别，1=已识别 */
+    uint8_t ff_blocked_by_enc_dir; /* 1=enc_dir != -1，阻止所有前馈验证 */
     uint8_t stall_mode_armed;      /* 0=未授权，1=允许未识别堵转使能 */
     uint8_t stall_open_loop_active;/* 0=关闭，1=编码器离线开环试转中 */
     uint8_t power_unlocked;        /* 0=锁定，1=允许功率级动作 */

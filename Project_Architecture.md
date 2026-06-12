@@ -28,6 +28,51 @@
 - `FDCAN` 当前仍通过 `FOC_DEBUG_DISABLE_FDCAN_INIT=1U` 临时跳过初始化，避免 bench 启动链继续引入额外变量；待主链路跑通后，再单独回到 `HSE` 路径处理外部晶振。
 - 当前推荐调试接口为 `CMSIS-DAP`（SWD）；文档里旧的 `ST-Link V3` 表述不再作为当前台架默认方案。
 
+### 前馈系统架构（2026-06-11 新增 P0-P4）
+
+**已实现前馈（11条）**:
+
+| # | 前馈项 | 注入点 | 文件 | 状态 |
+|---|--------|--------|------|------|
+| 1 | Rs·I_ref 电阻电压 | Vd_cmd/Vq_cmd (PI前) | foc_core.c:382 | 原有 |
+| 2 | 位置PD速度阻尼 | speed_cmd = Kp·pos_err − Kd·ω | foc_app.c:1621 | 原有 |
+| 3 | 静摩擦破冰 | Iq_ref_mech 叠加 ±0.03~0.05A | foc_app.c:827 | 原有 |
+| 4 | 速度给定斜坡限速 | speed_ref → speed_ref_ramped | foc_app.c:788 | 原有 |
+| 5 | 位置巡航速度下限 | cruise_cmd ≥ 0.80 rad/s | foc_app.c:922 | 原有 |
+| 6 | 堵转开环替代 | 全链路替代（编码器离线） | foc_app.c:692 | 原有 |
+| **P1** | **BEMF解耦** | **Vd/Vq_cmd (PI后)** | **foc_core.c** | **新增** |
+| **P2** | **加速度/惯量** | **Iq_ref_mech 叠加** | **foc_app.c** | **新增** |
+| **P3** | **库仑+粘滞摩擦** | **Iq_ref_mech 叠加** | **foc_app.c** | **新增** |
+| **P0** | **齿槽转矩LUT** | **Iq_ref_mech 叠加** | **foc_app.c** | **新增** |
+| **P4** | **负载转矩观测器** | **Iq_ref_mech 叠加** | **foc_app.c** | **新增(默认关闭)** |
+
+**注入点汇聚**:
+```
+SpeedLoop iq_ref_mech 叠加链:
+  PI_output
+    + inertia_ff      (P2: J·α/Kt)
+    + coulomb_ff      (P3: sign(ω)·Tc/Kt)
+    + viscous_ff      (P3: B·ω/Kt)
+    + cogging_ff      (P0: 264-bin LUT插值)
+    + observer_ff     (P4: Gopinath观测器, 默认关)
+    + friction_comp   (原有: 静摩擦破冰)
+    → iq_ref_mech → iq_cmd
+
+Current loop Vd/Vq 叠加链:
+  Rs·I_ref + PI_output
+    + BEMF_decoupling (P1: -ωLqIq / +ω(LdId+Ke))
+    → Vd_cmd/Vq_cmd → SVPWM
+```
+
+**编译开关**:
+```c
+#define FOC_FF_ENABLE_BEMF       1   // foc_core.h
+#define FOC_FF_ENABLE_INERTIA    1   // foc_app.h
+#define FOC_FF_ENABLE_FRICTION   1   // foc_app.h
+#define FOC_FF_ENABLE_COGGING    1   // foc_app.h
+#define FOC_FF_ENABLE_OBSERVER   0   // foc_app.h (默认关闭)
+```
+
 ---
 
 ## 系统架构图
@@ -287,9 +332,11 @@ flowchart TB
         PN --> RS[Rs识别<br/>直流伏安法]
         RS --> LS[Ls识别<br/>高频注入法]
         LS --> KE[Ke识别<br/>|Eαβ|/ωe(实测速度)]
-        KE --> J[J/B识别<br/>当前为默认参数占位]
-        J --> ALIGN[编码器对齐<br/>锁轴估计theta_offset / theta_mech_zero]
-        ALIGN --> SAVE[保存参数]
+        KE --> J[J/B识别<br/>恒电流加速+滑行法]
+        J --> COGGING[齿槽LUT识别<br/>开环慢速拖动+分bin]
+        COGGING --> ALIGN[编码器对齐<br/>锁轴估计theta_offset / theta_mech_zero]
+        ALIGN --> VERIFY[运动认证<br/>单向弱运动验证]
+        VERIFY --> SAVE[保存参数+LUT]
     end
 
     subgraph 在线补偿
@@ -393,9 +440,13 @@ void FOC_PI_Init(FOC_PI_Controller_t *pi, float Kp, float Ki, float output_max, 
 float FOC_PI_Update(FOC_PI_Controller_t *pi, float error);
 void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q);
 void FOC_SetCurrentReference(FOC_Handle_t *foc, float Id_ref, float Iq_ref);
+void FOC_SetCurrentResistance(FOC_Handle_t *foc, float resistance_ohm);
+void FOC_SetBemfParams(FOC_Handle_t *foc, float Ld, float Lq, float Ke);   /* P1 BEMF */
+void FOC_SetOmegaElec(FOC_Handle_t *foc, float omega_elec_radps);          /* P1 BEMF */
 void FOC_SetAngle(FOC_Handle_t *foc, float theta_elec);
 void FOC_SetVbus(FOC_Handle_t *foc, float Vbus);
 void FOC_UpdateCurrent(FOC_Handle_t *foc, float Ia, float Ib, float Ic);
+void FOC_RegenerateVoltageVector(FOC_Handle_t *foc);
 void FOC_Run(FOC_Handle_t *foc);
 void FOC_GetPWM(FOC_Handle_t *foc, uint16_t *pwm_a, uint16_t *pwm_b, uint16_t *pwm_c, uint16_t pwm_period);
 void FOC_GetModulationWave(const FOC_Handle_t *foc, float *ma, float *mb, float *mc);
@@ -412,19 +463,20 @@ static inline float FOC_AngleNormalize(float angle);
 
 ```c
 /* 数据结构 */
-MotorParam_t        // 电机参数结构体 (Rs, Ld, Lq, Ke, Pn, J, B, theta_offset, theta_mech_zero)
+MotorParam_t        // 电机参数结构体 (Rs, Ld, Lq, Ke, Pn, J, B, Tc, theta_offset, theta_mech_zero, mech_zero_offset)
 RsOnlineEstimator_t // Rs在线估计器
 MI_Handle_t         // 识别控制句柄
 
 /* 识别状态 */
 MI_STATE_IDLE → MI_STATE_PN_IDENTIFY → MI_STATE_RS_IDENTIFY → 
 MI_STATE_LS_IDENTIFY → MI_STATE_KE_IDENTIFY → MI_STATE_J_IDENTIFY → 
-MI_STATE_ENCODER_ALIGN → MI_STATE_COMPLETE
+MI_STATE_ENCODER_ALIGN → MI_STATE_MOTION_VERIFY → MI_STATE_COGGING_IDENTIFY → MI_STATE_COMPLETE
 
 /* 错误代码 */
 MI_ERR_NONE, MI_ERR_MOTOR_MOVING, MI_ERR_RS_NOT_CONVERGED, 
 MI_ERR_LS_NOT_CONVERGED, MI_ERR_KE_NOT_CONVERGED, MI_ERR_PN_NOT_CONVERGED,
-MI_ERR_J_NOT_CONVERGED, MI_ERR_CURRENT_TOO_LOW, MI_ERR_CURRENT_TOO_HIGH, MI_ERR_TIMEOUT
+MI_ERR_J_NOT_CONVERGED, MI_ERR_CURRENT_TOO_LOW, MI_ERR_CURRENT_TOO_HIGH,
+MI_ERR_ENCODER_INVALID, MI_ERR_TIMEOUT, MI_ERR_PHASE_SEQUENCE
 
 /* 核心函数 */
 void MI_Init(MI_Handle_t *handle, MotorParam_t *param, FOC_Handle_t *foc);
@@ -437,8 +489,10 @@ MI_ErrorCode_t MI_IdentifyPn(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyRs(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyLs(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle);
-MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle);
+MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle);        /* 恒电流加速+滑行法 */
+MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle);   /* 开环拖动+分bin LUT */
 MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle);
+MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle);
 
 /* Rs在线估计 */
 void MI_RsOnlineEstimator_Init(RsOnlineEstimator_t *est, float alpha);
@@ -457,7 +511,11 @@ ParamPackage_t      // 完整参数包
 /* 核心函数 */
 ParamStatus_t Param_Load(MotorParam_t *param);
 ParamStatus_t Param_Save(const MotorParam_t *param);
+ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size);  /* P0 齿槽LUT */
+ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size);       /* P0 齿槽LUT */
 uint8_t Param_IsValid(const MotorParam_t *param);
+uint32_t Param_GetInvalidFlags(const MotorParam_t *param);
+void Param_SetDefault(MotorParam_t *param);
 uint32_t Param_CalculateCRC32(const void *data, uint32_t size);
 ```
 
@@ -911,15 +969,15 @@ graph TB
 | 模块 | RAM使用 | Flash使用 | 说明 |
 |------|---------|-----------|------|
 | HAL库 | ~8KB | ~50KB | 标准HAL库 |
-| FOC核心 | ~256B | ~4KB | 算法代码 |
-| 参数识别 | ~512B | ~8KB | 识别算法 |
-| 参数存储 | ~128B | ~1KB | Flash操作 |
-| 应用层 | ~1KB | ~8KB | 状态机+三环控制 |
+| FOC核心 | ~320B | ~5KB | 算法代码 (+BEMF解耦) |
+| 参数识别 | ~3KB | ~15KB | 识别算法 (+J/B识别+齿槽LUT) |
+| 参数存储 | ~128B | ~2KB | Flash操作 (+LUT存储) |
+| 应用层 | ~3KB | ~14KB | 状态机+三环+4条前馈 |
 | ADC采样 | ~128B | ~2KB | 采样处理 |
 | 编码器驱动 | ~64B | ~2KB | SPI通信 |
 | 栅极驱动 | ~256B | ~6KB | SPI通信 |
 | UART上传 | ~1KB | ~4KB | 数据上传 |
-| **总计** | **~11KB** | **~85KB** | 估算值 |
+| **总计** | **~16KB** | **~100KB** | 含齿槽LUT (264 floats ≈ 1KB RAM) |
 
 ---
 
@@ -1057,8 +1115,8 @@ State : 4
 
 ## 版本信息
 
-- **版本**: v1.7
-- **日期**: 2026-03-04
+- **版本**: v1.10
+- **日期**: 2026-06-11
 - **作者**: FOC开发团队
 - **硬件**: STM32H743VIT6 + TLE5012B + DRV8350S
 
@@ -1076,3 +1134,4 @@ State : 4
 | v1.7 | 2026-03-04 | DRV8350S异步读失败路径清理pending，避免BusLock等待超时 |
 | v1.8 | 2026-04-02 | 低边分流ADC触发改为TIM1_CH4/TRGO2，新增ADC帧新鲜度校验、采样故障升级与UART诊断 |
 | v1.9 | 2026-04-05 | 台架回退HSI启动、ADC零点校准预触发顺序修复、UART故障快照缓冲与格式化加固 |
+| **v1.10** | **2026-06-11** | **前馈系统全面补齐：P1 BEMF解耦、P2 惯量前馈+J/B识别重写、P3 库仑+粘滞摩擦(+Tc)、P0 齿槽LUT(264bin+识别+Flash)、P4 负载转矩观测器(默认关)。PARAM_VERSION→0x00010009** |

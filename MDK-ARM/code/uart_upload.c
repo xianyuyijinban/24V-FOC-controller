@@ -202,12 +202,30 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->positionLoopRampSat = g_foc_app.position_loop_speed_ramp_sat_diag;
     packet->positionLoopIqPosSat = g_foc_app.position_loop_iq_pos_sat_diag;
     packet->positionLoopIqNegSat = g_foc_app.position_loop_iq_neg_sat_diag;
+    packet->trajActive = g_foc_app.traj_active_diag;
+    packet->trajCmd = g_foc_app.traj_cmd_diag;
     packet->positionPrefCmdCount = g_foc_app.position_pref_cmd_count_diag;
     packet->positionPrefRaw = g_foc_app.position_pref_raw_diag;
     packet->positionPrefMapped = g_foc_app.position_pref_mapped_diag;
     packet->positionPrefBefore = g_foc_app.position_pref_before_diag;
     packet->positionPrefAfter = g_foc_app.position_pref_after_diag;
     packet->positionPrefUserSet = g_foc_app.position_pref_user_set_diag;
+
+    /* FFDiag 前馈诊断 */
+    packet->ffBemfVd = g_foc_app.ff_diag.bemf_vd;
+    packet->ffBemfVq = g_foc_app.ff_diag.bemf_vq;
+    packet->ffInertiaIq = g_foc_app.ff_diag.inertia_iq;
+    packet->ffFrictionIq = g_foc_app.ff_diag.friction_iq;
+    packet->ffCoggingIq = g_foc_app.ff_diag.cogging_iq;
+    packet->ffObserverIq = g_foc_app.ff_diag.observer_iq;
+    packet->ffTotalIq = g_foc_app.ff_diag.ff_total_iq;
+    packet->ffBemfEnabled = g_foc_app.ff_diag.bemf_enabled;
+    packet->ffInertiaBlocked = g_foc_app.ff_diag.inertia_blocked;
+    packet->ffFrictionEnabled = g_foc_app.ff_diag.friction_enabled;
+    packet->ffCoggingEnabled = g_foc_app.ff_diag.cogging_enabled;
+    packet->ffObserverEnabled = g_foc_app.ff_diag.observer_enabled;
+    packet->ffEncDirBlocked = g_foc_app.ff_diag.ff_enc_dir_blocked;
+
     packet->undervoltageLimit = g_foc_app.protection.undervoltage_limit_v;
     packet->overvoltageLimit = g_foc_app.protection.overvoltage_limit_v;
     packet->focState = (uint8_t)g_foc_app.state;
@@ -516,6 +534,7 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     char speedLoopIqCmdText[20];
     char positionLoopErrorText[20];
     char positionLoopPdOutText[20];
+    char trajCmdText[20];
     char positionPrefRawText[20];
     char positionPrefMappedText[20];
     char positionPrefBeforeText[20];
@@ -595,6 +614,7 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     DrvUart_FormatFixed(speedLoopIqCmdText, sizeof(speedLoopIqCmdText), packet->speedLoopIqCmd, 3U);
     DrvUart_FormatFixed(positionLoopErrorText, sizeof(positionLoopErrorText), packet->positionLoopError, 3U);
     DrvUart_FormatFixed(positionLoopPdOutText, sizeof(positionLoopPdOutText), packet->positionLoopPdOut, 3U);
+    DrvUart_FormatFixed(trajCmdText, sizeof(trajCmdText), packet->trajCmd, 3U);
     DrvUart_FormatFixed(positionPrefRawText, sizeof(positionPrefRawText), packet->positionPrefRaw, 3U);
     DrvUart_FormatFixed(positionPrefMappedText, sizeof(positionPrefMappedText), packet->positionPrefMapped, 3U);
     DrvUart_FormatFixed(positionPrefBeforeText, sizeof(positionPrefBeforeText), packet->positionPrefBefore, 3U);
@@ -706,6 +726,12 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                packet->positionLoopRampSat,
                packet->positionLoopIqPosSat,
                packet->positionLoopIqNegSat);
+    APPEND_FMT("  TrajDiag: active=%u | cmd=%s rad/s | pd=%s rad/s | cruise=%.3f | hold=%.3f\r\n\r\n",
+               packet->trajActive,
+               trajCmdText,
+               positionLoopPdOutText,
+               (double)FOC_POSITION_CRUISE_SPEED_RAD_PER_S,
+               (double)FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD);
     APPEND_FMT("  PrefDiag: count=%lu | raw=%s rad | mapped=%s rad | before=%s rad | after=%s rad | user_set=%u\r\n\r\n",
                (unsigned long)packet->positionPrefCmdCount,
                positionPrefRawText,
@@ -713,6 +739,28 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                positionPrefBeforeText,
                positionPrefAfterText,
                packet->positionPrefUserSet);
+
+    /* FFDiag: 前馈诊断输出 */
+    {
+        char ffBemfVdText[20], ffBemfVqText[20];
+        char ffInertiaIqText[20], ffFrictionIqText[20], ffCoggingIqText[20];
+        char ffObserverIqText[20], ffTotalIqText[20];
+        DrvUart_FormatFixed(ffBemfVdText, sizeof(ffBemfVdText), packet->ffBemfVd, 3U);
+        DrvUart_FormatFixed(ffBemfVqText, sizeof(ffBemfVqText), packet->ffBemfVq, 3U);
+        DrvUart_FormatFixed(ffInertiaIqText, sizeof(ffInertiaIqText), packet->ffInertiaIq, 3U);
+        DrvUart_FormatFixed(ffFrictionIqText, sizeof(ffFrictionIqText), packet->ffFrictionIq, 3U);
+        DrvUart_FormatFixed(ffCoggingIqText, sizeof(ffCoggingIqText), packet->ffCoggingIq, 3U);
+        DrvUart_FormatFixed(ffObserverIqText, sizeof(ffObserverIqText), packet->ffObserverIq, 3U);
+        DrvUart_FormatFixed(ffTotalIqText, sizeof(ffTotalIqText), packet->ffTotalIq, 3U);
+        APPEND_FMT("  FFDiag: total=%s A | bemf(Vd=%s Vq=%s en=%u) | inertia(Iq=%s blk=%u) | friction(Iq=%s en=%u) | cogging(Iq=%s en=%u) | observer(Iq=%s en=%u) | enc_dir_blk=%u\r\n\r\n",
+                   ffTotalIqText,
+                   ffBemfVdText, ffBemfVqText, packet->ffBemfEnabled,
+                   ffInertiaIqText, packet->ffInertiaBlocked,
+                   ffFrictionIqText, packet->ffFrictionEnabled,
+                   ffCoggingIqText, packet->ffCoggingEnabled,
+                   ffObserverIqText, packet->ffObserverEnabled,
+                   packet->ffEncDirBlocked);
+    }
 
     if (showIdentifyDetail != 0U) {
         APPEND_FMT("[Motor Identification]\r\n");

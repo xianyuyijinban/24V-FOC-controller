@@ -47,6 +47,8 @@ typedef struct {
     uint8_t data_ok;        // Interface OK + Angle Valid
     uint8_t update_flag;    // 数据更新标志
     uint8_t data_valid;     // 【新增】数据有效标志
+    uint16_t spi_error_count;
+    uint16_t crc_error_total;
 } TLE5012_Data_t;
 
 typedef struct {
@@ -75,6 +77,9 @@ void TLE5012_RegisterFaultCallback(TLE5012_FaultCallback_t callback);
 uint8_t TLE5012_GetCRCErrorCount(void);
 void TLE5012_ClearCRCErrorCount(void);
 uint8_t TLE5012_IsDataValid(void);
+uint16_t TLE5012_GetSpiErrorCount(void);
+uint16_t TLE5012_GetCrcErrorTotal(void);
+void TLE5012_ClearDiagnosticCounters(void);
 
 extern TLE5012_Data_t tle5012_sensor;
 extern volatile TLE5012_GpioDiagState_t tle5012_gpio_diag;

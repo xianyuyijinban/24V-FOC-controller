@@ -478,14 +478,18 @@ class TestGuiLogic(unittest.TestCase):
         self.assertEqual(vbus_values, [11.8, 11.9])
 
         _, pos_ref_values = buffer.series("pos_ref_deg")
-        self.assertEqual(pos_ref_values, [114.59155902616465, 171.88733853924697])
+        # pos_ref is stored in firmware control frame (multiplied by encoder_dir=-1).
+        # control_to_user_angle inverts: 2.0*(-1)+2π=4.283→245.41°, 3.0*(-1)+2π=3.283→188.11°
+        self.assertEqual(len(pos_ref_values), 2)
+        self.assertAlmostEqual(pos_ref_values[0], 245.40844097383535, places=4)
+        self.assertAlmostEqual(pos_ref_values[1], 188.11266146075303, places=4)
         self.assertIn("pos_ref_deg", PLOT_CHANNELS)
         self.assertNotIn("pos_ref", PLOT_CHANNELS)
         self.assertIn("speed_ref", PLOT_CHANNELS)
 
         csv_text = format_plot_csv(buffer.export_rows(["speed", "speed_ref", "pos_ref_deg", "Iq", "Ia", "Ib", "Ic", "Vbus"]))
         self.assertIn("timestamp_ms,speed,speed_ref,pos_ref_deg,Iq,Ia,Ib,Ic,Vbus", csv_text)
-        self.assertIn("30,3.0,2.5,171.88733853924697,0.6,0.7,0.8,-1.5,11.9", csv_text)
+        self.assertIn("30,3.0,2.5,188.11266146075303,0.6,0.7,0.8,-1.5,11.9", csv_text)
 
     def test_rolling_plot_buffer_defaults_to_30_second_history(self):
         buffer = RollingPlotBuffer()
@@ -553,7 +557,7 @@ class TestGuiLogic(unittest.TestCase):
         loaded = GuiProfile.from_dict(legacy_payload)
 
         self.assertEqual(loaded.position_pd.kp, 6.0)
-        self.assertEqual(loaded.position_pd.kd, 0.12)
+        self.assertEqual(loaded.position_pd.kd, 0.08)
 
     def test_legacy_gui_profile_migrates_old_24v_defaults_to_12v_bench_defaults(self):
         legacy_payload = {
@@ -567,20 +571,47 @@ class TestGuiLogic(unittest.TestCase):
         loaded = GuiProfile.from_dict(legacy_payload)
 
         self.assertEqual(loaded.motor_pn, 11)
-        self.assertEqual(loaded.current_pi, LoopTuning(kp=0.3, ki=0.0))
-        self.assertEqual(loaded.speed_pi, LoopTuning(kp=0.3, ki=0.0))
-        self.assertEqual(loaded.position_pd, PositionLoopTuning(kp=4.0, kd=0.12))
+        self.assertEqual(loaded.current_pi, LoopTuning(kp=0.03, ki=0.5))
+        self.assertEqual(loaded.speed_pi, LoopTuning(kp=0.10, ki=0.0))
+        self.assertEqual(loaded.position_pd, PositionLoopTuning(kp=2.0, kd=0.08))
 
-    def test_default_loop_tuning_matches_12v_firmware_baseline(self):
+    def test_v3_gui_profile_migrates_stale_bringup_defaults_to_v18_safe_defaults(self):
+        stale_payload = {
+            "schema_version": 3,
+            "current_pi": {"kp": 0.3, "ki": 0.0},
+            "speed_pi": {"kp": 0.3, "ki": 0.0},
+            "position_pd": {"kp": 4.0, "kd": 0.12},
+        }
+
+        loaded = GuiProfile.from_dict(stale_payload)
+
+        self.assertEqual(loaded.current_pi, LoopTuning(kp=0.03, ki=0.5))
+        self.assertEqual(loaded.position_pd, PositionLoopTuning(kp=2.0, kd=0.08))
+
+    def test_profile_migration_preserves_user_tuned_loop_values(self):
+        tuned_payload = {
+            "schema_version": 3,
+            "current_pi": {"kp": 0.04, "ki": 0.25},
+            "speed_pi": {"kp": 0.12, "ki": 0.01},
+            "position_pd": {"kp": 2.5, "kd": 0.06},
+        }
+
+        loaded = GuiProfile.from_dict(tuned_payload)
+
+        self.assertEqual(loaded.current_pi, LoopTuning(kp=0.04, ki=0.25))
+        self.assertEqual(loaded.speed_pi, LoopTuning(kp=0.12, ki=0.01))
+        self.assertEqual(loaded.position_pd, PositionLoopTuning(kp=2.5, kd=0.06))
+
+    def test_default_loop_tuning_matches_v18_safe_bringup_baseline(self):
         profile = GuiProfile()
 
-        self.assertEqual(profile.current_pi.kp, 0.3)
-        self.assertEqual(profile.current_pi.ki, 0.0)
+        self.assertEqual(profile.current_pi.kp, 0.03)
+        self.assertEqual(profile.current_pi.ki, 0.5)
         self.assertEqual(profile.motor_pn, 11)
-        self.assertEqual(profile.speed_pi.kp, 0.3)
+        self.assertEqual(profile.speed_pi.kp, 0.10)
         self.assertEqual(profile.speed_pi.ki, 0.0)
-        self.assertEqual(profile.position_pd.kp, 4.0)
-        self.assertEqual(profile.position_pd.kd, 0.12)
+        self.assertEqual(profile.position_pd.kp, 2.0)
+        self.assertEqual(profile.position_pd.kd, 0.08)
 
     def test_stale_data_detection_uses_threshold(self):
         self.assertFalse(is_data_stale(last_packet_received_at_ms=1500, now_ms=2200, threshold_ms=1000))

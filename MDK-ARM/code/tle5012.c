@@ -88,6 +88,9 @@ static void TLE5012_HandleCommFault(TLE5012_Fault_t fault)
     tle5012_sensor.crc_error = 1U;
     tle5012_sensor.update_flag = 1U;
 
+    if (tle5012_sensor.spi_error_count < 0xFFFFU) {
+        tle5012_sensor.spi_error_count++;
+    }
     if (crc_error_count < 0xFFU) {
         crc_error_count++;
     }
@@ -301,6 +304,9 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
         tle5012_sensor.data_valid = 0U;
         tle5012_sensor.crc_error = 1U;
         tle5012_sensor.update_flag = 1U;
+        if (tle5012_sensor.spi_error_count < 0xFFFFU) {
+            tle5012_sensor.spi_error_count++;
+        }
         return;
     }
 
@@ -338,6 +344,9 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
      * accept the data. CRC errors are recorded for diagnostics only. */
     if ((!safety_ok) || (received_crc != calculated_crc)) {
         tle5012_sensor.crc_error = (received_crc != calculated_crc) ? 1U : 0U;
+        if (tle5012_sensor.crc_error && (tle5012_sensor.crc_error_total < 0xFFFFU)) {
+            tle5012_sensor.crc_error_total++;
+        }
         /* Accept data if safety word says interface+angle are OK,
          * even if CRC doesn't match (TLE5012 variant-specific behavior) */
         if (safety_ok && (tle5012_sensor.raw_angle != 0U)) {
@@ -388,6 +397,23 @@ void TLE5012_ClearCRCErrorCount(void)
 uint8_t TLE5012_IsDataValid(void)
 {
     return tle5012_sensor.data_valid;
+}
+
+uint16_t TLE5012_GetSpiErrorCount(void)
+{
+    return tle5012_sensor.spi_error_count;
+}
+
+uint16_t TLE5012_GetCrcErrorTotal(void)
+{
+    return tle5012_sensor.crc_error_total;
+}
+
+void TLE5012_ClearDiagnosticCounters(void)
+{
+    tle5012_sensor.spi_error_count = 0U;
+    tle5012_sensor.crc_error_total = 0U;
+    crc_error_count = 0U;
 }
 
 void TLE5012_GpioDiagStart(void)

@@ -49,21 +49,25 @@ extern "C" {
 #define MI_PN_TEST_CURRENT_INITIAL 0.25f    /* 24V台架更低起步电流，避免VDS过流 */
 #define MI_PN_TEST_CURRENT_STEP 0.05f       /* 更小步进 */
 #define MI_PN_TEST_CURRENT_MAX  0.5f        /* 24V台架降低上限，1.2A已验证触发VDS_HA */
-#define MI_PN_STEP_ELEC_DEG     30.0f       /* 每次步进30电角度，让转子逐段吸附前进而不是连续追旋转场 */
-#define MI_PN_NUDGE_ELEC_DEG    20.0f       /* 增大解卡脉冲角度，优先验证能否真正跨过齿槽峰 */
-#define MI_PN_NUDGE_SETTLE_MS   40          /* 解卡脉冲保持40ms，尽量只撬动转子不过度带来新振荡 */
-#define MI_PN_STEP_SETTLE_MS    120         /* 每步保持120ms，给24N22P转子越过齿槽并稳定到新磁场位置 */
-#define MI_PN_STEP_COUNT        18          /* 总共步进18次，累计540电角度，给PnCalc足够的分辨率 */
+#define MI_PN_STEP_ELEC_DEG     5.0f        /* Microstep 5 electrical degrees. */
+#define MI_PN_STEP_SETTLE_MS    15          /* Microstep settle time. */
+#define MI_PN_STEP_COUNT        144         /* 144 * 5deg = 720 electrical degrees. */
 #define MI_PN_TEST_VOLTAGE_RATIO 0.15f      /* ADC触发修复后真实电流在走，降电压防VDS */
 #define MI_PN_TEST_VOLTAGE_MAX_V 1.8f       /* 12V安全上限，ADC触发修复前高值因无电流未暴露 */
-#define MI_PN_STRICT_VERIFY     0           /* 默认台架友好模式：保留诊断，但不因弱机械响应阻塞后续识别 */
-#define MI_PN_MIN_EXPECTED_TRAVEL_RATIO 0.35f /* 实测机械角至少达到理论拖动量的35% */
-#define MI_PN_MIN_MECH_DELTA_RAD 0.12f      /* 最小有效机械运动量 rad */
-#define MI_PN_DIR_SIGN_MIN_MECH_DELTA_RAD 0.02f /* 机械位移至少超过约1.1deg，才用其符号覆盖 encoder_dir */
+#define MI_PN_AUTO_UPDATE_ENCODER_DIR 0     /* PN direction is diagnostic; keep configured encoder_dir. */
+#define MI_PN_MIN_MECH_DELTA_RAD 0.15f      /* Minimum accumulated mechanical travel for PN diagnostics. */
 
-/* 转动惯量识别 */
-#define MI_J_TEST_SPEED_RPM     300.0f      /* 目标转速 rpm */
-#define MI_J_RAMP_TIME          300         /* 加速时间 ms */
+/* 转动惯量识别 — 恒电流加速+滑行法 */
+#define MI_J_ACCEL_IQ_A             0.30f   /* 加速电流 A */
+#define MI_J_ACCEL_SETTLE_MS        100     /* 加速前稳定时间 ms */
+#define MI_J_ACCEL_TIMEOUT_MS       2000    /* 加速超时 ms */
+#define MI_J_ACCEL_SPEED_LOW_RADPS  3.0f    /* 测量窗下限 rad/s */
+#define MI_J_ACCEL_SPEED_HIGH_RADPS 8.0f    /* 测量窗上限 rad/s */
+#define MI_J_COAST_TIMEOUT_MS       3000    /* 滑行超时 ms */
+#define MI_J_VALID_MIN              1e-7f   /* J最小有效值 kg·m² */
+#define MI_J_VALID_MAX              0.1f    /* J最大有效值 kg·m² */
+#define MI_B_VALID_MIN              0.0f    /* B最小有效值 */
+#define MI_B_VALID_MAX              0.1f    /* B最大有效值 */
 
 /* 机械锁止检测 */
 #define MI_THETA_LIMIT_DEG      2.0f        /* 角度变化限制 ±2° */
@@ -74,14 +78,22 @@ extern "C" {
 #define MI_ALIGN_DURATION       200         /* 锁轴时长 ms */
 
 /* 识别完成前单向弱运动认证：仅验证编码器方向无严重错误，不强制高齿槽电机完成完整拖动 */
-#define MI_VERIFY_CURRENT       1.0f        /* d轴拖动电流 A，Vbus/Rs安全限幅后实际值更低 */
-#define MI_VERIFY_MECH_FREQ_HZ  0.03f       /* 极低速拖动，高齿槽电机需要更长时间跟随 */
+#define MI_VERIFY_VOLTAGE_RATIO MI_PN_TEST_VOLTAGE_RATIO /* Use PN-proven direct-voltage envelope. */
+#define MI_VERIFY_VOLTAGE_MAX_V MI_PN_TEST_VOLTAGE_MAX_V /* Keep verify no stronger than PN microstep drive. */
+#define MI_VERIFY_MECH_FREQ_HZ  0.10f       /* Faster drag helps high-cogging motors cross cogging steps. */
 #define MI_VERIFY_MIN_MECH_RAD  0.30f       /* 最小可信位移约17°，达到即强通过 */
 #define MI_VERIFY_DIR_LOCK_RAD  0.15f       /* 累计约8.6°后锁定实测方向 */
 #define MI_VERIFY_REVERSE_FAULT_RAD 0.30f   /* 反向累计超过约17°视为相序/方向异常 */
 #define MI_VERIFY_PHASE_TIMEOUT_MS 60000    /* 单向超时60s */
-#define MI_VERIFY_NO_MOTION_TIMEOUT_MS 5000 /* 5s内无有效位移则停止拖动，避免堵转加热 */
+#define MI_VERIFY_NO_MOTION_TIMEOUT_MS 10000 /* Longer startup window for high-cogging motors. */
 #define MI_VERIFY_NO_MOTION_MIN_RAD 0.03f   /* 无运动判据：原始累计<0.03rad */
+
+/* 齿槽转矩LUT识别 */
+#define MI_COGGING_DRAG_SPEED_MECH_RADPS 0.50f  /* 开环拖动机械角速度 rad/s */
+#define MI_COGGING_DRAG_VOLTAGE_RATIO    0.08f   /* 拖动电压/Vbus比例 */
+#define MI_COGGING_DRAG_VOLTAGE_MAX_V    1.5f    /* 拖动电压上限 V */
+#define MI_COGGING_SETTLE_MS             1500    /* 启动稳定时间 ms */
+#define MI_COGGING_RECORD_TIMEOUT_MS     30000   /* 记录超时 (约6转) 30s */
 
 /* 编码器识别期容错：单个TLE帧瞬态无效只等待，连续无效才终止识别 */
 #define MI_ENCODER_INVALID_CONSECUTIVE_LIMIT 20U
@@ -115,6 +127,7 @@ typedef struct {
     int8_t encoder_dir;     /* 编码器方向：+1=机械角与正电角同向，-1=反向 */
     float J;                /* 转动惯量 kg·m² */
     float B;                /* 摩擦系数 N·m·s/rad */
+    float Tc;               /* 库仑摩擦转矩 N·m */
     float theta_offset;     /* 编码器零位偏移 rad */
     float theta_mech_zero;  /* 识别/对齐得到的机械零位 rad */
     float mech_zero_offset; /* 用户设定机械零位偏置 rad */
@@ -143,6 +156,7 @@ typedef enum {
     MI_STATE_J_IDENTIFY,        /* 惯量识别 */
     MI_STATE_ENCODER_ALIGN,     /* 编码器对齐 */
     MI_STATE_MOTION_VERIFY,     /* 双向真实运动认证 */
+    MI_STATE_COGGING_IDENTIFY,  /* 齿槽转矩LUT识别 */
     MI_STATE_COMPLETE,          /* 完成 */
     MI_STATE_ERROR              /* 错误 */
 } MI_State_t;
@@ -227,9 +241,36 @@ typedef struct {
     uint8_t motion_verify_status; /* 0=not_run, 1=strong_pass, 2=weak_pass, 3=failed */
     uint8_t verify_reverse_fault; /* 反向运动异常标志：1=曾检测到显著反向 */
     
+    /* J/B识别专用 */
+    uint8_t j_state;            /* J识别子状态: 0=INIT, 1=ACCEL, 2=COAST, 3=COMPLETE */
+    float j_accel_iq_sum;       /* Iq累加 (用于平均) */
+    float j_accel_iq_count;     /* 采样计数 */
+    float j_accel_v_start;      /* 测量窗口起始速度 rad/s */
+    float j_accel_v_end;        /* 测量窗口结束速度 rad/s */
+    uint32_t j_accel_t_start;   /* 测量窗口起始时间 ms */
+    uint32_t j_accel_t_end;     /* 测量窗口结束时间 ms */
+    float j_coast_v_start;      /* 滑行起始速度 rad/s */
+    float j_coast_v_end;        /* 滑行结束速度 rad/s */
+    uint32_t j_coast_t_start;   /* 滑行起始时间 ms */
+    uint32_t j_coast_t_end;     /* 滑行结束时间 ms */
+    float j_speed_mech;         /* J识别期间缓存机械转速 */
+    float j_theta_prev;         /* 上一拍机械角 rad */
+    uint8_t j_theta_prev_init;  /* 角度跟踪已初始化 */
+
+    /* 齿槽转矩LUT识别专用 */
+    uint8_t cg_state;               /* 齿槽识别子状态 */
+    float cg_theta_start;           /* 记录起始机械角 rad */
+    float cg_theta_prev;            /* 上一拍机械角 rad */
+    float cg_theta_accum;           /* 累计机械角位移 rad */
+    float cg_bin_iq_sum[264];       /* 每bin的Iq累加值 */
+    uint16_t cg_bin_count[264];     /* 每bin的采样计数 */
+    float cg_drag_voltage;          /* 开环拖动电压幅值 V */
+    float cg_drag_speed_elec;       /* 开环电角速度 rad/s */
+    float cg_drag_theta_elec;       /* 开环合成电角度 rad */
+
     /* 进度回调 */
     void (*progress_callback)(uint8_t percent, const char *step_name);
-    
+
 } MI_Handle_t;
 
 /*==================== 函数声明 ====================*/
@@ -250,6 +291,7 @@ MI_ErrorCode_t MI_IdentifyKe(MI_Handle_t *handle);
 MI_ErrorCode_t MI_IdentifyJ(MI_Handle_t *handle);
 MI_ErrorCode_t MI_EncoderAlign(MI_Handle_t *handle);
 MI_ErrorCode_t MI_VerifyMotion(MI_Handle_t *handle);
+MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle);
 
 /* Rs在线估计 */
 void MI_RsOnlineEstimator_Init(RsOnlineEstimator_t *est, float alpha);

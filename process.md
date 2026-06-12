@@ -328,3 +328,23 @@
 - Prevention: 后续凡是修改位置环、上位机命令或控制模式文档，必须同时检查固件结构体命名、UART 命令名、GUI 标签和文档是否一致，并重跑 `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_main_window -v`、`python -m unittest -v test_build_system.py`、`powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`，禁止再次出现“名字还是PI、实际已经不是PI”的语义漂移。
 - Commit: 09ad81d961e1e3b808360e38a6456b38fee74f95
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-06-12 01:30] 前馈v4_safe_baseline验证 + 电磁刹车阻塞确认
+- Problem: 6月11日测试发现前馈补齐后Iq≈3A但机械角几乎不动，需要先确认是前馈参数问题还是硬件阻塞。
+- Resolution: 通过COM9串口执行分阶段验证：
+  - Phase A: 硬件链路确认。DRV8350S SPI通信已恢复（Comm: Validated），TLE5012角度连续(257-260°)，Vbus=23.9V，ADC正常，FAULT1=VGS2=0x0000。与四月份台架全高回包不同，当前SPI链路已正常工作。
+  - Phase B: v4_safe_baseline扭矩测试。0.05A→0.10A→0.20A→0.50A→1.0A→2.0A递增。电机对扭矩响应方向正确(+Iq→+angle)，但总移动量<1°，实际Iq显著高于指令值(0.5A→0.84A, 1.0A→1.79A)。2.0A触发过流保护(FAULT→Overcurrent)。行为与电磁刹车抱死一致：电流能注入但转子无法自由旋转。
+  - 结论: 不是前馈问题，是堵转测试环境。代码v4_safe_baseline已就绪(P0-P4全部关闭，FFDiag已集成UART)，编译0错0告。
+- Prevention: 刹车释放前不应再推>0.5A堵转电流。释放后重做低电流方向测试(0.03→0.05→0.10A)，验收角度能连续运动、Iq跟踪误差<30%、无fault，再进入位置闭环和逐项前馈验证。
+- Scripts: `C:\Users\xiangyu\Desktop\phase_bcd_postbrake.py` (刹车释放后一键执行B→C→D)
+- Recurrence policy: 台架调试前先确认执行器自由度，不把硬件阻塞当软件问题调。
+
+## [2026-06-12 21:30] enc_dir符号修复 + 位置闭环验证通过
+- Problem: 电机能自由转动(角度从258°变到341°证明无刹车)，但0.05A~1.0A电流下仅转动<1°。速度模式测试中电机在113°和104.5°两位置间跳变(~8.5°差)，像步进电机卡在零转矩死点。根因是 `enc_dir=1` 但 `pn_dir=-1`——PN识别时微步路径驱动电角负向旋转，`sign(Δθ_elec×Δθ_mech)` 公式因两者同号给出 +1，不代表"正Iq→正机械角"。FOC换向角在特定位置误差~90°，cos(90°)≈0导致零转矩。
+- Resolution:
+  1. **motor_identify.c 三处修复**: 将 `encoder_dir = sign(Δθ_elec×Δθ_mech)` 改为 `encoder_dir = pn_observed_dir`（基于实际机械运动方向）。最关键的微步PN路径(line 658后)原本 `encoder_dir` 赋值在 `#if MI_PN_AUTO_UPDATE_ENCODER_DIR`(默认0)内，从不执行。现移到 `#endif` 后无条件执行。
+  2. 重编译烧录、重识别 → `enc_dir=-1, pn_dir=-1` 一致。扭矩测试0.05A旋转91.6°（修复前仅0.68°）。
+  3. **CMD:HOME** 设机械零位 → PREF=0/±5°/±20°全部通过，误差<2°，Iq≈0。
+- Prevention: PN识别中enc_dir应始终从pn_observed_dir推断，不依赖δθ_elec符号。识别后必须执行CMD:HOME设零位。任何修改motor_identify.c PN路径后需重跑 `build.ps1 + pyocd load + reidentify + HOME + PREF序列` 验证。
+- Commit: (pending)
+- Recurrence policy: Not allowed to happen again.

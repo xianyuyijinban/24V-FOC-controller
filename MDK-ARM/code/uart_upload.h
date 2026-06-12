@@ -86,6 +86,8 @@ typedef struct {
     uint8_t  positionLoopRampSat; /* 位置模式速度斜坡是否限制给定 */
     uint8_t  positionLoopIqPosSat; /* 位置模式正向Iq是否触顶 */
     uint8_t  positionLoopIqNegSat; /* 位置模式负向Iq是否触底 */
+    uint8_t  trajActive;          /* V4 巡航模式激活标志 */
+    float    trajCmd;             /* V4 最终速度指令 rad/s */
     uint32_t positionPrefCmdCount; /* 最近PREF命令计数 */
     float    positionPrefRaw;    /* 最近PREF用户原始目标 */
     float    positionPrefMapped; /* 最近PREF映射后目标 */
@@ -185,6 +187,21 @@ typedef struct {
     int16_t  adcDeltaB;                   /* B相raw-offset差值(LSB) */
     int16_t  adcDeltaC;                   /* C相raw-offset差值(LSB) */
     float    adcVbus;                     /* 母线电压(V) */
+
+    /* FFDiag 前馈诊断 (v4_safe_baseline) */
+    float    ffBemfVd;           /* P1 BEMF Vd补偿量 V */
+    float    ffBemfVq;           /* P1 BEMF Vq补偿量 V */
+    float    ffInertiaIq;        /* P2 惯量 Iq贡献 A */
+    float    ffFrictionIq;       /* P3 摩擦 Iq贡献 A */
+    float    ffCoggingIq;        /* P0 齿槽 Iq贡献 A */
+    float    ffObserverIq;       /* P4 观测器 Iq贡献 A */
+    float    ffTotalIq;          /* 前馈总 Iq贡献 A */
+    uint8_t  ffBemfEnabled;      /* P1 使能状态 */
+    uint8_t  ffInertiaBlocked;   /* P2 被门禁阻止 */
+    uint8_t  ffFrictionEnabled;  /* P3 使能状态 */
+    uint8_t  ffCoggingEnabled;   /* P0 使能状态 */
+    uint8_t  ffObserverEnabled;  /* P4 使能状态 */
+    uint8_t  ffEncDirBlocked;    /* enc_dir阻止所有前馈 */
 
     uint8_t  packetType;        /* 数据包类型 */
 } DrvUart_DataPacket_t;

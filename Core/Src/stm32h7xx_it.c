@@ -965,6 +965,11 @@ static void UART_CommandExecute(const char *cmd)
             UART_CommandSendText(response);
             return;
         }
+        if (!Param_IsValid(&g_foc_app.motor_param)) {
+            snprintf(response, sizeof(response), "HOME,FAIL,not_identified\r\n");
+            UART_CommandSendText(response);
+            return;
+        }
         float old_offset = g_foc_app.motor_param.mech_zero_offset;
         MI_SetMechZero(&g_foc_app.motor_param, g_foc_app.theta_mech);
         if (g_foc_app.position_ref_user_set) {
@@ -985,6 +990,11 @@ static void UART_CommandExecute(const char *cmd)
         char response[64];
         if (g_foc_app.enable_pwm != 0U) {
             snprintf(response, sizeof(response), "CLEAR_HOME,FAIL,motor_running\r\n");
+            UART_CommandSendText(response);
+            return;
+        }
+        if (!Param_IsValid(&g_foc_app.motor_param)) {
+            snprintf(response, sizeof(response), "CLEAR_HOME,FAIL,not_identified\r\n");
             UART_CommandSendText(response);
             return;
         }
@@ -1035,6 +1045,38 @@ static void UART_CommandExecute(const char *cmd)
             FOC_App_SetPolePairs(&g_foc_app, (uint8_t)int_arg);
             __enable_irq();
         }
+        return;
+    }
+
+    if (sscanf(cmd, "CMD:ENCODER_DIR,%ld", &int_arg) == 1) {
+        char response[64];
+
+        if ((g_foc_app.enable_pwm != 0U) ||
+            (g_foc_app.state == FOC_STATE_RUNNING) ||
+            (g_foc_app.state == FOC_STATE_PARAM_IDENTIFY)) {
+            snprintf(response, sizeof(response), "ENCODER_DIR,FAIL,busy\r\n");
+            UART_CommandSendText(response);
+            return;
+        }
+
+        if ((int_arg == 1L) || (int_arg == -1L)) {
+            __disable_irq();
+            g_foc_app.motor_param.encoder_dir = (int8_t)int_arg;
+            g_foc_app.motor_param.valid_flag = 0U;
+            g_foc_app.motor_identified = 0U;
+            g_foc_app.mi_handle.pn_last_calc = 0.0f;
+            g_foc_app.mi_handle.pn_last_delta_mech = 0.0f;
+            g_foc_app.mi_handle.pn_last_delta_elec = 0.0f;
+            g_foc_app.mi_handle.pn_observed_dir = 0;
+            if (g_foc_app.state == FOC_STATE_READY) {
+                g_foc_app.state = FOC_STATE_IDLE;
+            }
+            __enable_irq();
+            snprintf(response, sizeof(response), "ENCODER_DIR,OK,%ld\r\n", int_arg);
+        } else {
+            snprintf(response, sizeof(response), "ENCODER_DIR,FAIL,invalid=%ld\r\n", int_arg);
+        }
+        UART_CommandSendText(response);
         return;
     }
 

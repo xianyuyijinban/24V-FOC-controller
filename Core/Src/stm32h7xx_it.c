@@ -833,6 +833,10 @@ static void UART_CommandExecute(const char *cmd)
         DrvUart_UploadJDiag();
         return;
     }
+    if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
+        g_foc_app.cogging_lut.phase_offset_rad = f1;
+        return;
+    }
 
     if (sscanf(cmd, "CMD:UNLOCK,%ld", &int_arg) == 1) {
         if (int_arg != 0) {

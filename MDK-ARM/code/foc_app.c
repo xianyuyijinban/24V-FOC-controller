@@ -929,16 +929,18 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
                                        (handle->ff_blocked_by_enc_dir == 0U)) ? 1U : 0U;
             handle->ff_diag.cogging_enabled = cogging_allowed;
             if (cogging_allowed) {
-                float theta_norm = FOC_AngleNormalize(handle->theta_mech);
+                float theta_lookup = FOC_AngleNormalize(handle->theta_mech
+                                       + handle->cogging_lut.phase_offset_rad);
                 /* Map theta [-PI, PI) to index [0, FOC_COGGING_LUT_SIZE) */
-                float index_f = (theta_norm + FOC_PI) / (2.0f * FOC_PI) * (float)FOC_COGGING_LUT_SIZE;
+                float index_f = (theta_lookup + FOC_PI) / (2.0f * FOC_PI) * (float)FOC_COGGING_LUT_SIZE;
                 int idx = (int)index_f;
                 float frac = index_f - (float)idx;
                 if (idx >= FOC_COGGING_LUT_SIZE) idx = 0;
                 if (idx < 0) idx = FOC_COGGING_LUT_SIZE - 1;
                 int idx_next = (idx + 1) % FOC_COGGING_LUT_SIZE;
-                float cogging_ff = handle->cogging_lut.table[idx] * (1.0f - frac)
-                                 + handle->cogging_lut.table[idx_next] * frac;
+                float cogging_ff = (handle->cogging_lut.table[idx] * (1.0f - frac)
+                                  + handle->cogging_lut.table[idx_next] * frac)
+                                  * FOC_FF_COGGING_GAIN;
                 cogging_ff = FOC_Saturate(cogging_ff,
                                           FOC_FF_COGGING_MAX_A,
                                           -FOC_FF_COGGING_MAX_A);

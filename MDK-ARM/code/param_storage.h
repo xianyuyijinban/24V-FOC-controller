@@ -101,7 +101,7 @@ ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t siz
 #define PARAM_COGGING_FLASH_OFFSET  ((uint32_t)sizeof(ParamPackage_t))
 #define PARAM_COGGING_LUT_FLOATS    264
 #define PARAM_COGGING_FLASH_ADDR    (PARAM_FLASH_ADDR + PARAM_COGGING_FLASH_OFFSET)
-ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size);
+ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size, const MotorParam_t *motor_param);
 ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size);
 
 #ifdef __cplusplus

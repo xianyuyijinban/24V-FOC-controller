@@ -152,6 +152,8 @@ typedef struct {
     float table[FOC_COGGING_LUT_SIZE];  /* Iq补偿值 vs 机械角bin */
     uint16_t valid_size;                /* 实际有效表项数 */
     uint8_t  valid;                     /* 1 = LUT已加载且有效 */
+    uint8_t  pending;                   /* 1 = LUT待持久化到Flash */
+    uint8_t  save_attempted;            /* 1 = 已尝试保存LUT到Flash */
 } FOC_CoggingLUT_t;
 
 /* 负载转矩观测器 (P4) — Gopinath型降维扰动观测器 */

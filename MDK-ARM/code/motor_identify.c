@@ -1334,7 +1334,7 @@ MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle)
         }
 
         /* Check if we have completed at least one full revolution */
-        if (handle->cg_theta_accum >= (2.0f * FOC_PI - 0.1f)) {
+        if (fabsf(handle->cg_theta_accum) >= (2.0f * FOC_PI - 0.1f)) {
             handle->cg_state = 3;
             handle->state_start_time = HAL_GetTick();
         }
@@ -1374,14 +1374,18 @@ MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle)
             return MI_ERR_IN_PROGRESS;
         }
 
-        /* Save to Flash via param_storage */
+        /* Buffer LUT in RAM for deferred save from main loop.
+         * Flash write inside TIM1 ISR is unreliable; FOC_App_MainLoop
+         * will call FOC_App_SaveCoggingLUT() after identification completes. */
         {
-            ParamStatus_t st = Param_SaveCoggingLUT(cogging_lut, 264U);
-            if (st == PARAM_OK) {
-                handle->cg_state = 4;
-                return MI_ERR_IN_PROGRESS;
+            extern FOC_AppHandle_t g_foc_app;
+            if (g_foc_app.cogging_lut.valid_size <= 264U) {
+                memcpy(g_foc_app.cogging_lut.table, cogging_lut,
+                       264U * sizeof(float));
+                g_foc_app.cogging_lut.valid_size = 264U;
+                g_foc_app.cogging_lut.valid = 1U;
+                g_foc_app.cogging_lut.pending = 1U;
             }
-            /* Flash write failed but non-fatal */
         }
 
         handle->cg_state = 4;

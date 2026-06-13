@@ -137,40 +137,68 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
 {
     ParamPackage_t package;
     ParamStatus_t status;
+    uint8_t  cog_valid = 0U;
+    uint32_t cog_header[4];
+    uint8_t  cog_backup[PARAM_COGGING_LUT_FLOATS * sizeof(float)];
+    const uint32_t *stored_hdr;
 
     if (param == NULL) {
         return PARAM_ERR_INVALID;
     }
-    
+
     /* 填充头部 */
     package.header.magic = PARAM_MAGIC_NUMBER;
     package.header.version = PARAM_VERSION;
     package.header.size = sizeof(MotorParam_t);
     package.header.timestamp = HAL_GetTick();
     memset(package.header.reserved, 0, sizeof(package.header.reserved));
-    
+
     /* 复制电机参数 */
     memcpy(&package.motor, param, sizeof(MotorParam_t));
-    
+
     /* 计算CRC32 */
     package.header.crc32 = Param_CalculateCRC32(&package.motor, sizeof(MotorParam_t));
-    
+
+    /* 擦除前备份齿槽LUT（与主参数共享同一Flash扇区） */
+    stored_hdr = (const uint32_t *)PARAM_COGGING_FLASH_ADDR;
+    if (stored_hdr[0] == 0x434F4747 && stored_hdr[1] > 0U
+        && stored_hdr[1] <= (uint32_t)PARAM_COGGING_LUT_FLOATS) {
+        uint32_t lut_bytes = stored_hdr[1] * sizeof(float);
+        cog_valid = 1U;
+        memcpy(cog_header, stored_hdr, sizeof(cog_header));
+        memcpy(cog_backup, (const void *)(PARAM_COGGING_FLASH_ADDR + 16U), lut_bytes);
+    }
+
     /* 解锁Flash */
     HAL_FLASH_Unlock();
-    
+
     /* 擦除扇区 */
     status = Param_EraseSector();
     if (status != PARAM_OK) {
         HAL_FLASH_Lock();
         return status;
     }
-    
-    /* 写入Flash */
+
+    /* 写入主参数 */
     status = Param_WriteFlash(PARAM_FLASH_ADDR, (uint32_t *)&package, sizeof(ParamPackage_t));
-    
+    if (status != PARAM_OK) {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    /* 恢复齿槽LUT */
+    if (cog_valid) {
+        status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, cog_header, sizeof(cog_header));
+        if (status == PARAM_OK) {
+            status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR + 16U,
+                                      (const uint32_t *)cog_backup,
+                                      cog_header[1] * sizeof(float));
+        }
+    }
+
     /* 锁定Flash */
     HAL_FLASH_Lock();
-    
+
     return status;
 }
 
@@ -180,12 +208,14 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
  * @param size  表项数
  * @return 状态码
  */
-ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size)
+ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size,
+                                    const MotorParam_t *motor_param)
 {
     ParamStatus_t status;
     uint32_t write_size;
     uint32_t crc;
     uint32_t header[4];
+    ParamPackage_t main_pkg;
 
     if (table == NULL || size == 0U || size > PARAM_COGGING_LUT_FLOATS) {
         return PARAM_ERR_INVALID;
@@ -200,8 +230,37 @@ ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size)
     header[2] = crc;
     header[3] = 0U;
 
-    /* Unlock flash and write header + table */
+    /* Build main param package from RAM — the params may not be in Flash yet
+     * when called during identification (before FOC_App_SaveParam). */
+    if (motor_param != NULL && Param_IsValid(motor_param)) {
+        main_pkg.header.magic = PARAM_MAGIC_NUMBER;
+        main_pkg.header.version = PARAM_VERSION;
+        main_pkg.header.size = sizeof(MotorParam_t);
+        main_pkg.header.timestamp = HAL_GetTick();
+        memset(main_pkg.header.reserved, 0, sizeof(main_pkg.header.reserved));
+        memcpy(&main_pkg.motor, motor_param, sizeof(MotorParam_t));
+        main_pkg.header.crc32 = Param_CalculateCRC32(&main_pkg.motor, sizeof(MotorParam_t));
+    } else {
+        memset(&main_pkg, 0, sizeof(ParamPackage_t));
+    }
+
+    /* Erase sector (shared with main params), write both */
     HAL_FLASH_Unlock();
+
+    status = Param_EraseSector();
+    if (status != PARAM_OK) {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    if (main_pkg.header.magic == PARAM_MAGIC_NUMBER) {
+        status = Param_WriteFlash(PARAM_FLASH_ADDR, (uint32_t *)&main_pkg,
+                                  sizeof(ParamPackage_t));
+        if (status != PARAM_OK) {
+            HAL_FLASH_Lock();
+            return status;
+        }
+    }
 
     status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, header, sizeof(header));
     if (status != PARAM_OK) {

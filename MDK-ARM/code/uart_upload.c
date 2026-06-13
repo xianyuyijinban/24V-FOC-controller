@@ -1368,11 +1368,14 @@ bool DrvUart_UploadJDiag(void)
 #if FOC_FF_ENABLE_COGGING
     {
         char cogMinText[16], cogMaxText[16];
+        uint16_t cog_nonzero = 0U;
         float cogMin = 0.0f, cogMax = 0.0f;
         uint16_t i;
         if (g_foc_app.cogging_lut.valid && g_foc_app.cogging_lut.valid_size > 0U) {
             cogMin = cogMax = g_foc_app.cogging_lut.table[0];
             for (i = 1U; i < g_foc_app.cogging_lut.valid_size; i++) {
+            if (fabsf(g_foc_app.cogging_lut.table[0]) > 1e-6f) cog_nonzero++;
+                if (fabsf(g_foc_app.cogging_lut.table[i]) > 1e-6f) cog_nonzero++;
                 if (g_foc_app.cogging_lut.table[i] < cogMin) cogMin = g_foc_app.cogging_lut.table[i];
                 if (g_foc_app.cogging_lut.table[i] > cogMax) cogMax = g_foc_app.cogging_lut.table[i];
             }
@@ -1380,12 +1383,13 @@ bool DrvUart_UploadJDiag(void)
         DrvUart_FormatFixed(cogMinText, sizeof(cogMinText), cogMin, 4U);
         DrvUart_FormatFixed(cogMaxText, sizeof(cogMaxText), cogMax, 4U);
         len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
-                       "JDIAG,v2,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_min=%s,cog_max=%s\r\n",
+                       "JDIAG,v4,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_bins=%u,cog_min=%s,cog_max=%s\r\n",
                        jText, bText, tcText,
                        (int)g_foc_app.motor_param.encoder_dir,
                        (unsigned long)g_foc_app.motor_param.valid_flag,
                        (unsigned)g_foc_app.cogging_lut.valid,
                        (unsigned)g_foc_app.cogging_lut.valid_size,
+                           (unsigned)cog_nonzero,
                        cogMinText, cogMaxText);
     }
 #else

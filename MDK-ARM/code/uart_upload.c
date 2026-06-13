@@ -55,7 +55,7 @@ static void DrvUart_QueueFaultDetail(const DrvUart_DataPacket_t* packet, uint32_
 static void DrvUart_AddFaultHistory(const DrvUart_DataPacket_t* packet);
 static bool DrvUart_StartSend(uint16_t len);
 static int16_t DrvUart_Append(uint8_t* buf, uint16_t bufSize, int16_t len, const char* fmt, ...);
-static void DrvUart_FormatFixed(char* dst, uint16_t dstSize, float value, uint8_t decimals);
+void DrvUart_FormatFixed(char* dst, uint16_t dstSize, float value, uint8_t decimals);
 static const char* DrvUart_IdentifyErrorToString(uint8_t error);
 static const char* DrvUart_IdentifyStateToString(uint8_t state);
 
@@ -730,7 +730,7 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                packet->trajActive,
                trajCmdText,
                positionLoopPdOutText,
-               (double)FOC_POSITION_CRUISE_SPEED_RAD_PER_S,
+               (double)g_foc_app.position_cruise_speed_radps,
                (double)FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD);
     APPEND_FMT("  PrefDiag: count=%lu | raw=%s rad | mapped=%s rad | before=%s rad | after=%s rad | user_set=%u\r\n\r\n",
                (unsigned long)packet->positionPrefCmdCount,
@@ -760,6 +760,19 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                    ffCoggingIqText, packet->ffCoggingEnabled,
                    ffObserverIqText, packet->ffObserverEnabled,
                    packet->ffEncDirBlocked);
+    }
+
+    /* MotionCfg: V5 runtime motion parameters */
+    {
+        char motionSpeedText[20], motionAccelText[20], motionCruiseText[20];
+        DrvUart_FormatFixed(motionSpeedText, sizeof(motionSpeedText),
+            g_foc_app.position_speed_limit_radps, 3U);
+        DrvUart_FormatFixed(motionAccelText, sizeof(motionAccelText),
+            g_foc_app.position_accel_limit_radps2, 3U);
+        DrvUart_FormatFixed(motionCruiseText, sizeof(motionCruiseText),
+            g_foc_app.position_cruise_speed_radps, 3U);
+        APPEND_FMT("  MotionCfg: speed=%s rad/s | accel=%s rad/s^2 | cruise=%s rad/s\r\n\r\n",
+                   motionSpeedText, motionAccelText, motionCruiseText);
     }
 
     if (showIdentifyDetail != 0U) {
@@ -1065,7 +1078,7 @@ static int16_t DrvUart_Append(uint8_t* buf, uint16_t bufSize, int16_t len, const
     return (int16_t)(len + written);
 }
 
-static void DrvUart_FormatFixed(char* dst, uint16_t dstSize, float value, uint8_t decimals)
+void DrvUart_FormatFixed(char* dst, uint16_t dstSize, float value, uint8_t decimals)
 {
     uint32_t scale = 1U;
     uint32_t whole;

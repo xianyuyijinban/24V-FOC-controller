@@ -265,6 +265,15 @@ bool DrvUart_UploadJDiag(void);
 void DrvUart_QueryCogCfg(void);
 
 /**
+ * @brief 浮点数格式化为固定小数位字符串（用于串口输出）
+ * @param dst 目标缓冲区
+ * @param dstSize 缓冲区大小
+ * @param value 浮点值
+ * @param decimals 小数位数
+ */
+void DrvUart_FormatFixed(char* dst, uint16_t dstSize, float value, uint8_t decimals);
+
+/**
  * @brief 设置上传使能/禁用
  */
 void DrvUart_SetEnable(bool enable);

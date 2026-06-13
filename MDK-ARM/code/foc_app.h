@@ -98,6 +98,16 @@ extern "C" {
 #define FOC_POSITION_SPEED_LIMIT_RAD_PER_S           2.0f   /* V4 装配基线 */
 #define FOC_POSITION_CRUISE_SPEED_RAD_PER_S          0.80f  /* V4 巡航速度下限 */
 #define FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD       0.087f /* V4 巡航切PD阈值 (~5 deg) */
+
+/* V5 位置模式运行时运动配置默认值与范围 */
+#define FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT      4.0f   /* 速度上限 rad/s */
+#define FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT      6.0f   /* 加速度上限 rad/s^2 */
+#define FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT     1.2f   /* 巡航下限 rad/s */
+#define FOC_MOTION_CFG_SPEED_LIMIT_MIN          0.2f   /* 速度下限 */
+#define FOC_MOTION_CFG_SPEED_LIMIT_MAX          8.0f   /* 速度上限 */
+#define FOC_MOTION_CFG_ACCEL_LIMIT_MIN          0.5f   /* 加速度下限 */
+#define FOC_MOTION_CFG_ACCEL_LIMIT_MAX          30.0f  /* 加速度上限 */
+
 #define FOC_WARNING_VBUS_UNDERVOLTAGE_BIT (1UL << 0)
 #define FOC_WARNING_VBUS_OVERVOLTAGE_BIT  (1UL << 1)
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */
@@ -224,7 +234,12 @@ typedef struct {
     float speed_ref_ramped;     /* 速度模式内部限斜率给定 rad/s */
     float speed_ref_ramped_prev;/* 上一拍速度给定 (惯量前馈加速度计算) */
     float pos_ref;              /* 位置给定 (rad) */
-    
+
+    /* V5 位置模式运行时运动配置 */
+    float position_speed_limit_radps;   /* 速度上限 rad/s */
+    float position_accel_limit_radps2;  /* 加速度上限 rad/s^2 */
+    float position_cruise_speed_radps;  /* 巡航下限 rad/s */
+
     /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
     FOC_PositionPD_t pos_pd;        /* 位置环PD */

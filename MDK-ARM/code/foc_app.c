@@ -119,12 +119,17 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->torque_obs.enabled = 0U;
 #endif
 
+    /* V5 位置模式运行时运动配置默认值 */
+    handle->position_speed_limit_radps  = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+    handle->position_accel_limit_radps2 = FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT;
+    handle->position_cruise_speed_radps = FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT;
+
     /* 初始化位置环PD控制器 - 输出速度给定 */
     FOC_PositionPD_Init(&handle->pos_pd,
                         FOC_POSITION_PD_KP_DEFAULT,
                         FOC_POSITION_PD_KD_DEFAULT,
-                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
-                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
+                        handle->position_speed_limit_radps,
+                        -handle->position_speed_limit_radps);
     
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
@@ -813,7 +818,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         return;
     } else if (handle->control_mode == FOC_MODE_POSITION) {
         float speed_ramp_delta = handle->speed_ref - handle->speed_ref_ramped;
-        float speed_ramp_step = FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ;
+        float speed_ramp_step = handle->position_accel_limit_radps2 / (float)FOC_SPEED_LOOP_FREQ;
         /* 位置模式复用速度给定斜坡，避免位置步进把速度环瞬间推到限幅。 */
         handle->speed_ref_ramped += FOC_Saturate(speed_ramp_delta,
                                                  speed_ramp_step,
@@ -1127,16 +1132,21 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
         float pos_pd_out = FOC_PositionPD_Update(&handle->pos_pd, pos_error, speed_mech_user_pos);
 
-        /* V4 巡航速度下限：大误差时维持最低巡航速度，避免末端渐近慢尾 */
+        /* V5 巡航速度下限：大误差时维持最低巡航速度，避免末端渐近慢尾
+         * 使用运行时配置，若 cruise > speed_limit 则自动夹紧 */
         float cruise_cmd = pos_pd_out;
         uint8_t cruise_active = 0U;
+        float effective_cruise = handle->position_cruise_speed_radps;
+        if (effective_cruise > handle->position_speed_limit_radps) {
+            effective_cruise = handle->position_speed_limit_radps;
+        }
         float abs_err = (pos_error >= 0.0f) ? pos_error : -pos_error;
         if (abs_err > FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD) {
             /* 只在 PD 输出与误差同向且 PD 输出绝对值小于巡航速度时才启用 */
             float abs_pd = (pos_pd_out >= 0.0f) ? pos_pd_out : -pos_pd_out;
-            if ((pos_error * pos_pd_out) > 0.0f && abs_pd < FOC_POSITION_CRUISE_SPEED_RAD_PER_S) {
-                cruise_cmd = (pos_error > 0.0f) ? FOC_POSITION_CRUISE_SPEED_RAD_PER_S
-                                                 : -FOC_POSITION_CRUISE_SPEED_RAD_PER_S;
+            if ((pos_error * pos_pd_out) > 0.0f && abs_pd < effective_cruise) {
+                cruise_cmd = (pos_error > 0.0f) ? effective_cruise
+                                                 : -effective_cruise;
                 cruise_active = 1U;
             }
         }
@@ -1572,8 +1582,8 @@ void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
     FOC_PositionPD_Init(&handle->pos_pd,
                         kp,
                         kd,
-                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
-                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
+                        handle->position_speed_limit_radps,
+                        -handle->position_speed_limit_radps);
 }
 
 /**
@@ -1821,12 +1831,17 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
         if (Kd_p > 0.25f) Kd_p = 0.25f;
     }
 
+    /* 重新初始化运行时运动配置默认值（V5不持久化） */
+    handle->position_speed_limit_radps  = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+    handle->position_accel_limit_radps2 = FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT;
+    handle->position_cruise_speed_radps = FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT;
+
     /* 更新位置环PD */
     FOC_PositionPD_Init(&handle->pos_pd,
                         Kp_p,
                         Kd_p,
-                        FOC_POSITION_SPEED_LIMIT_RAD_PER_S,
-                        -FOC_POSITION_SPEED_LIMIT_RAD_PER_S);
+                        handle->position_speed_limit_radps,
+                        -handle->position_speed_limit_radps);
 
     /* 冷启动门禁：若已识别但 enc_dir != -1，阻止所有前馈验证
      * V4基线要求 enc_dir=-1；enc_dir=1 说明参数不是V4识别的，需重新识别

@@ -847,6 +847,68 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* --- V5 Motion Config: Query --- */
+    if (strcmp(cmd, "CMD:MOTION_CFG?") == 0) {
+        char resp[128];
+        char s_str[20], a_str[20], c_str[20];
+        DrvUart_FormatFixed(s_str, sizeof(s_str), g_foc_app.position_speed_limit_radps, 3U);
+        DrvUart_FormatFixed(a_str, sizeof(a_str), g_foc_app.position_accel_limit_radps2, 3U);
+        DrvUart_FormatFixed(c_str, sizeof(c_str), g_foc_app.position_cruise_speed_radps, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "MOTION_CFG,OK,speed=%s,accel=%s,cruise=%s\r\n", s_str, a_str, c_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    /* --- V5 Motion Config: Reset --- */
+    if (strcmp(cmd, "CMD:MOTION_CFG_RESET") == 0) {
+        g_foc_app.position_speed_limit_radps  = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+        g_foc_app.position_accel_limit_radps2 = FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT;
+        g_foc_app.position_cruise_speed_radps = FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT;
+        g_foc_app.pos_pd.output_max =  FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+        g_foc_app.pos_pd.output_min = -FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+        {
+            float lim = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+            if (g_foc_app.speed_ref_ramped > lim)  g_foc_app.speed_ref_ramped = lim;
+            if (g_foc_app.speed_ref_ramped < -lim) g_foc_app.speed_ref_ramped = -lim;
+            g_foc_app.speed_ref_ramped_prev = g_foc_app.speed_ref_ramped;
+        }
+        UART_CommandSendText("MOTION_CFG,RESET,OK\r\n");
+        return;
+    }
+
+    /* --- V5 Motion Config: Set --- */
+    {
+        float s, a, c;
+        if (sscanf(cmd, "CMD:MOTION_CFG,%f,%f,%f", &s, &a, &c) == 3) {
+            char resp[128];
+            if (s < FOC_MOTION_CFG_SPEED_LIMIT_MIN || s > FOC_MOTION_CFG_SPEED_LIMIT_MAX ||
+                a < FOC_MOTION_CFG_ACCEL_LIMIT_MIN || a > FOC_MOTION_CFG_ACCEL_LIMIT_MAX ||
+                c < 0.0f || c > s) {
+                UART_CommandSendText("MOTION_CFG,FAIL,range\r\n");
+                return;
+            }
+            g_foc_app.position_speed_limit_radps  = s;
+            g_foc_app.position_accel_limit_radps2 = a;
+            g_foc_app.position_cruise_speed_radps = c;
+            g_foc_app.pos_pd.output_max =  s;
+            g_foc_app.pos_pd.output_min = -s;
+            if (g_foc_app.speed_ref_ramped > s)  g_foc_app.speed_ref_ramped = s;
+            if (g_foc_app.speed_ref_ramped < -s) g_foc_app.speed_ref_ramped = -s;
+            g_foc_app.speed_ref_ramped_prev = g_foc_app.speed_ref_ramped;
+            {
+                char s_str[20], a_str[20], c_str[20];
+                DrvUart_FormatFixed(s_str, sizeof(s_str), s, 3U);
+                DrvUart_FormatFixed(a_str, sizeof(a_str), a, 3U);
+                DrvUart_FormatFixed(c_str, sizeof(c_str), c, 3U);
+                (void)snprintf(resp, sizeof(resp),
+                         "MOTION_CFG,OK,speed=%s,accel=%s,cruise=%s\r\n", s_str, a_str, c_str);
+                UART_CommandSendText(resp);
+            }
+            return;
+        }
+    }
+
     if (sscanf(cmd, "CMD:UNLOCK,%ld", &int_arg) == 1) {
         if (int_arg != 0) {
             g_foc_app.power_unlocked = 1U;

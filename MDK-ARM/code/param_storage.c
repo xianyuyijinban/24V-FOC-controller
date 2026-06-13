@@ -138,7 +138,7 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
     ParamPackage_t package;
     ParamStatus_t status;
     uint8_t  cog_valid = 0U;
-    uint32_t cog_header[4];
+    uint32_t cog_header[PARAM_COGGING_HEADER_WORDS];  /* 32B aligned */
     uint8_t  cog_backup[PARAM_COGGING_LUT_FLOATS * sizeof(float)];
     const uint32_t *stored_hdr;
 
@@ -165,8 +165,8 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
         && stored_hdr[1] <= (uint32_t)PARAM_COGGING_LUT_FLOATS) {
         uint32_t lut_bytes = stored_hdr[1] * sizeof(float);
         cog_valid = 1U;
-        memcpy(cog_header, stored_hdr, sizeof(cog_header));
-        memcpy(cog_backup, (const void *)(PARAM_COGGING_FLASH_ADDR + 16U), lut_bytes);
+        memcpy(cog_header, stored_hdr, PARAM_COGGING_HEADER_BYTES);
+        memcpy(cog_backup, (const void *)PARAM_COGGING_TABLE_FLASH_ADDR, lut_bytes);
     }
 
     /* 解锁Flash */
@@ -188,9 +188,10 @@ ParamStatus_t Param_Save(const MotorParam_t *param)
 
     /* 恢复齿槽LUT */
     if (cog_valid) {
-        status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, cog_header, sizeof(cog_header));
+        status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, cog_header,
+                                  PARAM_COGGING_HEADER_BYTES);
         if (status == PARAM_OK) {
-            status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR + 16U,
+            status = Param_WriteFlash(PARAM_COGGING_TABLE_FLASH_ADDR,
                                       (const uint32_t *)cog_backup,
                                       cog_header[1] * sizeof(float));
         }
@@ -214,16 +215,22 @@ ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size,
     ParamStatus_t status;
     uint32_t write_size;
     uint32_t crc;
-    uint32_t header[4];
+    uint32_t header[PARAM_COGGING_HEADER_WORDS];  /* 32B aligned for H7 flashword */
     ParamPackage_t main_pkg;
 
     if (table == NULL || size == 0U || size > PARAM_COGGING_LUT_FLOATS) {
         return PARAM_ERR_INVALID;
     }
 
+    /* Require valid main parameters; refuse to erase sector just to write zeros. */
+    if (motor_param == NULL || !Param_IsValid(motor_param)) {
+        return PARAM_ERR_INVALID;
+    }
+
     write_size = (uint32_t)size * sizeof(float);
 
-    /* Build header: magic, size, CRC, reserved */
+    /* Build header: magic, size, CRC, reserved (first 4 words); pad to 32B */
+    memset(header, 0, sizeof(header));
     crc = Param_CalculateCRC32(table, write_size);
     header[0] = 0x434F4747;  /* "COGG" */
     header[1] = (uint32_t)size;
@@ -232,17 +239,13 @@ ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size,
 
     /* Build main param package from RAM — the params may not be in Flash yet
      * when called during identification (before FOC_App_SaveParam). */
-    if (motor_param != NULL && Param_IsValid(motor_param)) {
-        main_pkg.header.magic = PARAM_MAGIC_NUMBER;
-        main_pkg.header.version = PARAM_VERSION;
-        main_pkg.header.size = sizeof(MotorParam_t);
-        main_pkg.header.timestamp = HAL_GetTick();
-        memset(main_pkg.header.reserved, 0, sizeof(main_pkg.header.reserved));
-        memcpy(&main_pkg.motor, motor_param, sizeof(MotorParam_t));
-        main_pkg.header.crc32 = Param_CalculateCRC32(&main_pkg.motor, sizeof(MotorParam_t));
-    } else {
-        memset(&main_pkg, 0, sizeof(ParamPackage_t));
-    }
+    main_pkg.header.magic = PARAM_MAGIC_NUMBER;
+    main_pkg.header.version = PARAM_VERSION;
+    main_pkg.header.size = sizeof(MotorParam_t);
+    main_pkg.header.timestamp = HAL_GetTick();
+    memset(main_pkg.header.reserved, 0, sizeof(main_pkg.header.reserved));
+    memcpy(&main_pkg.motor, motor_param, sizeof(MotorParam_t));
+    main_pkg.header.crc32 = Param_CalculateCRC32(&main_pkg.motor, sizeof(MotorParam_t));
 
     /* Erase sector (shared with main params), write both */
     HAL_FLASH_Unlock();
@@ -253,22 +256,21 @@ ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size,
         return status;
     }
 
-    if (main_pkg.header.magic == PARAM_MAGIC_NUMBER) {
-        status = Param_WriteFlash(PARAM_FLASH_ADDR, (uint32_t *)&main_pkg,
-                                  sizeof(ParamPackage_t));
-        if (status != PARAM_OK) {
-            HAL_FLASH_Lock();
-            return status;
-        }
-    }
-
-    status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, header, sizeof(header));
+    status = Param_WriteFlash(PARAM_FLASH_ADDR, (uint32_t *)&main_pkg,
+                              sizeof(ParamPackage_t));
     if (status != PARAM_OK) {
         HAL_FLASH_Lock();
         return status;
     }
 
-    status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR + sizeof(header),
+    status = Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, header,
+                              PARAM_COGGING_HEADER_BYTES);
+    if (status != PARAM_OK) {
+        HAL_FLASH_Lock();
+        return status;
+    }
+
+    status = Param_WriteFlash(PARAM_COGGING_TABLE_FLASH_ADDR,
                               (const uint32_t *)table, write_size);
 
     HAL_FLASH_Lock();
@@ -309,7 +311,7 @@ ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size)
     }
 
     read_size = stored_size_u32 * sizeof(float);
-    stored_table = (const float *)(PARAM_COGGING_FLASH_ADDR + 16U);
+    stored_table = (const float *)PARAM_COGGING_TABLE_FLASH_ADDR;
 
     crc_calc = Param_CalculateCRC32(stored_table, read_size);
     if (crc_calc != crc_stored) {
@@ -470,7 +472,7 @@ ParamStatus_t Param_EraseSector(void)
 ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t size)
 {
     uint32_t offset = 0U;
-    uint8_t flashword_buf[32];
+    __attribute__((aligned(32))) uint8_t flashword_buf[32];
     const uint8_t *src;
 
     if ((data == NULL) || (size == 0U)) {

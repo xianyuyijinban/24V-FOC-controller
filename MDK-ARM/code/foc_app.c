@@ -188,26 +188,6 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
 
                 FOC_App_SaveParam(handle);
 
-                /* Persist cogging LUT — sector already erased by Param_Save above.
-                 * Write LUT directly without re-erasing to avoid flash timing issues. */
-                if (handle->cogging_lut.pending
-                    && handle->cogging_lut.valid_size > 0U
-                    && handle->cogging_lut.valid_size <= FOC_COGGING_LUT_SIZE) {
-                    uint32_t write_size = (uint32_t)handle->cogging_lut.valid_size * sizeof(float);
-                    uint32_t crc = Param_CalculateCRC32(handle->cogging_lut.table, write_size);
-                    uint32_t header[4];
-                    header[0] = 0x434F4747;
-                    header[1] = (uint32_t)handle->cogging_lut.valid_size;
-                    header[2] = crc;
-                    header[3] = 0U;
-                    HAL_FLASH_Unlock();
-                    Param_WriteFlash(PARAM_COGGING_FLASH_ADDR, header, sizeof(header));
-                    Param_WriteFlash(PARAM_COGGING_FLASH_ADDR + sizeof(header),
-                                     (const uint32_t *)handle->cogging_lut.table, write_size);
-                    HAL_FLASH_Lock();
-                    handle->cogging_lut.pending = 0U;
-                }
-
                 /* 更新控制环参数 */
                 FOC_App_UpdateLoopParams(handle);
                 
@@ -1904,7 +1884,28 @@ void FOC_App_LoadParam(FOC_AppHandle_t *handle)
  */
 void FOC_App_SaveParam(FOC_AppHandle_t *handle)
 {
-    Param_Save(&handle->motor_param);
+    /* If cogging LUT is pending, use combined save that writes both
+     * main params and LUT in a single flash erase+write session. */
+    if (handle->cogging_lut.pending
+        && handle->cogging_lut.valid_size > 0U
+        && handle->cogging_lut.valid_size <= FOC_COGGING_LUT_SIZE) {
+        {
+            ParamStatus_t st = Param_SaveCoggingLUT(handle->cogging_lut.table,
+                                       handle->cogging_lut.valid_size,
+                                       &handle->motor_param);
+            handle->cogging_lut.pending = 0U;
+            handle->cogging_lut.save_attempted = (st == PARAM_OK) ? 1U : 2U;
+            /* Verify: read back header to confirm persistence */
+            if (st == PARAM_OK) {
+                const uint32_t *verify_hdr = (const uint32_t *)PARAM_COGGING_FLASH_ADDR;
+                if (verify_hdr[0] != 0x434F4747) {
+                    handle->cogging_lut.save_attempted = 3U; /* magic mismatch */
+                }
+            }
+        }
+    } else {
+        Param_Save(&handle->motor_param);
+    }
     /* Flash write stalls CPU → TLE5012 SPI transaction may be interrupted.
        Abort any stuck SPI transfer and reset encoder state machine. */
     HAL_SPI_Abort(&hspi3);

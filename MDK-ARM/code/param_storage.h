@@ -98,9 +98,12 @@ ParamStatus_t Param_EraseSector(void);
 ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t size);
 
 /* 齿槽LUT存储 (P0 feedforward) */
-#define PARAM_COGGING_FLASH_OFFSET  ((uint32_t)sizeof(ParamPackage_t))
+#define PARAM_COGGING_FLASH_OFFSET  (((uint32_t)sizeof(ParamPackage_t) + 31U) & ~31U)  /* 32B aligned for STM32H7 */
 #define PARAM_COGGING_LUT_FLOATS    264
 #define PARAM_COGGING_FLASH_ADDR    (PARAM_FLASH_ADDR + PARAM_COGGING_FLASH_OFFSET)
+#define PARAM_COGGING_HEADER_WORDS  8U
+#define PARAM_COGGING_HEADER_BYTES  (PARAM_COGGING_HEADER_WORDS * sizeof(uint32_t))  /* 32B */
+#define PARAM_COGGING_TABLE_FLASH_ADDR (PARAM_COGGING_FLASH_ADDR + PARAM_COGGING_HEADER_BYTES)
 ParamStatus_t Param_SaveCoggingLUT(const float *table, uint16_t size, const MotorParam_t *motor_param);
 ParamStatus_t Param_LoadCoggingLUT(float *table, uint16_t *size);
 

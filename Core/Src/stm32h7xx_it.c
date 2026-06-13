@@ -834,6 +834,15 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
     if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
+    if (strcmp(cmd, "CMD:COG_CFG?") == 0) {
+        DrvUart_QueryCogCfg();
+        return;
+    }
+    if (sscanf(cmd, "CMD:COG_CFG,%f,%f", &f1, &f2) == 2) {
+        if (f1 >= 0.0f && f1 <= 1.0f) g_foc_app.cogging_lut.gain = f1;
+        g_foc_app.cogging_lut.phase_offset_rad = f2 * FOC_PI / 180.0f;
+        return;
+    }
         g_foc_app.cogging_lut.phase_offset_rad = f1;
         return;
     }

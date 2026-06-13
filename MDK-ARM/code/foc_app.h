@@ -33,7 +33,7 @@ extern "C" {
 #define FOC_FF_ENABLE_COGGING    1   /* P0: 齿槽转矩LUT前馈 (Phase P0: collect + diagnose) */
 #define FOC_COGGING_LUT_SIZE     264 /* LCM(24,22) for 24N22P motor */
 #define FOC_FF_COGGING_MAX_A     0.30f /* 齿槽前馈最大补偿电流 A */
-#define FOC_FF_COGGING_GAIN      0.25f /* P0 gain: 0.25x for phase sweep (LUT ±0.34A too strong raw) */
+/* cogging gain/phase now runtime via CMD:COG_CFG; defaults in FOC_App_Init */
 #define FOC_FF_ENABLE_OBSERVER   0   /* P4: 负载转矩观测器 (默认关闭，需调参) */
 #define FOC_FF_OBSERVER_GAIN_L   50.0f /* 观测器收敛率 rad/s */
 #define FOC_FF_OBSERVER_LPF_HZ   10.0f /* 观测器输出LPF截止频率 Hz */
@@ -155,7 +155,8 @@ typedef struct {
     uint8_t  valid;                     /* 1 = LUT已加载且有效 */
     uint8_t  pending;                   /* 1 = LUT待持久化到Flash */
     uint8_t  save_attempted;            /* 1 = 已尝试保存LUT到Flash */
-    float    phase_offset_rad;          /* 查表相位偏移 rad (phase sweep) */
+    float    gain;                      /* LUT幅值缩放 0.0-1.0, default 0.25 */
+    float    phase_offset_rad;          /* 查表相位偏移 rad, default +60deg */
 } FOC_CoggingLUT_t;
 
 /* 负载转矩观测器 (P4) — Gopinath型降维扰动观测器 */

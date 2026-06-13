@@ -260,6 +260,11 @@ bool DrvUart_UploadFault(void);
 bool DrvUart_UploadJDiag(void);
 
 /**
+ * @brief 查询当前P0 cogging配置
+ */
+void DrvUart_QueryCogCfg(void);
+
+/**
  * @brief 设置上传使能/禁用
  */
 void DrvUart_SetEnable(bool enable);

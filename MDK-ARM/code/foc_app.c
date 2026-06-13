@@ -128,7 +128,11 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
-    
+
+    /* P0 cogging runtime defaults (overridable via CMD:COG_CFG) */
+    handle->cogging_lut.gain = 0.25f;
+    handle->cogging_lut.phase_offset_rad = FOC_PI / 3.0f;  /* +60 deg */
+
     /* 尝试加载参数 */
     FOC_App_LoadParam(handle);
     FOC_App_UpdateIdentifyState(handle);
@@ -940,7 +944,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
                 int idx_next = (idx + 1) % FOC_COGGING_LUT_SIZE;
                 float cogging_ff = (handle->cogging_lut.table[idx] * (1.0f - frac)
                                   + handle->cogging_lut.table[idx_next] * frac)
-                                  * FOC_FF_COGGING_GAIN;
+                                  * handle->cogging_lut.gain;
                 cogging_ff = FOC_Saturate(cogging_ff,
                                           FOC_FF_COGGING_MAX_A,
                                           -FOC_FF_COGGING_MAX_A);

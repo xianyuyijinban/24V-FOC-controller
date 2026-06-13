@@ -1379,10 +1379,15 @@ bool DrvUart_UploadJDiag(void)
                 if (g_foc_app.cogging_lut.table[i] > cogMax) cogMax = g_foc_app.cogging_lut.table[i];
             }
         }
+        char cogGainText[16], cogPhaseText[16];
         DrvUart_FormatFixed(cogMinText, sizeof(cogMinText), cogMin, 4U);
         DrvUart_FormatFixed(cogMaxText, sizeof(cogMaxText), cogMax, 4U);
+        DrvUart_FormatFixed(cogGainText, sizeof(cogGainText),
+                            g_foc_app.cogging_lut.gain, 3U);
+        DrvUart_FormatFixed(cogPhaseText, sizeof(cogPhaseText),
+                            g_foc_app.cogging_lut.phase_offset_rad * 180.0f / FOC_PI, 1U);
         len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
-                       "JDIAG,v5,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_bins=%u,cog_save=%u,cog_min=%s,cog_max=%s\r\n",
+                       "JDIAG,v6,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_bins=%u,cog_save=%u,cog_gain=%s,cog_phase=%s,cog_min=%s,cog_max=%s\r\n",
                        jText, bText, tcText,
                        (int)g_foc_app.motor_param.encoder_dir,
                        (unsigned long)g_foc_app.motor_param.valid_flag,
@@ -1390,6 +1395,7 @@ bool DrvUart_UploadJDiag(void)
                        (unsigned)g_foc_app.cogging_lut.valid_size,
                        (unsigned)cog_nonzero,
                        (unsigned)g_foc_app.cogging_lut.save_attempted,
+                       cogGainText, cogPhaseText,
                        cogMinText, cogMaxText);
     }
 #else
@@ -1405,6 +1411,32 @@ bool DrvUart_UploadJDiag(void)
     }
 
     return false;
+}
+
+/**
+ * @brief Query current P0 cogging configuration
+ */
+void DrvUart_QueryCogCfg(void)
+{
+    extern FOC_AppHandle_t g_foc_app;
+    char gainText[16], phaseText[16];
+    int16_t len;
+
+    if (s_huart == NULL || s_txBusy) {
+        return;
+    }
+
+    DrvUart_FormatFixed(gainText, sizeof(gainText),
+                        g_foc_app.cogging_lut.gain, 3U);
+    DrvUart_FormatFixed(phaseText, sizeof(phaseText),
+                        g_foc_app.cogging_lut.phase_offset_rad * 180.0f / FOC_PI, 1U);
+
+    len = (int16_t)snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
+                            "COG_CFG,gain=%s,phase_deg=%s\r\n",
+                            gainText, phaseText);
+    if (len > 0 && len < DRV_UART_BUF_SIZE) {
+        DrvUart_StartSend((uint16_t)len);
+    }
 }
 
 /**

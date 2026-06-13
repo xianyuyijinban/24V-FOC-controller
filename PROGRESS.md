@@ -4,6 +4,43 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-13] V5 Motion Speed Runtime Configuration 正式基线
+
+**Commit `31b261d`** — Add runtime motion speed config for V5 baseline.
+
+### 新增能力
+
+| 项目 | 值 |
+|---|---|
+| 默认运动配置 | speed=4.0 rad/s, accel=6.0 rad/s², cruise=1.2 rad/s |
+| UART命令 | `CMD:MOTION_CFG,<s>,<a>,<c>` / `MOTION_CFG?` / `MOTION_CFG_RESET` |
+| 运行时改参 | 立即生效，夹紧ramp避P2尖峰，保留PI积分 |
+| 非法参数保护 | `MOTION_CFG,FAIL,range`，旧配置不变 |
+| FAULT_DETAIL | 新增 `MotionCfg: speed=... accel=... cruise=...` 行 |
+| V4回退档 | `CMD:MOTION_CFG,2.0,2.0,0.8` |
+
+### 功率级验证
+
+| 测试 | 结果 |
+|---|---|
+| V4回退 ±5° | err≤0.9° |
+| V4回退 ±20° | err≤0.9° |
+| V5默认 20° | err=0.08° |
+| V5默认 40° | err=1.51° |
+| V5默认 60° | err=2.55° |
+| V5默认 80° | err=1.35° |
+| 0↔40° ×20 | max=1.68°, avg=1.28° |
+| 运行中改参 2→4→5 | 无突跳、无过流 |
+| 非法参数 ×5 | 全部 FAIL,range |
+| 0 fault | ✅ |
+
+### 修改文件
+
+- `foc_app.h` — 7新宏 + 3 runtime字段
+- `foc_app.c` — 5处宏→运行时字段，位置模式(speed loop + position loop + PD init×3)
+- `stm32h7xx_it.c` — 3个MOTION_CFG命令处理器
+- `uart_upload.h/c` — FormatFixed导出 + MotionCfg诊断行 + TrajDiag更新
+
 ## [2026-06-13] FOC Feedforward Baseline v1 定版
 
 **P1+P2+P3+P0 全部就绪，Phase A-E + P0 A/B 通过。**

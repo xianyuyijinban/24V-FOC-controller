@@ -4,9 +4,46 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
-## [2026-06-13] 前馈验证完成 + J/B参数链路打通
+## [2026-06-13] FOC Feedforward Baseline v1 定版
 
-**Phase A-E 全部通过，P1+P2+P3 前馈系统就绪。**
+**P1+P2+P3+P0 全部就绪，Phase A-E + P0 A/B 通过。**
+
+### Baseline v1 配置
+
+| 前馈 | 状态 | 参数 |
+|---|---|---|
+| P1 BEMF | ON | — |
+| P2 Inertia | ON | J=3.2e-5±12%, B≈0.002 |
+| P3 Friction | ON | B=0.002, Tc=0 |
+| **P0 Cogging** | **ON** | **gain=0.25, phase=+60°** |
+| P4 Observer | OFF | — |
+
+### 关键指标
+
+| 测试 | 结果 |
+|---|---|
+| PREF ±10° | err ≤1.2° |
+| PREF ±20° | err ≤1.0° |
+| 10-cycle 0↔20° | 0 faults |
+| 负载 Iq_peak | 0.10A (P0 off: 0.20A) |
+| 负载 err | ≤1.2° (P0 off: ≤1.8°) |
+
+### P0 运行时调参
+
+```
+CMD:COG_CFG,<gain>,<phase_deg>   # 扫参 (gain 0.0-1.0)
+CMD:COG_CFG?                     # 查询当前值
+CMD:JDIAG                        # cog_gain/cog_phase/cog_valid/cog_bins/cog_min/cog_max
+```
+
+### Commits
+
+- `f0c5218`: J 识别闭环电流 + enc_dir 修复
+- `035fcfb`: CMD:JDIAG + 周期计时 + N-frame 抑制
+- `3de7ed3`: P0 采集启用 + PROGRESS
+- `4ebf2ac`: P0 Flash 32B 对齐持久化
+- `20c5ffd`: P0 gain + phase 扫参
+- `84dacdb`: CMD:COG_CFG 运行时调参
 
 ### 本轮关键修复
 

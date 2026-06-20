@@ -6,54 +6,57 @@
 
 ## [2026-06-20] BEMF 量纲/符号修复 + 电流环运行时诊断与开关
 
-**Commit (pending)** — 本轮发现并修复了 BEMF 前馈的两个关键 bug（Ke 量纲错误 ×100、encoder_dir 导致符号翻转），同时增加了运行时 BEMF 开关、电流环电压分解诊断、RsFF/ADC 诊断命令。
+### Problem / Task
+1. 电机在 12V 母线力矩模式下失控飞转（speed=69 rad/s），Vq 饱和在 ~6.9V
+2. 诊断发现 `motor_param.Ke=0.129` 是机械侧常数，BEMF 前馈用 `omega_elec * Ke = 630×0.129 = 81V`，直接打满电压矢量
+3. Ke 除以 Pn 后（0.0117），BEMF ON 仍然恶化：Iq 符号反转
+4. `speed_elec = speed_mech * Pn * encoder_dir` 导致 encoder_dir=-1 时 BEMF 符号翻转，正反馈
 
-### BEMF 修复
+### Resolution
+1. Ke 量纲修复：`bemf_Ke = motor_param.Ke / Pn` (0.129/11=0.0117)
+2. BEMF 符号修复：`speed_elec = speed_mech * Pn`（不乘 encoder_dir），物理 BEMF 方向与坐标变换约定无关
+3. 新增运行时 BEMF 开关：`CMD:BEMF_CFG,0/1`、`CMD:BEMF_CFG?`、`CMD:KE_TEMP,<ke>`，默认关闭
+4. BEMF 保护门禁：`|omega_e * ke| > 0.8 * Vbus/sqrt(3)` 自动阻止，设置 `bemf_blocked=1`
+5. Vmax 修复：`FOC_Init` 改用 `foc->Vbus/sqrt(3)`，`FOC_SetVbus` 每周期同步
+6. 电流环诊断：`FAULT_DETAIL` 新增 `CurrentLoopDiag`（RsFF/PI/BEMF/PreSat/sat_ratio）和 `BEMF Ctrl`（user/hw/blocked/Ke_used/omega_e）
+7. 新增诊断命令：`CMD:RS_FF_SCALE,<0~1>`、`CMD:ADC_ZERO,<n>`
+8. `CMD:BEMF_CFG?` 修复：strcmp 移除 `\n`
 
-| 问题 | 根因 | 修复 |
-|------|------|------|
-| Vq 饱和 81V | `Ke=0.129`直接乘 ωe（应为 Ke/Pn） | `bemf_Ke = motor_param.Ke / Pn` |
-| BEMF ON 后 Iq 符号反 | `speed_elec *= encoder_dir` 翻转了 BEMF 符号 | `speed_elec = speed_mech × Pn`（不乘 dir） |
-| Vmax=13.86V 硬编码 | 12V 母线 SVPWM 物理上限仅 6.93V | Vmax = Vbus/√3，每周期更新 |
+### Prevention / Follow-up
+1. 永远不在 BEMF 前馈计算中对 `omega_e` 乘以 `encoder_dir`
+2. `motor_param.Ke` 语义固定为机械侧 Kt/Ke_mech，BEMF 前馈使用 `Ke/Pn`
+3. BEMF 默认关闭（`bemf_user_enable=0`），每次启动需显式使能
+4. 电流环诊断行作为标准 FAULT_DETAIL 输出，调参必查
+5. 12V 下 Kp 上限受低惯量（J=0.0001）限制，Kp≥0.60 已正向过冲/振荡
+6. 遗留：负向 SREF 不转、正负 Iq 不对称、Ld/Lq 交叉耦合符号
 
-### 新增运行时命令
+### Verification
+- BEMF OFF 速度模式：SREF=0.5→spd=0.36, SREF=1.0→spd=0.85 ✅
+- BEMF ON (Ke=0.006-0.0117) 力矩：spd≤3 rad/s，不飞转 ✅
+- ADC 零点：raw=offset=(2052,2062,2067) ✅
+- RS_FF_SCALE=0 纯 PI：Vq 极性正确 ✅
 
-| 命令 | 功能 |
-|------|------|
-| `CMD:BEMF_CFG,0/1` | BEMF 前馈开关（默认 OFF） |
-| `CMD:BEMF_CFG?` | 查询 BEMF 状态 |
-| `CMD:KE_TEMP,<ke>` | 临时覆盖 Ke（不写 Flash） |
-| `CMD:RS_FF_SCALE,<0~1>` | Rs 前馈缩放（诊断用） |
-| `CMD:ADC_ZERO,<n>` | PWM OFF 零点采样诊断 |
-
-### FAULT_DETAIL 新增行
-
-- `CurrentLoopDiag`: RsFF / PI / BEMF / PreSat / sat_ratio
-- `BEMF Ctrl`: user_enable / hw_enable / blocked / Ke_used / omega_e
-
-### 修改文件
-
-- `foc_core.h` — 8 诊断字段 + rs_ff_scale + bemf_Ke_temp + bemf_user_enable/blocked
-- `foc_core.c` — 电压分解捕获、BEMF 保护门禁、Vmax 修复
-- `foc_app.c` — Ke/Pn 转换、speed_elec 符号修复
-- `stm32h7xx_it.c` — 5 个新命令处理器
-- `uart_upload.c` — 诊断输出扩展
-- `scripts/` — 调参测试脚本
-
-### 验证 (12V bench)
-
-| 测试 | 结果 |
-|------|------|
-| BEMF OFF 速度模式 | SREF=0.5→0.36, 1.0→0.85 rad/s ✅ |
-| BEMF ON (Ke=0.006-0.0117) 力矩 | spd≤3 rad/s，不飞转 ✅ |
-| ADC 零点 | raw=offset=(2052,2062,2067) ✅ |
-| PI/RsFF 符号 | RS_FF_SCALE=0 纯 PI 极性正确 ✅ |
-
-### 遗留
-
-- 速度模式负向 SREF 不转（encoder_dir 在速度环反馈符号链）
-- 电流环正负 Iq 不对称
-- Kp 需在 0.20~0.30 范围细调
+### Commit
+- Commit: `c328c4d` (固件), `84c704d` (文档+脚本)
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `Core/Src/stm32h7xx_it.c`
+  - `MDK-ARM/code/foc_core.h`
+  - `MDK-ARM/code/foc_core.c`
+  - `MDK-ARM/code/foc_app.c`
+  - `MDK-ARM/code/uart_upload.c`
+  - `HostComputer/main_window.py`
+  - `.claude/architecture/README.md`
+  - `.claude/architecture/CHANGELOG.md`
+  - `.claude/architecture/subsystems/foc-core.md`
+  - `.claude/architecture/subsystems/foc-app.md`
+  - `PROGRESS.md`
+  - `PROCESS.md`
+  - `scripts/current_loop_tune.py`
+  - `scripts/verify_current_loop.py`
+  - `scripts/verify_speed_current.py`
+  - `scripts/diag_check.py`
+  - `scripts/serial_diag.py`
 
 ## [2026-06-13] V5 Motion Speed Runtime Configuration 正式基线
 

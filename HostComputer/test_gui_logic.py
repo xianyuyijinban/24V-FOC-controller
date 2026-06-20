@@ -63,7 +63,7 @@ class TestGuiLogic(unittest.TestCase):
 
     def test_reference_dispatch_routes_to_expected_commands(self):
         self.assertEqual(build_current_ref_command("0.25", "1.5"), "CMD:IREF,0.250,1.500\n")
-        self.assertEqual(build_speed_ref_command("12.5"), "CMD:SREF,12.500\n")
+        self.assertEqual(build_speed_ref_command("5.0"), "CMD:SREF,5.000\n")
         self.assertEqual(build_position_ref_command("180"), "CMD:PREF,3.142\n")
         self.assertEqual(build_vbus_limit_command("9.0", "15.5"), "CMD:VBUS_LIMIT,9.000,15.500\n")
         self.assertEqual(build_motor_pn_command("7"), "CMD:MOTOR_PN,7\n")

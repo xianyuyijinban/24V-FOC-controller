@@ -378,7 +378,8 @@ def build_current_ref_command(id_raw: str, iq_raw: str) -> str:
 
 
 def build_speed_ref_command(speed_raw: str) -> str:
-    speed = parse_float_field(speed_raw, "速度")
+    MAX_SPEED_RAD_PER_S = 8.0   # matches FOC_MOTION_CFG_SPEED_LIMIT_MAX
+    speed = parse_float_field(speed_raw, "速度", minimum=-MAX_SPEED_RAD_PER_S, maximum=MAX_SPEED_RAD_PER_S)
     return CommandBuilder.set_speed_ref(speed)
 
 

@@ -1551,9 +1551,17 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref)
 
     if (handle->stall_open_loop_active || ((!handle->motor_identified) && handle->stall_mode_armed)) {
         speed_ref = FOC_Saturate(speed_ref,
-
-			FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
+                                 FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
                                  -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
+    } else if (handle->control_mode == FOC_MODE_SPEED) {
+        /* Speed mode: clamp to motion config speed limit (default 4.0 rad/s).
+         * Protects against accidental high-speed commands that can cause
+         * runaway on low-voltage / unloaded bench setups. */
+        float max_speed = handle->position_speed_limit_radps;
+        if (max_speed < 0.1f) {
+            max_speed = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
+        }
+        speed_ref = FOC_Saturate(speed_ref, max_speed, -max_speed);
     }
 
     handle->speed_ref = speed_ref;

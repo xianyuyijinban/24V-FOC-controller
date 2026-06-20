@@ -322,14 +322,14 @@ class TestHostMainWindow(unittest.TestCase):
         window.current_iq_input.setText("1.50")
         window.current_apply_button.click()
 
-        window.speed_ref_input.setText("12.0")
+        window.speed_ref_input.setText("5.0")
         window.speed_apply_button.click()
 
         window.position_ref_input.setText("90")
         window.position_apply_button.click()
 
         self.assertIn("CMD:IREF,0.100,1.500\n", commands)
-        self.assertIn("CMD:SREF,12.000\n", commands)
+        self.assertIn("CMD:SREF,5.000\n", commands)
         self.assertIn("CMD:PREF,1.571\n", commands)
 
     def test_unidentified_enable_confirms_stall_mode_before_enabling(self):

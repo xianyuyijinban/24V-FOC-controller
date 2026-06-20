@@ -244,10 +244,12 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
 {
     /* 清零结构体 */
     memset(foc, 0, sizeof(FOC_Handle_t));
+    foc->diag_sat_ratio = 1.0f;
     
     /* 初始化PI控制器 */
     /* 电压矢量限幅：|Vdq| <= Vbus/√3 (SVPWM线性区) */
-    float Vmax = 24.0f / FOC_SQRT3;  /* 假设默认Vbus=24V */
+    float Vmax = foc->Vbus / FOC_SQRT3;
+    if (Vmax < 1.0f) { Vmax = 24.0f / FOC_SQRT3; }  /* Vbus未设置时的fallback */
     FOC_PI_Init(&foc->pi_d, Kp_d, Ki_d, Vmax, -Vmax);
     FOC_PI_Init(&foc->pi_q, Kp_q, Ki_q, Vmax, -Vmax);
     
@@ -258,6 +260,10 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     /* 默认母线电压 */
     foc->Vbus = 24.0f;
     foc->current_resistance_ohm = 0.0f;
+    foc->rs_ff_scale = 1.0f;        /* 默认全幅Rs前馈 */
+    foc->bemf_Ke_temp = 0.0f;       /* 0 = 使用默认Ke */
+    foc->bemf_user_enable = 0U;     /* 默认关闭，需用户显式使能 */
+    foc->bemf_blocked = 0U;
     
     foc->enabled = 1;
 }
@@ -401,33 +407,87 @@ void FOC_Run(FOC_Handle_t *foc)
         foc->Vdq.q = 0.0f;
         foc->ValphaBeta.alpha = 0.0f;
         foc->ValphaBeta.beta = 0.0f;
+        /* 清零电流环诊断 */
+        foc->diag_vd_rs_ff = 0.0f; foc->diag_vq_rs_ff = 0.0f;
+        foc->diag_vd_pi = 0.0f; foc->diag_vq_pi = 0.0f;
+        foc->diag_vd_bemf = 0.0f; foc->diag_vq_bemf = 0.0f;
+        foc->diag_vd_cmd = 0.0f; foc->diag_vq_cmd = 0.0f;
+        foc->diag_v_mag = 0.0f; foc->diag_sat_ratio = 1.0f;
         FOC_SVPWM_Generate(&foc->ValphaBeta, foc->Vbus, &foc->svpwm);
         return;
     }
-    vd_cmd = (foc->current_resistance_ohm * foc->Id_ref) + FOC_PI_Update(&foc->pi_d, error_d);
-    vq_cmd = (foc->current_resistance_ohm * foc->Iq_ref) + FOC_PI_Update(&foc->pi_q, error_q);
+
+    /* Step 3.1: 电阻前馈 + PI 输出（分离捕获用于诊断） */
+    {
+        float vd_rs_ff = foc->current_resistance_ohm * foc->Id_ref * foc->rs_ff_scale;
+        float vq_rs_ff = foc->current_resistance_ohm * foc->Iq_ref * foc->rs_ff_scale;
+        float vd_pi    = FOC_PI_Update(&foc->pi_d, error_d);
+        float vq_pi    = FOC_PI_Update(&foc->pi_q, error_q);
+
+        foc->diag_vd_rs_ff = vd_rs_ff;
+        foc->diag_vq_rs_ff = vq_rs_ff;
+        foc->diag_vd_pi    = vd_pi;
+        foc->diag_vq_pi    = vq_pi;
+
+        vd_cmd = vd_rs_ff + vd_pi;
+        vq_cmd = vq_rs_ff + vq_pi;
+    }
 
     /* Step 3.2: BEMF解耦前馈（P1）
      * Vd_ff = -omega_e * Lq * Iq_ref   (q轴交叉耦合抵消)
-     * Vq_ff = +omega_e * (Ld * Id_ref + Ke)  (反电动势 + d轴交叉耦合)
+     * Vq_ff = +omega_e * (Ld * Id_ref + Ke_elec)  (反电动势 + d轴交叉耦合)
+     *
+     * Ke_elec 使用临时覆盖值或从 motor_param.Ke 派生。
+     * 保护门禁：若 |omega_e * Ke| > 0.8 * Vbus/√3，阻止 BEMF 前馈。
      */
 #if FOC_FF_ENABLE_BEMF
-    if (foc->bemf_enabled) {
+    {
+        float ke_used = (foc->bemf_Ke_temp > 0.0f) ? foc->bemf_Ke_temp : foc->bemf_Ke;
         float omega_e = foc->omega_elec_radps;
-        vd_cmd += -omega_e * foc->bemf_Lq * foc->Iq_ref;
-        vq_cmd +=  omega_e * (foc->bemf_Ld * foc->Id_ref + foc->bemf_Ke);
+        float bemf_limit = 0.8f * foc->Vbus / FOC_SQRT3;
+
+        foc->bemf_blocked = 0U;
+
+        if (foc->bemf_user_enable && foc->bemf_enabled && (ke_used > FOC_EPSILON)) {
+            float vd_bemf = -omega_e * foc->bemf_Lq * foc->Iq_ref;
+            float vq_bemf =  omega_e * (foc->bemf_Ld * foc->Id_ref + ke_used);
+
+            /* 保护门禁：BEMF前馈电压超过80% SVPWM线性区 → 阻止 */
+            if (fabsf(vq_bemf) > bemf_limit || fabsf(vd_bemf) > bemf_limit) {
+                foc->bemf_blocked = 1U;
+                foc->diag_vd_bemf = 0.0f;
+                foc->diag_vq_bemf = 0.0f;
+            } else {
+                foc->diag_vd_bemf = vd_bemf;
+                foc->diag_vq_bemf = vq_bemf;
+                vd_cmd += vd_bemf;
+                vq_cmd += vq_bemf;
+            }
+        } else {
+            foc->diag_vd_bemf = 0.0f;
+            foc->diag_vq_bemf = 0.0f;
+        }
     }
+#else
+    foc->diag_vd_bemf = 0.0f;
+    foc->diag_vq_bemf = 0.0f;
 #endif
+
+    /* 保存限幅前的总指令 */
+    foc->diag_vd_cmd = vd_cmd;
+    foc->diag_vq_cmd = vq_cmd;
 
     /* Step 3.5: 电压矢量限幅（Vd/Vq联合限幅）+ 反算抗积分饱和 */
     vd_sat = vd_cmd;
     vq_sat = vq_cmd;
     Vmax = foc->pi_d.output_max;
     v_mag = sqrtf(vd_cmd * vd_cmd + vq_cmd * vq_cmd);
+    foc->diag_v_mag = v_mag;
     if ((Vmax > FOC_EPSILON) && (v_mag > Vmax)) {
         float scale = Vmax / v_mag;
         vd_sat = vd_cmd * scale;
         vq_sat = vq_cmd * scale;
+        foc->diag_sat_ratio = scale;
 
         if (fabsf(foc->pi_d.Ki) > FOC_EPSILON) {
             foc->pi_d.integral += (FOC_CURRENT_AW_GAIN * (vd_sat - vd_cmd)) / foc->pi_d.Ki;
@@ -437,6 +497,8 @@ void FOC_Run(FOC_Handle_t *foc)
             foc->pi_q.integral += (FOC_CURRENT_AW_GAIN * (vq_sat - vq_cmd)) / foc->pi_q.Ki;
             foc->pi_q.integral = FOC_Saturate(foc->pi_q.integral, foc->pi_q.integral_max, -foc->pi_q.integral_max);
         }
+    } else {
+        foc->diag_sat_ratio = 1.0f;
     }
 
     foc->Vdq.d = vd_sat;

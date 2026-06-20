@@ -762,6 +762,45 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                    packet->ffEncDirBlocked);
     }
 
+    /* CurrentLoopDiag: 电流环电压分解诊断 */
+    {
+        FOC_Handle_t *foc = &g_foc_app.foc;
+        char vdRsText[20], vqRsText[20];
+        char vdPiText[20], vqPiText[20];
+        char vdBemfText[20], vqBemfText[20];
+        char vdCmdText[20], vqCmdText[20];
+        char vMagText[20], satRatioText[20];
+
+        DrvUart_FormatFixed(vdRsText, sizeof(vdRsText), foc->diag_vd_rs_ff, 4U);
+        DrvUart_FormatFixed(vqRsText, sizeof(vqRsText), foc->diag_vq_rs_ff, 4U);
+        DrvUart_FormatFixed(vdPiText, sizeof(vdPiText), foc->diag_vd_pi, 4U);
+        DrvUart_FormatFixed(vqPiText, sizeof(vqPiText), foc->diag_vq_pi, 4U);
+        DrvUart_FormatFixed(vdBemfText, sizeof(vdBemfText), foc->diag_vd_bemf, 4U);
+        DrvUart_FormatFixed(vqBemfText, sizeof(vqBemfText), foc->diag_vq_bemf, 4U);
+        DrvUart_FormatFixed(vdCmdText, sizeof(vdCmdText), foc->diag_vd_cmd, 4U);
+        DrvUart_FormatFixed(vqCmdText, sizeof(vqCmdText), foc->diag_vq_cmd, 4U);
+        DrvUart_FormatFixed(vMagText, sizeof(vMagText), foc->diag_v_mag, 4U);
+        DrvUart_FormatFixed(satRatioText, sizeof(satRatioText), foc->diag_sat_ratio, 4U);
+
+        APPEND_FMT("  CurrentLoopDiag: RsFF(Vd=%s Vq=%s) | PI(Vd=%s Vq=%s) | "
+                   "BEMF(Vd=%s Vq=%s) | PreSat(Vd=%s Vq=%s mag=%s sat=%s)\r\n",
+                   vdRsText, vqRsText,
+                   vdPiText, vqPiText,
+                   vdBemfText, vqBemfText,
+                   vdCmdText, vqCmdText,
+                   vMagText, satRatioText);
+
+        {
+            float ke_used = (foc->bemf_Ke_temp > 0.0f) ? foc->bemf_Ke_temp : foc->bemf_Ke;
+            char keText[20], omegaText[20];
+            DrvUart_FormatFixed(keText, sizeof(keText), ke_used, 6U);
+            DrvUart_FormatFixed(omegaText, sizeof(omegaText), foc->omega_elec_radps, 3U);
+            APPEND_FMT("  BEMF Ctrl: user=%u hw=%u blocked=%u | Ke_used=%s | omega_e=%s rad/s\r\n\r\n",
+                       foc->bemf_user_enable, foc->bemf_enabled, foc->bemf_blocked,
+                       keText, omegaText);
+        }
+    }
+
     /* MotionCfg: V5 runtime motion parameters */
     {
         char motionSpeedText[20], motionAccelText[20], motionCruiseText[20];

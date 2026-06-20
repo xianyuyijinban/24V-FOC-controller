@@ -1393,6 +1393,7 @@ class HostMainWindow(QMainWindow):
                 button.blockSignals(False)
 
     def _refresh_mode_views(self):
+        self._sync_mode_buttons(self._state.selected_mode)
         self.session_mode_value.setText(mode_name(self._state.selected_mode))
         self.target_label.setText(mode_target_label(self._state.selected_mode))
         self.advanced_mode_value.setText(f"{mode_name(self._state.selected_mode)}模式已激活")

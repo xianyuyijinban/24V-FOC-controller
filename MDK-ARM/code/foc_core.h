@@ -94,13 +94,29 @@ typedef struct {
 
     /* Current-loop feedforward */
     float current_resistance_ohm;
+    float rs_ff_scale;          /* Rs前馈缩放因子（0~1，默认1.0，用于诊断符号/幅值） */
 
     /* BEMF decoupling feedforward (P1) */
     float omega_elec_radps;     /* 电角速度 rad/s */
     float bemf_Ld;              /* d轴电感 H */
     float bemf_Lq;              /* q轴电感 H */
-    float bemf_Ke;              /* 反电动势常数 V/(rad/s) */
-    uint8_t bemf_enabled;       /* 1 = BEMF解耦使能 */
+    float bemf_Ke;              /* 反电动势常数 V/(rad/s) — 电角速度基准 */
+    float bemf_Ke_temp;         /* 临时Ke覆盖值（0=使用默认bemf_Ke） */
+    uint8_t bemf_enabled;       /* 1 = BEMF解耦硬件使能（Ld/Lq>0） */
+    uint8_t bemf_user_enable;   /* 1 = 用户运行时使能 */
+    uint8_t bemf_blocked;       /* 1 = 保护门禁阻止（过压自动置零） */
+
+    /* 电流环诊断（每个FOC迭代更新） */
+    float diag_vd_rs_ff;        /* Rs*Id_ref 电阻前馈 */
+    float diag_vq_rs_ff;        /* Rs*Iq_ref 电阻前馈 */
+    float diag_vd_pi;           /* PI输出 d轴 */
+    float diag_vq_pi;           /* PI输出 q轴 */
+    float diag_vd_bemf;         /* BEMF解耦 d轴 */
+    float diag_vq_bemf;         /* BEMF解耦 q轴 */
+    float diag_vd_cmd;          /* 限幅前总Vd指令 */
+    float diag_vq_cmd;          /* 限幅前总Vq指令 */
+    float diag_v_mag;           /* 限幅前矢量幅值 */
+    float diag_sat_ratio;       /* 饱和比（1.0=未饱和，<1.0=已限幅） */
 
     /* 状态 */
     uint8_t enabled;

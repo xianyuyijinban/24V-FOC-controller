@@ -799,7 +799,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
     speed_next = handle->speed_mech + alpha * (speed_raw - handle->speed_mech);
     speed_step = FOC_SPEED_EST_ACCEL_LIMIT_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ;
     handle->speed_mech += FOC_Saturate(speed_next - handle->speed_mech, speed_step, -speed_step);
-    handle->speed_elec = handle->speed_mech * handle->motor_param.Pn * encoder_dir;
+    handle->speed_elec = handle->speed_mech * handle->motor_param.Pn;
 #if FOC_FF_ENABLE_BEMF
     FOC_SetOmegaElec(&handle->foc, handle->speed_elec);
 #endif
@@ -1784,7 +1784,13 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
     handle->foc.pi_q.integral_sep_thresh = 1.5f;
     FOC_SetCurrentResistance(&handle->foc, handle->motor_param.Rs);
 #if FOC_FF_ENABLE_BEMF
-    FOC_SetBemfParams(&handle->foc, handle->motor_param.Ld, handle->motor_param.Lq, handle->motor_param.Ke);
+    {
+        /* motor_param.Ke 为机械侧常数(V·s/rad mechanical)，
+         * BEMF前馈需电角速度基准: Ke_elec = Ke_mech / Pn */
+        float pn_f = (handle->motor_param.Pn > 0U) ? (float)handle->motor_param.Pn : 1.0f;
+        float Ke_elec = handle->motor_param.Ke / pn_f;
+        FOC_SetBemfParams(&handle->foc, handle->motor_param.Ld, handle->motor_param.Lq, Ke_elec);
+    }
 #endif
 
 #if FOC_FF_ENABLE_OBSERVER

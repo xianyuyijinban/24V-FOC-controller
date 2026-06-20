@@ -1223,6 +1223,87 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* BEMF 前馈运行时开关 */
+    if (strcmp(cmd, "CMD:BEMF_CFG?") == 0) {
+        char resp[128];
+        (void)snprintf(resp, sizeof(resp),
+                 "BEMF_CFG,OK,user=%u,hw=%u,blocked=%u,Ke=%.6f,Ke_temp=%.6f\r\n",
+                 g_foc_app.foc.bemf_user_enable,
+                 g_foc_app.foc.bemf_enabled,
+                 g_foc_app.foc.bemf_blocked,
+                 (double)g_foc_app.foc.bemf_Ke,
+                 (double)g_foc_app.foc.bemf_Ke_temp);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:BEMF_CFG,%ld", &int_arg) == 1) {
+        if (int_arg == 0 || int_arg == 1) {
+            char resp[80];
+            __disable_irq();
+            g_foc_app.foc.bemf_user_enable = (uint8_t)int_arg;
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp), "BEMF_CFG,OK,%s\r\n",
+                     (int_arg != 0) ? "ENABLED" : "DISABLED");
+            UART_CommandSendText(resp);
+        } else {
+            UART_CommandSendText("BEMF_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:KE_TEMP,", &f1)) {
+        if (f1 >= 0.0f) {
+            char resp[80];
+            __disable_irq();
+            g_foc_app.foc.bemf_Ke_temp = f1;
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp), "KE_TEMP,OK,%.6f\r\n", (double)f1);
+            UART_CommandSendText(resp);
+        }
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:RS_FF_SCALE,", &f1)) {
+        if (f1 >= 0.0f && f1 <= 1.0f) {
+            char resp[80];
+            __disable_irq();
+            g_foc_app.foc.rs_ff_scale = f1;
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp), "RS_FF_SCALE,OK,%.3f\r\n", (double)f1);
+            UART_CommandSendText(resp);
+        }
+        return;
+    }
+    /* ADC零点诊断：采样N次报告平均原始值（仅PWM OFF） */
+    if (sscanf(cmd, "CMD:ADC_ZERO,%ld", &int_arg) == 1) {
+        if (int_arg > 0 && int_arg <= 65536 && g_foc_app.enable_pwm == 0U) {
+            char resp[128];
+            ADC_Sampling_t *adc = ADC_Sampling_GetData();
+            uint16_t samples = (uint16_t)int_arg;
+            int64_t sumA = 0, sumB = 0, sumC = 0;
+            for (uint16_t n = 0U; n < samples; n++) {
+                sumA += adc->rawCurrentA;
+                sumB += adc->rawCurrentB;
+                sumC += adc->rawCurrentC;
+                HAL_Delay(1); /* 等待下一个ADC采样 */
+            }
+            int32_t avgRawA = (int32_t)(sumA / (int64_t)samples);
+            int32_t avgRawB = (int32_t)(sumB / (int64_t)samples);
+            int32_t avgRawC = (int32_t)(sumC / (int64_t)samples);
+            /* 用当前偏移量换算电流 */
+            float curA = ADC_CalcCurrent((uint16_t)avgRawA, adc->offsetA);
+            float curB = ADC_CalcCurrent((uint16_t)avgRawB, adc->offsetB);
+            float curC = ADC_CalcCurrent((uint16_t)avgRawC, adc->offsetC);
+            (void)snprintf(resp, sizeof(resp),
+                     "ADC_ZERO,OK,n=%u,raw=(%ld,%ld,%ld),offset=(%d,%d,%d),cur=(%.4f,%.4f,%.4f)A\r\n",
+                     (unsigned)samples, (long)avgRawA, (long)avgRawB, (long)avgRawC,
+                     (int)adc->offsetA, (int)adc->offsetB, (int)adc->offsetC,
+                     (double)curA, (double)curB, (double)curC);
+            UART_CommandSendText(resp);
+        } else if (g_foc_app.enable_pwm != 0U) {
+            UART_CommandSendText("ADC_ZERO,FAIL,pwm_active\r\n");
+        }
+        return;
+    }
+
     if (UART_CommandParseFloat2(cmd, "CMD:PI_SPEED,", &f1, &f2)) {
         if (f1 > 0.0f && f2 >= 0.0f) {
             __disable_irq();

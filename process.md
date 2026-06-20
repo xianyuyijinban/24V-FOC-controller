@@ -346,7 +346,7 @@
   2. 重编译烧录、重识别 → `enc_dir=-1, pn_dir=-1` 一致。扭矩测试0.05A旋转91.6°（修复前仅0.68°）。
   3. **CMD:HOME** 设机械零位 → PREF=0/±5°/±20°全部通过，误差<2°，Iq≈0。
 - Prevention: PN识别中enc_dir应始终从pn_observed_dir推断，不依赖δθ_elec符号。识别后必须执行CMD:HOME设零位。任何修改motor_identify.c PN路径后需重跑 `build.ps1 + pyocd load + reidentify + HOME + PREF序列` 验证。
-- Commit: (pending)
+- Commit: c328c4d (固件), 84c704d (文档+脚本)
 - Recurrence policy: Not allowed to happen again.
 
 ## [2026-06-12 23:10] J识别闭环电流通路修复

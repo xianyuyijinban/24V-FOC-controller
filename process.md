@@ -370,3 +370,45 @@
 - 当前状态：固件v2已烧录，COGGING阶段33s执行完毕，但cog_valid仍为0——LUT保存逻辑或采集数据有效性问题待查。
 - 遗留：Param_SaveCoggingLUT返回值检查、采集bin填充率诊断、COGGING_TIMEOUT/电压参数调整
 - Commit: (pending)
+
+## [2026-06-20 22:30] BEMF 量纲/符号修复 + 电流环运行时诊断与开关
+
+- Problem:
+  1. 电机在 12V 母线力矩模式下失控飞转（speed=69 rad/s），Vq 饱和在 ~6.9V
+  2. 诊断发现 `motor_param.Ke=0.129` 是机械侧常数，BEMF 前馈用 `omega_elec * Ke = 630×0.129 = 81V`，直接打满电压矢量
+  3. Ke 除以 Pn 后（0.0117），BEMF ON 仍然恶化：Iq 符号反转，电机加速到 28 rad/s
+  4. `speed_elec = speed_mech * Pn * encoder_dir` 导致 encoder_dir=-1 时 BEMF 符号翻转，正反馈
+
+- Resolution:
+  1. Ke 量纲修复：`bemf_Ke = motor_param.Ke / Pn` (0.129/11=0.0117)，在 `FOC_App_UpdateLoopParams` 中执行
+  2. BEMF 符号修复：`speed_elec = speed_mech * Pn`（不乘 encoder_dir），物理 BEMF 方向与坐标变换独立
+  3. 新增运行时 BEMF 开关：
+     - `CMD:BEMF_CFG,0/1`、`CMD:BEMF_CFG?`、`CMD:KE_TEMP,<ke>`
+     - BEMF 默认关闭（`bemf_user_enable=0`），需用户显式使能
+  4. BEMF 保护门禁：`|omega_e * ke| > 0.8 * Vbus/sqrt(3)` 自动阻止，设置 `bemf_blocked=1`
+  5. Vmax 修复：`FOC_Init` 改用 `foc->Vbus/sqrt(3)` 初始化，`FOC_SetVbus` 每周期同步
+  6. 电流环诊断：`FAULT_DETAIL` 新增 `CurrentLoopDiag`（RsFF/PI/BEMF/PreSat/sat_ratio）和 `BEMF Ctrl`（user/hw/blocked/Ke_used/omega_e）两行
+  7. 新增诊断命令：`CMD:RS_FF_SCALE,<0~1>`（隔离 Rs 前馈诊断）、`CMD:ADC_ZERO,<n>`（PWM OFF 零点采样）
+  8. `CMD:BEMF_CFG?` 修复：strcmp 移除 `\n`（命令入队时已截断换行符）
+
+- Verification (12V bench):
+  - BEMF OFF 速度模式：SREF=0.5→spd=0.36, SREF=1.0→spd=0.85 ✓
+  - BEMF ON (Ke=0.006-0.0117) 力矩模式：spd≤3 rad/s，不飞转，Vq 随 Ke 增加而降低 ✓
+  - BEMF ON 速度模式：正向正常，负向 SREF 不转（encoder_dir 在速度环符号问题，独立遗留）
+  - ADC 零点：raw=offset=(2052,2062,2067)，零偏置 ✓
+  - RS_FF_SCALE=0 纯 PI 测试：Vq 极性正确，无符号错误 ✓
+
+- Prevention:
+  1. 永远不在 BEMF 前馈计算中对 `omega_e` 乘以 `encoder_dir`——物理 BEMF 的量值和方向与坐标变换约定无关
+  2. `motor_param.Ke` 语义固定为机械侧 Kt/Ke_mech（V·s/rad mechanical），BEMF 前馈使用 `Ke/Pn` 派生值
+  3. BEMF 默认关闭（`bemf_user_enable=0`），每次启动需显式使能，防止参数错误导致飞车
+  4. 电流环诊断行（`CurrentLoopDiag`/`BEMF Ctrl`）作为每次 `FAULT_DETAIL` 的标准输出，调参必查
+  5. 12V 母线下电流环 Kp 上限受低惯量（J=0.0001）限制，Kp≥0.60 已出现正向过冲/振荡
+
+- 遗留：
+  1. 速度模式负向 SREF 不转（encoder_dir=-1 在速度环反馈符号链中的问题）
+  2. 电流环正负 Iq 跟踪不对称（与遗留1可能同源，也可能是 Ld/Lq 交叉耦合项在 encoder_dir=-1 时符号未修正）
+  3. BEMF Ld/Lq 交叉耦合项（`vd_bemf = -omega_e * Lq * Iq`）在 encoder_dir=-1 时符号可能也需要修正
+  4. 电流环 Kp 需要进一步细调（0.20~0.30 范围内），Ki=0
+
+- Commit: (pending)

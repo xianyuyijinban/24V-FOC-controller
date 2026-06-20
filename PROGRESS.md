@@ -4,6 +4,57 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-20] BEMF 量纲/符号修复 + 电流环运行时诊断与开关
+
+**Commit (pending)** — 本轮发现并修复了 BEMF 前馈的两个关键 bug（Ke 量纲错误 ×100、encoder_dir 导致符号翻转），同时增加了运行时 BEMF 开关、电流环电压分解诊断、RsFF/ADC 诊断命令。
+
+### BEMF 修复
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| Vq 饱和 81V | `Ke=0.129`直接乘 ωe（应为 Ke/Pn） | `bemf_Ke = motor_param.Ke / Pn` |
+| BEMF ON 后 Iq 符号反 | `speed_elec *= encoder_dir` 翻转了 BEMF 符号 | `speed_elec = speed_mech × Pn`（不乘 dir） |
+| Vmax=13.86V 硬编码 | 12V 母线 SVPWM 物理上限仅 6.93V | Vmax = Vbus/√3，每周期更新 |
+
+### 新增运行时命令
+
+| 命令 | 功能 |
+|------|------|
+| `CMD:BEMF_CFG,0/1` | BEMF 前馈开关（默认 OFF） |
+| `CMD:BEMF_CFG?` | 查询 BEMF 状态 |
+| `CMD:KE_TEMP,<ke>` | 临时覆盖 Ke（不写 Flash） |
+| `CMD:RS_FF_SCALE,<0~1>` | Rs 前馈缩放（诊断用） |
+| `CMD:ADC_ZERO,<n>` | PWM OFF 零点采样诊断 |
+
+### FAULT_DETAIL 新增行
+
+- `CurrentLoopDiag`: RsFF / PI / BEMF / PreSat / sat_ratio
+- `BEMF Ctrl`: user_enable / hw_enable / blocked / Ke_used / omega_e
+
+### 修改文件
+
+- `foc_core.h` — 8 诊断字段 + rs_ff_scale + bemf_Ke_temp + bemf_user_enable/blocked
+- `foc_core.c` — 电压分解捕获、BEMF 保护门禁、Vmax 修复
+- `foc_app.c` — Ke/Pn 转换、speed_elec 符号修复
+- `stm32h7xx_it.c` — 5 个新命令处理器
+- `uart_upload.c` — 诊断输出扩展
+- `scripts/` — 调参测试脚本
+
+### 验证 (12V bench)
+
+| 测试 | 结果 |
+|------|------|
+| BEMF OFF 速度模式 | SREF=0.5→0.36, 1.0→0.85 rad/s ✅ |
+| BEMF ON (Ke=0.006-0.0117) 力矩 | spd≤3 rad/s，不飞转 ✅ |
+| ADC 零点 | raw=offset=(2052,2062,2067) ✅ |
+| PI/RsFF 符号 | RS_FF_SCALE=0 纯 PI 极性正确 ✅ |
+
+### 遗留
+
+- 速度模式负向 SREF 不转（encoder_dir 在速度环反馈符号链）
+- 电流环正负 Iq 不对称
+- Kp 需在 0.20~0.30 范围细调
+
 ## [2026-06-13] V5 Motion Speed Runtime Configuration 正式基线
 
 **Commit `31b261d`** — Add runtime motion speed config for V5 baseline.

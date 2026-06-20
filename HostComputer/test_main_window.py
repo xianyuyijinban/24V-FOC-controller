@@ -34,11 +34,11 @@ class TestHostMainWindow(unittest.TestCase):
     def test_window_has_required_tabs(self):
         window = self._window()
         self.assertEqual(window.windowTitle(), "FOC 上位机调试工具")
-        self.assertEqual(window.tabs.tabText(0), "调试面板")
-        self.assertEqual(window.tabs.tabText(1), "参数识别")
-        self.assertEqual(window.tabs.tabText(2), "高级控制")
-        self.assertEqual(window.tabs.tabText(3), "环路参数")
-        self.assertFalse(window.plot_group.isChecked())
+        self.assertEqual(window.tabs.tabText(0), "控制器参数")
+        self.assertEqual(window.tabs.tabText(1), "实时波形")
+        self.assertEqual(window.tabs.tabText(2), "参数识别")
+        self.assertEqual(window.tabs.tabText(3), "高级控制")
+        self.assertEqual(window.tabs.tabText(4), "环路参数")
         self.assertEqual(window.current_apply_button.text(), "应用电流给定")
         self.assertEqual(window.current_pi_apply_button.text(), "应用电流环 PI")
         self.assertEqual(window.position_pd_apply_button.text(), "应用位置环 PD")
@@ -449,7 +449,7 @@ class TestHostMainWindow(unittest.TestCase):
 
     def test_phase_current_packets_defer_plot_refresh_to_throttle_timer(self):
         window = self._window()
-        window.plot_group.setChecked(True)
+        window.tabs.setCurrentIndex(1)
 
         with mock.patch.object(window, "_refresh_plot") as refresh_plot:
             for index in range(200):

@@ -179,10 +179,12 @@ class HostMainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.tabs.addTab(self._build_debug_panel(), "调试面板")
+        self.tabs.addTab(self._build_debug_panel(), "控制器参数")
+        self.tabs.addTab(self._build_chart_tab(), "实时波形")
         self.tabs.addTab(self._build_identify_tab(), "参数识别")
         self.tabs.addTab(self._build_advanced_control_tab(), "高级控制")
         self.tabs.addTab(self._build_pi_tab(), "环路参数")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(250)
@@ -192,7 +194,6 @@ class HostMainWindow(QMainWindow):
         self._plot_refresh_timer = QTimer(self)
         self._plot_refresh_timer.setInterval(self.PLOT_REFRESH_INTERVAL_MS)
         self._plot_refresh_timer.timeout.connect(self._flush_pending_plot_refresh)
-        self._plot_refresh_timer.start()
 
         self._log_refresh_timer = QTimer(self)
         self._log_refresh_timer.setInterval(self.LOG_REFRESH_INTERVAL_MS)
@@ -252,8 +253,15 @@ class HostMainWindow(QMainWindow):
         layout = QHBoxLayout(panel)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(18)
-        layout.addWidget(self._build_actions_column(), 1)
-        layout.addWidget(self._build_runtime_column(), 2)
+
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+        left_layout.addWidget(self._build_actions_column())
+        left_layout.addWidget(self._build_runtime_column())
+
+        layout.addWidget(left_column, 1)
         layout.addWidget(self._build_fault_log_column(), 2)
         return panel
 
@@ -320,7 +328,6 @@ class HostMainWindow(QMainWindow):
         mode_layout.addWidget(hint)
         layout.addWidget(mode_group)
 
-        layout.addStretch(1)
         return widget
 
     def _build_runtime_column(self) -> QWidget:
@@ -355,17 +362,13 @@ class HostMainWindow(QMainWindow):
         session_layout.addRow("当前模式", self.session_mode_value)
         session_layout.addRow("最近数据包", self.packet_timestamp_value)
         layout.addWidget(session_group)
-
-        self.plot_group = self._build_plot_group()
-        layout.addWidget(self.plot_group, 1)
         return widget
 
-    def _build_plot_group(self) -> QGroupBox:
-        group = QGroupBox("实时曲线")
-        group.setCheckable(True)
-        group.setChecked(False)
-        group.toggled.connect(self._refresh_plot)
-        layout = QVBoxLayout(group)
+    def _build_chart_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
 
         toggles_layout = QGridLayout()
         self.plot_channel_checks: dict[str, QCheckBox] = {}
@@ -414,7 +417,7 @@ class HostMainWindow(QMainWindow):
         self.export_plot_button = QPushButton("导出曲线 CSV")
         self.export_plot_button.clicked.connect(self._export_plot_csv)
         layout.addWidget(self.export_plot_button)
-        return group
+        return widget
 
     def _build_fault_log_column(self) -> QWidget:
         widget = QWidget()
@@ -703,7 +706,6 @@ class HostMainWindow(QMainWindow):
         home_layout.addRow(self.home_hint)
         layout.addWidget(self.home_group)
 
-        layout.addStretch(1)
         return widget
 
     def _build_pi_tab(self) -> QWidget:
@@ -761,7 +763,6 @@ class HostMainWindow(QMainWindow):
         position_layout.addRow(self.position_pd_defaults_button, self.position_pd_apply_button)
         layout.addWidget(self.position_pd_group)
 
-        layout.addStretch(1)
         return widget
 
     def _register_mode_button(self, button: QRadioButton, mode: int, group: QButtonGroup):
@@ -1574,7 +1575,7 @@ class HostMainWindow(QMainWindow):
             self.data_status_value.setStyleSheet("color: #0f766e; font-weight: 700;")
 
     def _refresh_plot(self, *_):
-        if pg is None or not self.plot_group.isChecked():
+        if pg is None:
             return
         for channel, curve in self._plot_curves.items():
             checkbox = self.plot_channel_checks[channel]
@@ -1586,14 +1587,19 @@ class HostMainWindow(QMainWindow):
 
     def _request_plot_refresh(self):
         self._plot_refresh_pending = True
-        if pg is None or not self.plot_group.isChecked():
-            return
 
     def _flush_pending_plot_refresh(self):
         if not self._plot_refresh_pending:
             return
         self._plot_refresh_pending = False
         self._refresh_plot()
+
+    def _on_tab_changed(self, index: int):
+        if index == 1:
+            self._plot_refresh_timer.start()
+            self._flush_pending_plot_refresh()
+        else:
+            self._plot_refresh_timer.stop()
 
     def _export_plot_csv(self):
         rows = self._plot_buffer.export_rows(self._selected_plot_channels())

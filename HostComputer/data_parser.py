@@ -672,6 +672,31 @@ class CommandBuilder:
     def set_position_ref(pos: float) -> str:
         """设置位置参考值"""
         return f"CMD:PREF,{pos:.3f}\n"
+
+    @staticmethod
+    def set_motion_cfg(speed: float, accel: float, cruise: float) -> str:
+        """Set V5 position-mode motion config."""
+        return f"CMD:MOTION_CFG,{speed:.3f},{accel:.3f},{cruise:.3f}\n"
+
+    @staticmethod
+    def query_motion_cfg() -> str:
+        """Query V5 position-mode motion config."""
+        return "CMD:MOTION_CFG?\n"
+
+    @staticmethod
+    def reset_motion_cfg() -> str:
+        """Reset V5 motion config to firmware defaults."""
+        return "CMD:MOTION_CFG_RESET\n"
+
+    @staticmethod
+    def set_cogging_cfg(gain: float, phase_deg: float) -> str:
+        """Set P0 cogging feedforward gain and phase in degrees."""
+        return f"CMD:COG_CFG,{gain:.3f},{phase_deg:.3f}\n"
+
+    @staticmethod
+    def query_cogging_cfg() -> str:
+        """Query P0 cogging feedforward config."""
+        return "CMD:COG_CFG?\n"
     
     @staticmethod
     def start_identify() -> str:

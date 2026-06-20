@@ -1060,6 +1060,10 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             handle->position_loop_iq_neg_sat_diag = 0U;
         }
         FOC_App_ClampSpeedPiIntegral(&handle->pi_speed, iq_limit_pos, iq_limit_neg);
+        /* Speed PI output is already in q-axis convention.
+         * No encoder_dir mapping needed here — the error (speed_ref - speed_feedback)
+         * is computed in user-frame, but the PI output directly drives q-axis current
+         * whose positive direction matches positive user-frame speed (verified: +Iq -> +ω_user). */
         float iq_cmd = iq_ref_mech;
 
         /* FFDiag 汇总 */

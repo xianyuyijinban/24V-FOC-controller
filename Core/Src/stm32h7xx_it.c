@@ -833,7 +833,6 @@ static void UART_CommandExecute(const char *cmd)
         DrvUart_UploadJDiag();
         return;
     }
-    if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
     if (strcmp(cmd, "CMD:COG_CFG?") == 0) {
         DrvUart_QueryCogCfg();
         return;
@@ -843,6 +842,7 @@ static void UART_CommandExecute(const char *cmd)
         g_foc_app.cogging_lut.phase_offset_rad = f2 * FOC_PI / 180.0f;
         return;
     }
+    if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
         g_foc_app.cogging_lut.phase_offset_rad = f1;
         return;
     }

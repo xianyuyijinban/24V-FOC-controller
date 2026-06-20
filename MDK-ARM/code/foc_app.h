@@ -100,7 +100,7 @@ extern "C" {
 #define FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD       0.087f /* V4 巡航切PD阈值 (~5 deg) */
 
 /* V5 位置模式运行时运动配置默认值与范围 */
-#define FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT      4.0f   /* 速度上限 rad/s */
+#define FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT      1.5f   /* 速度上限 rad/s (12V安全值; 24V可调高) */
 #define FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT      6.0f   /* 加速度上限 rad/s^2 */
 #define FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT     1.2f   /* 巡航下限 rad/s */
 #define FOC_MOTION_CFG_SPEED_LIMIT_MIN          0.2f   /* 速度下限 */

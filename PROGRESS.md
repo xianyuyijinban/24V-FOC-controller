@@ -4,6 +4,67 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-21] TIM1 PWM 高分辨率修复：ARR=49→11999，电流环复活
+
+### Problem / Task
+电流环 PI-only（BEMF=OFF, RsFF=OFF）在任何 Kp (0.20~2.50) 下均无 Iq 响应。速度模式能跑仅因 FF (cogging+friction+BEMF) 提供了全部驱动。VDQ 开环诊断 + Kp 扫参 + ARR 提分辨率的组合实验定位根因。
+
+### Resolution
+1. **根因**：`ARR=49` 时 1 LSB≈0.24V 差模电压。Kp=0.20×0.08A=16mV < 1 LSB，PI 输出被 PWM 量化截断为 0。
+2. **修复**：TIM1 `PSC=0, ARR=11999`（保持 10kHz center-aligned），分辨率 1mV/LSB。
+3. 同步缩放：ADC trigger 45→10800，初始 CCR 25→6000，FOC_PWM_PERIOD 50→12000。
+4. 新增 `CMD:PWM_DIAG` 单行诊断（ARR/CCR/Vd/Vq/TaTbTc/Ia/Ib/Ic/lsv），解决 FAULT_DETAIL 长文本被遥测淹没问题。
+
+### Prevention / Follow-up
+1. ARR=11999 下电流环 PI-only 在所有 Kp (0.20~2.50) 均能正确跟踪 ±0.08A，Ia 方向正确，lsv=111。
+2. 速度模式之前看起来"正常"完全是 FF 前馈的假象，电流 PI 长期未尽职。
+3. 后续：选 Kp=0.50~1.00 Ki=0 做速度/位置回归，再小步引入 Ki (0.001)，最后加回 RsFF≤0.2。
+4. Kp=2.50 下正负不对称（+273mV vs -126mV）待后续独立排查。
+
+### Verification
+- PWM_DIAG @ IREF=0: CCR=5999/5999/5999, Vq=0, Ia/Ib/Ic≈0, lsv=111 ✓
+- Kp=0.20, IREF=+0.08: Vq=+14mV, Ia 方向正确 ✓
+- Kp=0.50, IREF=±0.08: Vq=±38~39mV, 正负对称 ✓
+- Kp=1.00, IREF=±0.08: Vq=±68~69mV, Ia 明确响应 ✓
+- Kp=2.50, IREF=±0.08: Vq=+273/-126mV, 方向正确但不对称
+
+### Commit
+- Commit: `b17c9d7`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `Core/Src/tim.c`
+  - `MDK-ARM/code/foc_app.h`
+  - `Core/Src/stm32h7xx_it.c`
+
+## [2026-06-21] Encoder Fault 去抖：5U 阈值解除位置环阻断
+
+### Problem / Task
+位置模式进入 RUNNING 后瞬间触发 AppFault=4 (Encoder)，PWM 被切断。根因定位：TLE5012 偶发 CRC/无效帧触发 `FOC_ENCODER_FAULT_MISS_THRESHOLD=3U`（约 0.6ms），速度模式容忍度更高，位置模式启停瞬间易触发。
+
+### Resolution
+1. `FOC_ENCODER_FAULT_MISS_THRESHOLD`: `3U` → `5U`（~1ms 去抖）
+2. `tle5012.c` `CRC_ERROR_THRESHOLD`: `3U` → `5U`（callback 阈值同步）
+3. 保持现有逻辑不变：`safety_ok && raw_angle≠0` 时 CRC mismatch 仍接受数据，仅连续坏帧数达阈值才触发 fault
+
+### Prevention / Follow-up
+1. 5 帧去抖是第一版安全值，若 PWM 噪声更严重可进一步提高到 10 帧
+2. TLE5012 CRC 噪声根本原因待查（SPI 布线/PWM 噪声耦合），本次只做固件去抖不解决硬件
+3. 位置模式链路已验证通过：PREF→mapped→PositionLoop→Iq_cmd→PWM 全链通
+4. `data_ok=1` 策略（safety_ok + 非零角度即使 CRC 错也接受）是正确方向
+
+### Verification
+- 位置回归 PREF=0/±5°/±20°/0：全部 PASS，最大误差 0.62°，±20° 误差 ≤0.25°
+- 速度 smoke SREF=±0.5/0：全部 PASS，最大误差 0.08 rad/s
+- 全程 AppFault=0，电机正常转动
+- TLE_RAW 确认：data_ok=1, valid=1, crc_error=1（CRC 噪声存在但不触发 fault）
+
+### Commit
+- Commit: `61229ee`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/tle5012.c`
+
 ## [2026-06-21] 位置环诊断：PREF→映射 链路正确，编码器 CRC Fault 阻断 PWM
 
 ### Problem / Task

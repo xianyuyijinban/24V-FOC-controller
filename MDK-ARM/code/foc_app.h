@@ -54,8 +54,8 @@ extern "C" {
 #define FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
 #define FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
 #define FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 2.0f /* V4 装配基线 */
-#define FOC_CURRENT_LOOP_KP_12V_BENCH       0.03f /* P-only bench baseline: tracks 50mA without q-axis oscillation. */
-#define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* Keep current-loop integral off until polarity and torque sign are verified. */
+#define FOC_CURRENT_LOOP_KP_12V_BENCH       0.50f /* ARR=11999 post-resolution baseline: clean bidirectional tracking. */
+#define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* P-only baseline; Ki to be reintroduced in small steps later. */
 #define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.05f /* 位置末端小误差静摩擦补偿，帮助闭合最后几度 */
 #define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.05f /* 正反向对称补偿，避免零位附近方向偏置 */
 #define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */

@@ -310,11 +310,11 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     memset(foc, 0, sizeof(FOC_Handle_t));
     foc->diag_sat_ratio = 1.0f;
     /* 自适应 Rs 前馈默认值 */
-    foc->rs_ff_adaptive = 1U;                   /* 默认开启自适应 */
-    foc->rs_ff_sign_protect = 1U;                /* 默认开启符号保护 */
+    foc->rs_ff_adaptive = 0U;                   /* 默认关闭，待PI基线验证后启用 */
+    foc->rs_ff_sign_protect = 0U;                /* 配合RsFF关闭 */
     foc->rs_ff_sign_blocked = 0U;
     foc->rs_ff_sign_mismatch_count = 0U;
-    foc->rs_ff_mode = FOC_RS_FF_MODE_DQ;         /* 默认DQ路径，向后兼容 */
+    foc->rs_ff_mode = FOC_RS_FF_MODE_OFF;         /* ARR=11999 baseline: RsFF默认关闭 */
     foc->rs_ff_confidence = FOC_RS_FF_CONF_INIT;
     foc->rs_ff_confidence_lpf = FOC_RS_FF_CONF_INIT;
     foc->rs_ff_dIq_ref_prev = 0.0f;

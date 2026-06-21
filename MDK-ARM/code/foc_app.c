@@ -758,6 +758,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         handle->Id_ref = 0.0f;
         handle->Iq_ref = iq_target;
         FOC_SetCurrentReference(&handle->foc, 0.0f, iq_target);
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 开环堵转：速度不可靠 */
         handle->speed_loop_count++;
         return;
     }
@@ -769,6 +770,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         handle->speed_elec = 0.0f;
         handle->speed_loop_ready = 1U;
         handle->speed_ref_ramped = 0.0f;
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 初始化：尚无有效速度误差 */
         handle->speed_loop_count++;
         return;
     }
@@ -814,6 +816,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
     if (handle->control_mode == FOC_MODE_TORQUE) {
         /* 力矩模式：跳过速度环，直接设置电流给定 */
         /* Iq_ref已在FOC_App_SetCurrentRef中设置 */
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 无速度误差，不惩罚RsFF */
         handle->speed_loop_count++;
         return;
     } else if (handle->control_mode == FOC_MODE_POSITION) {
@@ -838,6 +841,8 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
        outer loops in that frame, then map the torque command to the q-axis once. */
     speed_feedback = speed_mech_user;
     speed_error = speed_ref_temp - speed_feedback;
+    /* 将速度误差传给 FOC 核心，用于自适应 Rs 前馈置信度计算 */
+    FOC_SetRsFFSpeedError(&handle->foc, speed_error);
     {
         float iq_limit_pos = FOC_App_GetCurrentRefLimit(handle);
         float iq_limit_neg = -FOC_App_GetCurrentRefLimit(handle);

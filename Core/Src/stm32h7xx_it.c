@@ -1272,6 +1272,96 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
+    /* 自适应 Rs 前馈查询 */
+    if (strcmp(cmd, "CMD:RS_FF_ADAPTIVE?") == 0) {
+        char resp[250];
+        char scaleText[16], confText[16], effText[16], rawText[16];
+        float effective = g_foc_app.foc.rs_ff_adaptive
+            ? (g_foc_app.foc.rs_ff_scale * g_foc_app.foc.rs_ff_confidence)
+            : g_foc_app.foc.rs_ff_scale;
+        DrvUart_FormatFixed(scaleText, sizeof(scaleText), g_foc_app.foc.rs_ff_scale, 3U);
+        DrvUart_FormatFixed(confText, sizeof(confText), g_foc_app.foc.rs_ff_confidence, 3U);
+        DrvUart_FormatFixed(effText, sizeof(effText), effective, 3U);
+        DrvUart_FormatFixed(rawText, sizeof(rawText), g_foc_app.foc.rs_ff_diag_raw, 3U);
+        (void)snprintf(resp, sizeof(resp),
+            "RS_FF_ADAPTIVE,OK,adaptive=%u,scale=%s,confidence=%s,effective=%s,raw=%s,sign_prot=%u,sign_blk=%u,sign_cnt=%u\r\n",
+            g_foc_app.foc.rs_ff_adaptive,
+            scaleText, confText, effText, rawText,
+            g_foc_app.foc.rs_ff_sign_protect,
+            g_foc_app.foc.rs_ff_sign_blocked,
+            g_foc_app.foc.rs_ff_sign_mismatch_count);
+        UART_CommandSendText(resp);
+        return;
+    }
+    /* 自适应 Rs 前馈开关 */
+    if (sscanf(cmd, "CMD:RS_FF_ADAPTIVE,%ld", &int_arg) == 1) {
+        if (int_arg == 0 || int_arg == 1) {
+            char resp[60];
+            __disable_irq();
+            FOC_SetRsFFAdaptive(&g_foc_app.foc, (uint8_t)int_arg);
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp),
+                "RS_FF_ADAPTIVE,OK,%s\r\n",
+                (int_arg != 0) ? "ENABLED" : "DISABLED");
+            UART_CommandSendText(resp);
+        } else {
+            UART_CommandSendText("RS_FF_ADAPTIVE,FAIL,range\r\n");
+        }
+        return;
+    }
+    /* RsFF 符号保护开关 */
+    if (strcmp(cmd, "CMD:RS_FF_SIGN_PROTECT?") == 0) {
+        char resp[60];
+        (void)snprintf(resp, sizeof(resp),
+            "RS_FF_SIGN_PROTECT,OK,%s\r\n",
+            g_foc_app.foc.rs_ff_sign_protect ? "ENABLED" : "DISABLED");
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:RS_FF_SIGN_PROTECT,%ld", &int_arg) == 1) {
+        if (int_arg == 0 || int_arg == 1) {
+            char resp[60];
+            __disable_irq();
+            FOC_SetRsFFSignProtect(&g_foc_app.foc, (uint8_t)int_arg);
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp),
+                "RS_FF_SIGN_PROTECT,OK,%s\r\n",
+                (int_arg != 0) ? "ENABLED" : "DISABLED");
+            UART_CommandSendText(resp);
+        } else {
+            UART_CommandSendText("RS_FF_SIGN_PROTECT,FAIL,range\r\n");
+        }
+        return;
+    }
+    /* RsFF 路径模式切换 */
+    if (strcmp(cmd, "CMD:RS_FF_MODE?") == 0) {
+        char resp[80];
+        const char *mode_str = "OFF";
+        if (g_foc_app.foc.rs_ff_mode == 1U) mode_str = "DQ";
+        else if (g_foc_app.foc.rs_ff_mode == 2U) mode_str = "ABC";
+        (void)snprintf(resp, sizeof(resp),
+            "RS_FF_MODE,OK,mode=%u (%s)\r\n",
+            g_foc_app.foc.rs_ff_mode, mode_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:RS_FF_MODE,%ld", &int_arg) == 1) {
+        if (int_arg >= 0 && int_arg <= 2) {
+            char resp[80];
+            const char *mode_str = "OFF";
+            if (int_arg == 1) mode_str = "DQ";
+            else if (int_arg == 2) mode_str = "ABC";
+            __disable_irq();
+            FOC_SetRsFFMode(&g_foc_app.foc, (uint8_t)int_arg);
+            __enable_irq();
+            (void)snprintf(resp, sizeof(resp),
+                "RS_FF_MODE,OK,%lu (%s)\r\n", int_arg, mode_str);
+            UART_CommandSendText(resp);
+        } else {
+            UART_CommandSendText("RS_FF_MODE,FAIL,range (0=OFF 1=DQ 2=ABC)\r\n");
+        }
+        return;
+    }
     /* ADC零点诊断：采样N次报告平均原始值（仅PWM OFF） */
     if (sscanf(cmd, "CMD:ADC_ZERO,%ld", &int_arg) == 1) {
         if (int_arg > 0 && int_arg <= 65536 && g_foc_app.enable_pwm == 0U) {

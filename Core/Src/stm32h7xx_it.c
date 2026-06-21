@@ -242,6 +242,27 @@ static uint8_t UART_CommandParseFloat2(const char *cmd, const char *prefix, floa
     return (*p == '\0') ? 1U : 0U;
 }
 
+static uint8_t UART_CommandParseFloat3(const char *cmd, const char *prefix, float *v1, float *v2, float *v3)
+{
+    const char *p;
+
+    if (!UART_CommandMatchPrefix(cmd, prefix, &p)) {
+        return 0U;
+    }
+    if (!UART_CommandParseFloatToken(&p, v1) || (*p != ',')) {
+        return 0U;
+    }
+    p++;
+    if (!UART_CommandParseFloatToken(&p, v2) || (*p != ',')) {
+        return 0U;
+    }
+    p++;
+    if (!UART_CommandParseFloatToken(&p, v3)) {
+        return 0U;
+    }
+    return (*p == '\0') ? 1U : 0U;
+}
+
 static uint8_t UART_CommandIsPriority(const char *line)
 {
     (void)line;
@@ -819,7 +840,7 @@ static void UART_CommandHandleAdcPhaseScan(uint16_t requestedSamples)
 static void UART_CommandExecute(const char *cmd)
 {
     long int int_arg;
-    float f1, f2;
+    float f1, f2, f3;
 
     if (cmd == NULL) {
         return;
@@ -1219,6 +1240,41 @@ static void UART_CommandExecute(const char *cmd)
             FOC_PI_Init(&g_foc_app.foc.pi_d, f1, current_ki_discrete, g_foc_app.foc.pi_d.output_max, g_foc_app.foc.pi_d.output_min);
             FOC_PI_Init(&g_foc_app.foc.pi_q, f1, current_ki_discrete, g_foc_app.foc.pi_q.output_max, g_foc_app.foc.pi_q.output_min);
             __enable_irq();
+        }
+        return;
+    }
+
+    /* VDQ 开环脉冲诊断：固定Vd/Vq绕开PI */
+    if (strcmp(cmd, "CMD:VDQ_PULSE?") == 0) {
+        char resp[256];
+        FOC_Handle_t *f = &g_foc_app.foc;
+        int vd_mv = (int)(f->vdq_pulse_Vd * 1000.0f);
+        int vq_mv = (int)(f->vdq_pulse_Vq * 1000.0f);
+        int diag_vd_mv = (int)(f->diag_vd_cmd * 1000.0f);
+        int diag_vq_mv = (int)(f->diag_vq_cmd * 1000.0f);
+        (void)snprintf(resp, sizeof(resp),
+            "VDQ_PULSE,active=%u,cycles=%u,Vd_mV=%d,Vq_mV=%d,diag_vd_mV=%d,diag_vq_mV=%d,mode=%u,Vdq_q_mV=%d,Ta=%d,Tb=%d,Tc=%d\r\n",
+            f->vdq_pulse_active, (unsigned int)f->vdq_pulse_cycles,
+            vd_mv, vq_mv, diag_vd_mv, diag_vq_mv,
+            f->rs_ff_mode, (int)(f->Vdq.q * 1000.0f),
+            (int)(f->svpwm.Ta * 1000.0f), (int)(f->svpwm.Tb * 1000.0f), (int)(f->svpwm.Tc * 1000.0f));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:VDQ_PULSE_STOP") == 0) {
+        FOC_StopVdqPulse(&g_foc_app.foc);
+        UART_CommandSendText("VDQ_PULSE,STOP\r\n");
+        return;
+    }
+    if (sscanf(cmd, "CMD:VDQ_PULSE,%f,%f,%f", &f1, &f2, &f3) == 3) {
+        if (g_foc_app.enable_pwm) {
+            long duration_ms = (long)f3;
+            if (duration_ms < 10L) duration_ms = 10L;
+            if (duration_ms > 200L) duration_ms = 200L;
+            FOC_StartVdqPulse(&g_foc_app.foc, f1, f2, (uint32_t)duration_ms);
+            UART_CommandSendText("VDQ_PULSE,OK\r\n");
+        } else {
+            UART_CommandSendText("VDQ_PULSE,REJECT\r\n");
         }
         return;
     }

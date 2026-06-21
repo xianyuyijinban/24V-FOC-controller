@@ -412,6 +412,33 @@ void FOC_SetRsFFSpeedError(FOC_Handle_t *foc, float speed_error)
     foc->rs_ff_speed_error = speed_error;
 }
 
+/* VDQ 开环脉冲：用于诊断 Vq→Iq 正负对称性，绕开PI/RsFF/BEMF */
+void FOC_StartVdqPulse(FOC_Handle_t *foc, float Vd, float Vq, uint32_t duration_ms)
+{
+    uint32_t cycles;
+    if (foc == NULL) return;
+    /* 安全限幅 */
+    if (Vd >  FOC_VDQ_PULSE_MAX_V) Vd =  FOC_VDQ_PULSE_MAX_V;
+    if (Vd < -FOC_VDQ_PULSE_MAX_V) Vd = -FOC_VDQ_PULSE_MAX_V;
+    if (Vq >  FOC_VDQ_PULSE_MAX_V) Vq =  FOC_VDQ_PULSE_MAX_V;
+    if (Vq < -FOC_VDQ_PULSE_MAX_V) Vq = -FOC_VDQ_PULSE_MAX_V;
+    if (duration_ms > FOC_VDQ_PULSE_MAX_MS) duration_ms = FOC_VDQ_PULSE_MAX_MS;
+
+    cycles = duration_ms * (FOC_CONTROL_FREQ / 1000U);
+    if (cycles > 65535U) cycles = 65535U;
+
+    foc->vdq_pulse_Vd = Vd;
+    foc->vdq_pulse_Vq = Vq;
+    foc->vdq_pulse_cycles = (uint16_t)cycles;
+    foc->vdq_pulse_active = 1U;
+}
+
+void FOC_StopVdqPulse(FOC_Handle_t *foc)
+{
+    if (foc == NULL) return;
+    foc->vdq_pulse_active = 0U;
+}
+
 /**
  * @brief 更新自适应 Rs 前馈置信度（每个FOC周期调用一次）
  * @param foc FOC句柄指针
@@ -604,7 +631,8 @@ void FOC_Run(FOC_Handle_t *foc)
     /* Step 3: PI控制器计算DQ轴电压 */
     error_d = foc->Id_ref - foc->Idq.d;
     error_q = foc->Iq_ref - foc->Idq.q;
-    if ((fabsf(foc->Id_ref) <= FOC_ZERO_CURRENT_REF_EPS) &&
+    if (!foc->vdq_pulse_active &&
+        (fabsf(foc->Id_ref) <= FOC_ZERO_CURRENT_REF_EPS) &&
         (fabsf(foc->Iq_ref) <= FOC_ZERO_CURRENT_REF_EPS) &&
         (fabsf(foc->Idq.d) <= FOC_ZERO_CURRENT_FEEDBACK_EPS) &&
         (fabsf(foc->Idq.q) <= FOC_ZERO_CURRENT_FEEDBACK_EPS)) {
@@ -727,6 +755,21 @@ void FOC_Run(FOC_Handle_t *foc)
             Vabc_cmd.b = Vabc_pi.b + Vabc_ff.b;
             Vabc_cmd.c = Vabc_pi.c + Vabc_ff.c;
 
+            /* VDQ 开环脉冲：ABC域覆盖 */
+            if (foc->vdq_pulse_active) {
+                if (foc->vdq_pulse_cycles == 0U) {
+                    foc->vdq_pulse_active = 0U;
+                } else {
+                    FOC_DQ_t Vdq_pulse = {foc->vdq_pulse_Vd, foc->vdq_pulse_Vq};
+                    FOC_AlphaBeta_t Vab_pulse;
+                    foc->vdq_pulse_cycles--;
+                    FOC_Inverse_Park_Transform(&Vdq_pulse, foc->sin_theta, foc->cos_theta, &Vab_pulse);
+                    FOC_Inverse_Clarke_Transform(&Vab_pulse, &Vabc_cmd);
+                    foc->pi_d.integral = 0.0f;
+                    foc->pi_q.integral = 0.0f;
+                }
+            }
+
             /* 6. 逐相总限幅：|V_phase| ≤ Vbus/√3 */
             vclamp_total = foc->Vbus / FOC_SQRT3;
             any_clamped = 0U;
@@ -772,6 +815,20 @@ void FOC_Run(FOC_Handle_t *foc)
 
             vd_cmd += vd_rs_ff;
             vq_cmd += vq_rs_ff;
+
+            /* VDQ 开环脉冲诊断：覆盖PI/BEMF/RsFF，直接用固定电压驱动 */
+            if (foc->vdq_pulse_active) {
+                if (foc->vdq_pulse_cycles == 0U) {
+                    foc->vdq_pulse_active = 0U;
+                } else {
+                    foc->vdq_pulse_cycles--;
+                    vd_cmd = foc->vdq_pulse_Vd;
+                    vq_cmd = foc->vdq_pulse_Vq;
+                    /* 冻结PI积分防止开环期间积分饱卷 */
+                    foc->pi_d.integral = 0.0f;
+                    foc->pi_q.integral = 0.0f;
+                }
+            }
 
             /* ABC 诊断置零 */
             foc->diag_Va_pi = 0.0f; foc->diag_Vb_pi = 0.0f; foc->diag_Vc_pi = 0.0f;

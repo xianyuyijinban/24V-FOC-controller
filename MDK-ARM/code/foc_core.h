@@ -45,6 +45,10 @@ extern "C" {
 #define FOC_RS_FF_MODE_DQ           1   /* DQ 域 RsFF（默认，原有路径） */
 #define FOC_RS_FF_MODE_ABC          2   /* ABC 域 RsFF：相电压前馈 + 逐相限幅 */
 
+/* VDQ 开环脉冲诊断限幅 */
+#define FOC_VDQ_PULSE_MAX_V         2.00f
+#define FOC_VDQ_PULSE_MAX_MS        200U
+
 /* ABC RsFF 逐相限幅 */
 #define FOC_RS_FF_ABC_VCLAMP_RATIO  0.25f   /* |Vabc_ff_phase| ≤ ratio * Vbus */
 
@@ -159,6 +163,12 @@ typedef struct {
     float diag_v_mag;           /* 限幅前矢量幅值 */
     float diag_sat_ratio;       /* 饱和比（1.0=未饱和，<1.0=已限幅） */
 
+    /* VDQ 开环脉冲诊断 */
+    uint8_t  vdq_pulse_active;
+    float    vdq_pulse_Vd;
+    float    vdq_pulse_Vq;
+    uint16_t vdq_pulse_cycles;      /* 剩余周期数 (10kHz) */
+
     /* 状态 */
     uint8_t enabled;
 } FOC_Handle_t;
@@ -191,6 +201,10 @@ void FOC_RegenerateVoltageVector(FOC_Handle_t *foc);
 void FOC_Run(FOC_Handle_t *foc);
 void FOC_GetPWM(FOC_Handle_t *foc, uint16_t *pwm_a, uint16_t *pwm_b, uint16_t *pwm_c, uint16_t pwm_period);
 void FOC_GetModulationWave(const FOC_Handle_t *foc, float *ma, float *mb, float *mc);
+
+/* VDQ 开环脉冲诊断 */
+void    FOC_StartVdqPulse(FOC_Handle_t *foc, float Vd, float Vq, uint32_t duration_ms);
+void    FOC_StopVdqPulse(FOC_Handle_t *foc);
 
 /* 自适应 Rs 前馈 */
 void    FOC_UpdateRsFFConfidence(FOC_Handle_t *foc);

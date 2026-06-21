@@ -86,7 +86,7 @@ extern "C" {
 #define FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V  1.0f    /* 严重电压故障相对告警阈值的额外裕量 */
 #define FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V 0.5f /* 严重电压故障自动恢复滞回 */
 #define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */
-#define FOC_ENCODER_FAULT_MISS_THRESHOLD 3U /* 编码器连续无效/CRC错误升级为故障 */
+#define FOC_ENCODER_FAULT_MISS_THRESHOLD 5U /* 编码器连续无效/CRC错误升级为故障 */
 #define FOC_CURRENT_REF_LIMIT_RATIO       0.80f /* 电流给定最多使用过流阈值的80%，给保护留余量 */
 #define FOC_CURRENT_REF_VOLTAGE_RATIO     0.577f /* SVPWM相电压可用量约 Vbus/sqrt(3) */
 #define FOC_CURRENT_REF_VOLTAGE_MARGIN    1.25f  /* 高阻电机按电压/Rs降额，12V台架仍有Vq余量时小步放宽 */

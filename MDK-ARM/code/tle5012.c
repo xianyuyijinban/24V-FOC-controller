@@ -40,7 +40,7 @@ static uint8_t crc_error_count = 0U;
 static uint32_t busy_start_time = 0U;
 static TLE5012_FaultCallback_t fault_callback = NULL;
 
-#define CRC_ERROR_THRESHOLD             3U
+#define CRC_ERROR_THRESHOLD             5U
 #define SPI_TIMEOUT_MS                  10U
 #define TLE5012_TWR_DELAY_US           5U
 #define TLE5012_GPIO_DIAG_STEP_MS      500U

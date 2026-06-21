@@ -1828,8 +1828,8 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
 
     /* 速度环参数 - 固定值，台架测试验证(12V, 24N22P, 74KV) */
     /* 使用台架实测整定值，不使用Ke/J自动计算(默认Ke/J参数不准确) */
-    float Kp_s = 0.30f;  /* 固定比例增益 */
-    float Ki_s = 0.0f;   /* 2kHz速度积分先禁用，避免Rs前馈下低速冲飞 */
+    float Kp_s = 0.25f;  /* P-only 定版：0.25 最佳，>=0.30 振荡 */
+    float Ki_s = 0.01f;  /* 极小幅消除静差：0.01 可用，>=0.02 禁用 */
     
     /* 更新速度环PI */
     {

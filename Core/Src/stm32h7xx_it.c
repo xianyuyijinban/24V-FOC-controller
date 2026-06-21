@@ -1231,10 +1231,25 @@ static void UART_CommandExecute(const char *cmd)
         int ia_ma = (int)(f->Iabc.a * 1000.0f);
         int ib_ma = (int)(f->Iabc.b * 1000.0f);
         int ic_ma = (int)(f->Iabc.c * 1000.0f);
+        int iqref_ma = (int)(f->Iq_ref * 1000.0f);
+        int idref_ma = (int)(f->Id_ref * 1000.0f);
+        int iqd_ma   = (int)(f->Idq.d * 1000.0f);
+        int iqq_ma   = (int)(f->Idq.q * 1000.0f);
+        int kp_q     = (int)(f->pi_q.Kp * 1000.0f);
+        int ki_q     = (int)(f->pi_q.Ki * 1000000.0f);
+        int vdpi_mv  = (int)(f->diag_vd_pi * 1000.0f);
+        int vqpi_mv  = (int)(f->diag_vq_pi * 1000.0f);
+        int ctrl_mode  = (int)g_foc_app.control_mode;
+        int stall_open = (int)g_foc_app.stall_open_loop_active;
+        int sl_ready   = (int)g_foc_app.speed_loop_ready;
+        int sl_count   = (int)g_foc_app.speed_loop_count;
+        int spd_ref_ma = (int)(g_foc_app.speed_ref * 1000.0f);
         (void)snprintf(resp, sizeof(resp),
-            "PWM,ARR=%u,CCR=%u/%u/%u,TRIG=%u,CNT=%u,DIR=%u,Vd=%d,Vq=%d,Ta=%d,Tb=%d,Tc=%d,Ia=%d,Ib=%d,Ic=%d,lsv=%u%u%u\r\n",
+            "PWM,ARR=%u,CCR=%u/%u/%u,TRIG=%u,CNT=%u,DIR=%u,Vd=%d,Vq=%d,Ta=%d,Tb=%d,Tc=%d,Ia=%d,Ib=%d,Ic=%d,lsv=%u%u%u,PI:Kp=%d,Ki=%d,Idref=%d,Iqref=%d,Id=%d,Iq=%d,Vdpi=%d,Vqpi=%d,ST:m=%d,so=%d,slr=%d,slc=%d,spref=%d\r\n",
             arr, ccr1, ccr2, ccr3, trig, cnt, dir, vd_mv, vq_mv, ta, tb, tc, ia_ma, ib_ma, ic_ma,
-            adc->lowSideValidA, adc->lowSideValidB, adc->lowSideValidC);
+            adc->lowSideValidA, adc->lowSideValidB, adc->lowSideValidC,
+            kp_q, ki_q, idref_ma, iqref_ma, iqd_ma, iqq_ma, vdpi_mv, vqpi_mv,
+            ctrl_mode, stall_open, sl_ready, sl_count, spd_ref_ma);
         UART_CommandSendText(resp);
         return;
     }

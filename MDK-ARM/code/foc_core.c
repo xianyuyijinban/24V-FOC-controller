@@ -314,7 +314,7 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     foc->rs_ff_sign_protect = 0U;                /* 配合RsFF关闭 */
     foc->rs_ff_sign_blocked = 0U;
     foc->rs_ff_sign_mismatch_count = 0U;
-    foc->rs_ff_mode = FOC_RS_FF_MODE_OFF;         /* ARR=11999 baseline: RsFF默认关闭 */
+    foc->rs_ff_mode = FOC_RS_FF_MODE_DQ;          /* post-ARR baseline: DQ域 RsFF * 0.20 */
     foc->rs_ff_confidence = FOC_RS_FF_CONF_INIT;
     foc->rs_ff_confidence_lpf = FOC_RS_FF_CONF_INIT;
     foc->rs_ff_dIq_ref_prev = 0.0f;
@@ -335,7 +335,7 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     /* 默认母线电压 */
     foc->Vbus = 24.0f;
     foc->current_resistance_ohm = 0.0f;
-    foc->rs_ff_scale = 0.50f;       /* 默认软前馈（自适应RsFF基准值） */
+    foc->rs_ff_scale = 0.20f;       /* post-ARR baseline: 最低有效scale（0.10欠跟踪，0.30零回残留大） */
     foc->bemf_Ke_temp = 0.0f;       /* 0 = 使用默认Ke */
     foc->bemf_user_enable = 0U;     /* 默认关闭，需用户显式使能 */
     foc->bemf_blocked = 0U;

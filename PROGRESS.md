@@ -4,6 +4,40 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-21] ARR=11999 后 PI 基线定版：PI_CURRENT=0.50/0, PI_SPEED=0.25/0
+
+### Problem / Task
+电流环复活后，速度环 Ki=0.01 导致负向回零残留 Vq≈-110mV。需确认最佳 PI 参数组合，建立新 ARR 下的稳定基线。
+
+### Resolution
+1. 速度环关 Ki (0.01→0)：负向回零残留从 -110mV 降至 -7~-14mV
+2. 电流环 Kp 0.03→0.50：ARR=11999 下双向 tracking 正负对称
+3. 保留机械 FF（COG=0.25/60°），关闭电压前馈（BEMF=OFF, RS_FF=OFF）
+4. 代码默认值同步更新：
+   - `FOC_CURRENT_LOOP_KP_12V_BENCH = 0.50f`
+   - `Ki_s = 0.0f`
+   - `rs_ff_adaptive = 0`, `rs_ff_mode = OFF`
+
+### Prevention / Follow-up
+1. 速度 Ki 积分是负向回零残留的根因，此前被 FF 掩盖
+2. 电流环和速度环现在都是 P-only，干净、稳定、可重复
+3. 后续按顺序加回：Ki_current (0.001→0.002) → RsFF (0.10→0.20) → BEMF
+4. 每次只改一个参数，验证完再继续
+
+### Verification
+- 速度耐久 20 周期 SREF=±1.0：+1.0 Vq 134-145mV，-1.0 Vq 151-169mV，回零 -7~-14mV（全在 ±30mV）
+- 位置回归 PREF 0/±5/±20：Vq 212-218mV 稳定，32-48mA，0 fault
+- 全程 AppFault=0
+
+### Commit
+- Commit: `7b80d79`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/foc_app.c`
+  - `MDK-ARM/code/foc_core.c`
+  - `PROGRESS.md`
+
 ## [2026-06-21] TIM1 PWM 高分辨率修复：ARR=49→11999，电流环复活
 
 ### Problem / Task

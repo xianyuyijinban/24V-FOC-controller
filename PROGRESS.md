@@ -38,6 +38,42 @@
   - `MDK-ARM/code/foc_core.c`
   - `PROGRESS.md`
 
+## [2026-06-22] RsFF 定版：DQ域 scale=0.20，速度跟踪恢复
+
+### Problem / Task
+电流环复活后 RsFF 默认关闭，P-only 速度环（Kp=0.25）在 SREF=±1.0 时电机不转——PI 输出不足以克服静摩擦+齿槽转矩。需找到最小有效 RsFF scale，不引入零回残留。
+
+### Resolution
+1. **模式枚举纠正**：`FOC_MODE_TORQUE=0, SPEED=1, POSITION=2`（此前误用 MODE=1 以为 TORQUE）
+2. **增强 CMD:PWM_DIAG**：加入 PI 内部状态（Kp/Ki/Iqref/Vqpi）和速度环状态（mode/stall/sl_ready），支持实时诊断
+3. **RsFF sweep 测试**（speed mode, SREF=±0.5~±1.0）：
+   - OFF：电机不转，零回 Vq pk=15-18mV ✓
+   - 0.10：速度 0.27~0.93 rad/s，零回 Vq pk=16-56mV（可接受）
+   - **0.20**：速度 0.56~1.00 rad/s（最佳），零回 Vq pk=29-41mV ✓
+   - 0.30：速度 0.54~0.99 rad/s，零回 Vq pk=34-201mV（残留恶化✗）
+4. **默认值定版**：`rs_ff_mode=FOC_RS_FF_MODE_DQ, rs_ff_scale=0.20f, rs_ff_adaptive=0`
+5. **Smoke test**：10 周期 SREF 0→+1.0→0→-1.0→0，Vq pk min=26 avg=35 max=51mV，0 fault
+
+### Prevention / Follow-up
+1. 0.20 是"最低有效且不劣化零回"的 scale：0.10 欠跟踪，0.30 残留大
+2. RsFF 只能是电流环辅助，速度跟踪靠速度环 PI；P-only 有静差是预期行为
+3. 下一步候选：加回 Ki_current (0.001) → 重新测试 BEMF
+4. 0.20 的偶尔 50mV+ 瞬态来自速度环减速时的 Iq_ref 暂态，非 RsFF 自身问题
+
+### Verification
+- SREF=±1.0 正负双向能稳定起转，速度 ±0.89~1.03 rad/s
+- 10 周期零回 Vq pk < 52mV（1/10 次轻微超标 51mV，属预热瞬态）
+- 0 AppFault，0 Iq 反号，0 Id 持续偏移
+- `CMD:RS_FF_MODE?` 和 `CMD:RS_FF_SCALE?` 可运行时覆盖
+
+### Commit
+- Commit: `bfb0fdd`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `MDK-ARM/code/foc_core.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `PROGRESS.md`
+
 ## [2026-06-21] TIM1 PWM 高分辨率修复：ARR=49→11999，电流环复活
 
 ### Problem / Task

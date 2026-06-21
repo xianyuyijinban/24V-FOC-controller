@@ -4,6 +4,35 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-21] 位置环诊断：PREF→映射 链路正确，编码器 CRC Fault 阻断 PWM
+
+### Problem / Task
+位置模式回归：PREF=0→±5°→±10°→±20°→±40°，PREF 被接收后位置环不跟踪，Vq=0。
+
+### Resolution
+1. **外环链路验证通过**：PREF 正确接收（PrefDiag.count=1），raw→mapped 映射正确（0.087→-0.087，enc_dir=-1），user_set=1
+2. **根因定位**：进入 RUNNING 后立即触发 AppFault=4 (Encoder)，PWM 被自动切断
+3. **CRC ERROR 为背景问题**：无论 PWM ON/OFF，TLE5012 CRC 持续报错（CRC Rx/Calc mismatch）
+4. **速度模式容忍度更高**：相同 CRC 错误下速度模式正常运行（smoke test：±0.48 rad/s, range=0.16, fault=0），位置模式在启停瞬间更容易触发 encoder fault
+
+### Prevention / Follow-up
+1. 位置环控制链路代码层面无 bug，PREF→mapped→PositionLoop 路径畅通
+2. TLE5012 SPI CRC 可靠性需独立排查：可能原因包括 PWM 噪声耦合、SPI 布线、时钟速率
+3. 短期 workaround：放宽 encoder fault 触发条件（连续 N 次 CRC 错误才报 fault）
+4. 速度基线完好：SREF=±0.5 双向稳定，不受 CRC 错误影响
+5. 位置模式回归需等待 CRC 可靠性修复后再进行
+
+### Verification
+- PREF=+5°: PrefDiag count=1, raw=0.087, mapped=-0.087, user_set=1 ✅
+- FAULT_DETAIL 时序：RUNNING(pwm=1)→FAULT(Encoder)→READY(pwm=0)
+- 速度 smoke：SREF ±0.5, speed ±0.48, range=0.16, AppFault=0 ✅
+- CRC ERROR 在 PWM OFF 和 ON 时均存在
+
+### Commit
+- Commit: `13b056d` (arch doc update), previous adaptive RsFF baseline
+- Branch: `codex/sync-main-20260519`
+- Note: 本条目为诊断结论，无新代码提交；速度基线 commit `e9f05be`
+
 ## [2026-06-21] 速度环 P-only 定版 + 耐力验证通过
 
 ### Problem / Task

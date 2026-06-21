@@ -4,6 +4,46 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-21] 自适应 RsFF + 改进 Sign Protect + ABC 域前馈
+
+### Problem / Task
+1. RS_FF_SCALE=1.0 在 J=0.0001 低惯量电机上等效刚性开环电压源，Kp≥0.10 即剧烈振荡
+2. 速度环 Ki=0.3 产生 ±0.8 rad/s 自持振荡，自适应 confidence 被 speed_error/dIq/dt 永久压死
+3. Sign protect 单周期归零逻辑把正常换向/制动瞬态误判，confidence 跨测试递减（1.0→0.87→0.47→0.20）
+4. 需要 ABC 域前馈做逐相限幅和诊断
+
+### Resolution
+1. **自适应 RsFF**：4 因子（dIq/dt, speed_error, sat_ratio, sign）+ 非对称 LPF（瞬时降/300ms 恢复）
+2. **改进 Sign Protect**：幅值门限（|Iq_ref|>0.08A, |Iq_fb|>0.06A）+ 50 周期持续（~5ms），不再单周期误杀
+3. **ABC 域 RsFF**：PI→InvPark→InvClarke→Vabc_pi，Idq_ref→Iabc_ref→Vabc_ff（逐相限幅 0.25×Vbus），SVPWM from ABC
+4. **运行时开关**：RS_FF_ADAPTIVE, RS_FF_SIGN_PROTECT, RS_FF_MODE(0/1/2)
+5. **参数放松**：DIQDT_THRESH=2000, SPEED_ERR_THRESH=1.0, SPEED_ERR_FACTOR=0.8
+6. **速度环 P-only**：Ki=0 消除自持振荡，Kp_speed=0.25 定版
+
+### Prevention / Follow-up
+1. 自适应 RsFF 默认 ON，sign protect 默认 ON，上电安全
+2. sign protect 幅值门限 + 持续时间是正确方向，零电流纹波不应触发
+3. ABC 路径保留为实验项，当前主力是 DQ + 自适应
+4. 速度环 Ki 在低惯量系统上极易引起自持振荡，恢复 Ki 需极小步进（0.01→0.02→0.05）
+5. 定版基线：PI_SPEED=0.25/0, PI_CURRENT=0.20/0, RS_FF_SCALE=0.50, ADAPTIVE=ON, BEMF=OFF
+6. 遗留：速度 Ki 未加、位置环未回归、BEMF 未回归
+
+### Verification
+- SREF=±0.5：双向跟踪 +0.31/-0.40 rad/s，range 0.16~0.22，confidence=1.000，sign_cnt=0
+- SREF=±1.0：+0.89/-0.81 rad/s，range 0.19~0.29（P-only 静差 ~0.11~0.19 rad/s）
+- 自适应 ON vs OFF 对比：OFF 时电机飞转 4 rad/s，ON 时稳定
+- ABC 模式功能正常，逐相限幅生效
+- 无 fault，无 Vq 饱和，sign_blk 全程 0
+
+### Commit
+- Commit: `ae9c4fc`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `Core/Src/stm32h7xx_it.c` (+90)
+  - `MDK-ARM/code/foc_core.h` (+58)
+  - `MDK-ARM/code/foc_core.c` (+474/-84)
+  - `MDK-ARM/code/foc_app.c` (+5)
+
 ## [2026-06-20] BEMF 量纲/符号修复 + 电流环运行时诊断与开关
 
 ### Problem / Task

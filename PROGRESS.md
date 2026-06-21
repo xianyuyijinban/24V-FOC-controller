@@ -4,6 +4,32 @@
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
 
+## [2026-06-21] 速度环 P-only 定版 + 耐力验证通过
+
+### Problem / Task
+自适应 RsFF 稳定后，需确定速度环最佳参数。原有 Ki=0.3 产生 ±0.8 rad/s 自持振荡。需找最大稳定 Kp 和最小可用 Ki。
+
+### Resolution
+1. **P-only 扫参**：Kp_speed=0.05~0.20 全部稳定（range<0.1），选定 0.25
+2. **Ki 扫参**：0.01 消除静差（+1.0→1.013, -1.0→-1.002），0.02 即振荡翻倍，0.05 发散
+3. **定版**：PI_SPEED=0.25/0.01，PI_CURRENT=0.20/0，RS_FF_SCALE=0.50，ADAPTIVE=ON，BEMF=OFF
+4. **耐力验证**：20 周期 SREF±1.0（dwell 2s），max_rng=0.28, 0 fault, confidence=1.0 全程
+
+### Prevention / Follow-up
+1. Ki≥0.02 在此低惯量系统上明确禁用
+2. 速度环 Ki 必须从极小值起步（0.01），每次加 0.01 验证
+3. 当前基线是回退安全点：P-only 最稳定，Ki=0.01 仅消除静差不引入振荡
+4. 下一步：位置环回归测试（PREF=0/±10/±20/±40）
+
+### Verification
+- SREF=±1.0 耐力：speed +1.00~1.06 / -0.96~-1.01, range 0.11~0.20, Vq_max 0.52V
+- 20 周期全部通过，无 fault，confidence 全程 1.000
+- max_rng=0.28 < 0.4 阈值 ✅
+
+### Commit
+- Commit: `e9f05be` (speed PI defaults), `d78f8f6` (PROGRESS.md), `ae9c4fc` (adaptive RsFF)
+- Branch: `codex/sync-main-20260519`
+
 ## [2026-06-21] 自适应 RsFF + 改进 Sign Protect + ABC 域前馈
 
 ### Problem / Task

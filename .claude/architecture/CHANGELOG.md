@@ -4,6 +4,18 @@
 
 ---
 
+### 2026-06-21: 自适应 RsFF + ABC 域前馈 + 速度环 P-only 定版
+- **子系统**: FOC 核心, FOC 应用层, UART 上传
+- **文件**: `foc_core.h`, `foc_core.c`, `foc_app.c`, `stm32h7xx_it.c`
+- **摘要**:
+  1. 自适应 RsFF：4 因子置信度（dIq/dt, speed_error, sat_ratio, sign_mismatch）+ 非对称 LPF
+  2. 改进 Sign Protect：幅值门限 + 50 周期持续时间，消除正常换向误判
+  3. ABC 域 RsFF 前馈路径（RS_FF_MODE=2）：逐相 Vabc 限幅 + SVPWM from ABC
+  4. 运行时开关：CMD:RS_FF_ADAPTIVE, CMD:RS_FF_SIGN_PROTECT, CMD:RS_FF_MODE
+  5. 速度环 P-only 定版：Kp=0.25 Ki=0.01，20 周期耐力验证通过
+  6. 自适应参数基线：DIQDT=2000, SPEED_ERR=1.0/0.8, SIGN_REF=0.08, SIGN_FB=0.06
+- **原因**: RS_FF_SCALE=1.0 在低惯量电机上产生硬前馈振荡；速度环 Ki 引起自持振荡；sign protect 单周期归零误杀正常瞬态；需要 ABC 域逐相诊断能力。
+
 ### 2026-06-20: BEMF 量纲/符号修复 + 电流环运行时诊断与开关
 - **子系统**: FOC 核心, FOC 应用层, UART 上传
 - **文件**: `foc_core.h`, `foc_core.c`, `foc_app.c`, `stm32h7xx_it.c`, `uart_upload.c`

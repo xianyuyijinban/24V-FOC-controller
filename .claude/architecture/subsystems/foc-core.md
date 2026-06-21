@@ -12,24 +12,37 @@ graph TB
         CLARKE[Clarke变换<br/>ABC→αβ]
         PARK[Park变换<br/>αβ→dq]
         INV_PARK[逆Park变换<br/>dq→αβ]
-        SVPWM[SVPWM生成<br/>零序注入法]
+        INV_CLARKE[逆Clarke变换<br/>αβ→ABC]
+        SVPWM_DQ[SVPWM生成<br/>从αβ]
+        SVPWM_ABC[SVPWM生成<br/>从ABC]
         PI_D[d轴PI控制器]
         PI_Q[q轴PI控制器]
+        RSFF_DQ[DQ域Rs前馈<br/>Vdq_rs=Rs×Idq_ref×eff]
+        RSFF_ABC[ABC域Rs前馈<br/>Vabc_rs=Rs×Iabc_ref×eff<br/>逐相限幅0.25×Vbus]
+        ADAPT[自适应置信度<br/>4因子×非对称LPF]
         BEMF_FF[BEMF前馈<br/>Vd_ff=-ωLq·Iq<br/>Vq_ff=+ω(Ld·Id+Ke)]
-        SAT[电压矢量限幅<br/>抗积分饱和]
-        DIAG[电流环诊断<br/>RsFF/PI/BEMF/PreSat]
+        SAT_DQ[DQ矢量限幅]
+        SAT_ABC[ABC逐相限幅<br/>|V|≤Vbus/√3]
+        DIAG[诊断捕获<br/>DQ+ABC域]
     end
 
     CLARKE -->|Iα,Iβ| PARK
     PARK -->|Id,Iq| PI_D
     PARK -->|Id,Iq| PI_Q
-    PI_D -->|Vd_pi| BEMF_FF
-    PI_Q -->|Vq_pi| BEMF_FF
-    BEMF_FF -->|Vd_cmd,Vq_cmd| SAT
-    SAT -->|Vd_sat,Vq_sat| INV_PARK
-    SAT -->|捕获诊断| DIAG
-    INV_PARK -->|Vα,Vβ| SVPWM
-    SVPWM -->|Ta,Tb,Tc| PWM输出
+    PI_D -->|Vd_pi| RSFF_DQ
+    PI_Q -->|Vq_pi| RSFF_DQ
+    ADAPT -->|confidence| RSFF_DQ
+    ADAPT -->|confidence| RSFF_ABC
+    RSFF_DQ -->|Vd_cmd| BEMF_FF
+    RSFF_ABC -->|Vabc_cmd| SAT_ABC
+    BEMF_FF -->|+Vdq_bemf| SAT_DQ
+    SAT_DQ -->|Vd_sat,Vq_sat| INV_PARK
+    INV_PARK -->|Vα,Vβ| SVPWM_DQ
+    SAT_ABC -->|Vabc| SVPWM_ABC
+    SAT_DQ -->|捕获| DIAG
+    SAT_ABC -->|捕获| DIAG
+    SVPWM_DQ -->|Ta,Tb,Tc| PWM输出
+    SVPWM_ABC -->|Ta,Tb,Tc| PWM输出
 ```
 
 ## 接口
@@ -125,3 +138,8 @@ flowchart LR
 4. **保护门禁**：`|ωe×Ke| > 0.8×Vbus/√3` 时自动阻止 BEMF，设置 `bemf_blocked=1`
 5. **Vmax = Vbus/√3**：通过 `FOC_SetVbus()` 每周期更新，保证抗积分饱和在正确物理阈值触发
 6. **Kp 上限**：12V 母线下 J=0.0001 低惯量电机，Kp≥0.60 已出现正向过冲/振荡
+7. **自适应 RsFF**：4 因子置信度（dIq/dt@2000A/s, speed_err@1.0/0.8, sat_ratio@0.95, sign_mismatch）+ 非对称 LPF（瞬时降/300ms 恢复），默认 ON
+8. **Sign Protect**：幅值门限（|Iq_ref|>0.08A, |Iq_fb|>0.06A）+ 50 周期持续（~5ms），防止正常换向/制动瞬态误触发
+9. **ABC RsFF 路径**（RS_FF_MODE=2）：PI+BEMF→InvPark→InvClarke→Vabc_pi, Idq_ref→Iabc_ref→Vabc_ff（逐相≤0.25×Vbus）→ SVPWM from ABC，保留为实验项
+10. **DQ 路径**（RS_FF_MODE=1，默认）：Vdq_cmd = Vdq_pi + Rs×Idq_ref×eff + Vdq_bemf → DQ 矢量限幅 → InvPark
+11. **RS_FF_MODE=0**：完全关闭 RsFF，仅 PI 驱动

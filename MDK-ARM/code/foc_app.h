@@ -41,7 +41,7 @@ extern "C" {
 
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
-#define FOC_PWM_PERIOD          50          /* ARR=49, center-aligned */
+#define FOC_PWM_PERIOD          12000       /* ARR=11999, center-aligned */
 #define FOC_CONTROL_FREQ        10000       /* PWM/ADC/effective current loop freq */
 #define FOC_SPEED_LOOP_FREQ     2000        /* Target speed loop freq (TBD by scope) */
 #define FOC_POSITION_LOOP_FREQ  200         /* 【新增】位置环频率 200Hz */

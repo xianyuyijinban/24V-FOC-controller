@@ -1212,6 +1212,33 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    if (strcmp(cmd, "CMD:PWM_DIAG") == 0) {
+        char resp[200];
+        ADC_Sampling_t *adc = ADC_Sampling_GetData();
+        FOC_Handle_t *f = &g_foc_app.foc;
+        uint16_t arr  = (uint16_t)__HAL_TIM_GET_AUTORELOAD(&htim1);
+        uint16_t ccr1 = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
+        uint16_t ccr2 = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_2);
+        uint16_t ccr3 = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_3);
+        uint16_t trig = (uint16_t)__HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_4);
+        uint16_t cnt  = (uint16_t)__HAL_TIM_GET_COUNTER(&htim1);
+        uint8_t  dir  = (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim1) != RESET) ? 1U : 0U;
+        int vd_mv = (int)(f->Vdq.d * 1000.0f);
+        int vq_mv = (int)(f->Vdq.q * 1000.0f);
+        int ta = (int)(f->svpwm.Ta * 1000.0f);
+        int tb = (int)(f->svpwm.Tb * 1000.0f);
+        int tc = (int)(f->svpwm.Tc * 1000.0f);
+        int ia_ma = (int)(f->Iabc.a * 1000.0f);
+        int ib_ma = (int)(f->Iabc.b * 1000.0f);
+        int ic_ma = (int)(f->Iabc.c * 1000.0f);
+        (void)snprintf(resp, sizeof(resp),
+            "PWM,ARR=%u,CCR=%u/%u/%u,TRIG=%u,CNT=%u,DIR=%u,Vd=%d,Vq=%d,Ta=%d,Tb=%d,Tc=%d,Ia=%d,Ib=%d,Ic=%d,lsv=%u%u%u\r\n",
+            arr, ccr1, ccr2, ccr3, trig, cnt, dir, vd_mv, vq_mv, ta, tb, tc, ia_ma, ib_ma, ic_ma,
+            adc->lowSideValidA, adc->lowSideValidB, adc->lowSideValidC);
+        UART_CommandSendText(resp);
+        return;
+    }
+
     if (UART_CommandParseFloat2(cmd, "CMD:PI_CURRENT,", &f1, &f2)) {
         if (f1 > 0.0f && f2 >= 0.0f) {
             float current_ki_discrete = f2 / (float)FOC_CONTROL_FREQ;
@@ -1679,9 +1706,8 @@ void TIM1_UP_IRQHandler(void)
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_IRQn 1 */
     /* ===== FOC current loop =====
-     * PWM: 20kHz center-aligned (ARR=24, PSC=239).
-     * TIM1_UP rate: TBD by scope (may be 20kHz or 40kHz depending on update event mode).
-     * Effective FOC rate: ADC-frame-gated, ~20kHz (matches PWM/ADC trigger).
+     * PWM: 10kHz center-aligned (ARR=11999, PSC=0).
+     * Effective FOC rate: ADC-frame-gated, ~10kHz (matches PWM/ADC trigger).
      */
     FOC_App_TIM1_IRQHandler(&g_foc_app);
     

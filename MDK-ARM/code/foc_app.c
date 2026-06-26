@@ -98,6 +98,8 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->control_mode = FOC_MODE_SPEED;  /* 默认速度模式 */
     handle->app_mode = APP_MODE_RAW;        /* Phase 3: 默认原始模式 */
     handle->gimbal_ramp_accel_radps2 = FOC_GIMBAL_RAMP_ACCEL_DEFAULT;
+    handle->cal_state = 0U;                    /* Phase 4: idle */
+    handle->cal_last_error = 0U;
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
     handle->joint_soft_limit_enabled = FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED;
@@ -2274,4 +2276,43 @@ void FOC_App_GetDebugInfo(FOC_AppHandle_t *handle, float *Id, float *Iq, float *
     *theta = handle->theta_elec;
     *speed = handle->speed_mech;
     *Rs_est = MI_RsOnlineEstimator_GetRs(&handle->rs_est);
+}
+
+/* ── Phase 4: Calibration State Machine ─────────────────────── */
+
+uint8_t FOC_App_CalIsBusy(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) return 0U;
+    return (handle->cal_state == 1U) ? 1U : 0U;  /* 1=running */
+}
+
+uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) return 1U;  /* error */
+
+    /* AppFault must be clear */
+    if (handle->fault_code != FOC_FAULT_NONE) return 2U;
+
+    /* Vbus must be within thresholds */
+    {
+        float vbus;
+        FOC_App_RefreshTelemetry(handle);
+        vbus = handle->Vbus;
+        if (vbus < handle->protection.undervoltage_limit_v ||
+            vbus > handle->protection.overvoltage_limit_v) return 3U;
+    }
+
+    /* Power must be unlocked */
+    if (!handle->power_unlocked) return 4U;
+
+    /* DRV communication must be OK */
+    {
+        extern DRV8350S_Handle_t drv8350s;
+        if (drv8350s.runtime.spiError) return 5U;
+    }
+
+    /* Encoder must be valid */
+    if (!TLE5012_IsDataValid()) return 6U;
+
+    return 0U;  /* OK */
 }

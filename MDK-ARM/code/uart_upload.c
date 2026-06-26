@@ -1473,6 +1473,48 @@ void DrvUart_Process(void)
         s_faultDetailOffset = 0U;
     }
 
+    /* Phase 4: CAL progress reporting — output when identify state changes */
+    {
+        static uint8_t s_lastCalStep = 255U;  /* invalid sentinel */
+        uint8_t calStep = (uint8_t)g_foc_app.mi_handle.state;
+
+        if (calStep != s_lastCalStep && g_foc_app.state == FOC_STATE_PARAM_IDENTIFY) {
+            const char *stepName = "???";
+            uint8_t pct = 0U;
+            switch (calStep) {
+            case 1: stepName = "PN";       pct = 5;  break;
+            case 2: stepName = "RS";       pct = 15; break;
+            case 3: stepName = "LS";       pct = 30; break;
+            case 4: stepName = "KE";       pct = 45; break;
+            case 5: stepName = "J";        pct = 55; break;
+            case 6: stepName = "ENC_ALIGN";pct = 65; break;
+            case 7: stepName = "MOTION";   pct = 75; break;
+            case 8: stepName = "COG";      pct = 85; break;
+            case 9: stepName = "COMPLETE"; pct = 100;
+                g_foc_app.cal_state = 2U;  /* done */
+                break;
+            case 10:stepName = "ERROR";    pct = 0;
+                g_foc_app.cal_state = 3U;  /* failed */
+                g_foc_app.cal_last_error = g_foc_app.mi_handle.error_code;
+                break;
+            }
+            {
+                char buf[64];
+                int n = snprintf(buf, sizeof(buf),
+                    "CAL,STEP,%s,%u,%s\r\n", stepName, pct,
+                    (calStep == 10) ? "FAIL" : "OK");
+                if (n > 0 && n < (int)sizeof(buf)) {
+                    memcpy(s_txBuf, buf, (size_t)n);
+                    DrvUart_StartSendPrio((uint16_t)n, UART_PRIO_P0);
+                }
+            }
+            s_lastCalStep = calStep;
+        }
+        if (g_foc_app.state != FOC_STATE_PARAM_IDENTIFY) {
+            s_lastCalStep = 255U;  /* reset for next run */
+        }
+    }
+
     /* Service ring buffer: kick IT if data waiting and IT idle */
     UartTx_Service();
 }

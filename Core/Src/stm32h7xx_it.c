@@ -1025,47 +1025,66 @@ static void UART_CommandExecute(const char *cmd)
 
     /* ── Phase 4: CAL: Calibration commands ── */
     if (strcmp(cmd, "CMD:STATUS?") == 0 || strcmp(cmd, "CAL:STATUS?") == 0) {
-        char resp[80];
-        const char *st_name = "IDLE";
+        char resp[100];
+        const char *cal_st = "idle";
+        const char *mi_st = "IDLE";
+        uint8_t pct = 0U;
+        if (g_foc_app.cal_state == 1U) cal_st = "running";
+        else if (g_foc_app.cal_state == 2U) cal_st = "done";
+        else if (g_foc_app.cal_state == 3U) cal_st = "failed";
+        else if (g_foc_app.cal_state == 4U) cal_st = "aborted";
+
         switch (g_foc_app.mi_handle.state) {
-        case MI_STATE_IDLE: st_name="IDLE"; break;
-        case MI_STATE_PN_IDENTIFY: st_name="PN"; break;
-        case MI_STATE_RS_IDENTIFY: st_name="RS"; break;
-        case MI_STATE_LS_IDENTIFY: st_name="LS"; break;
-        case MI_STATE_KE_IDENTIFY: st_name="KE"; break;
-        case MI_STATE_J_IDENTIFY: st_name="J"; break;
-        case MI_STATE_ENCODER_ALIGN: st_name="ENC_ALIGN"; break;
-        case MI_STATE_MOTION_VERIFY: st_name="MOTION_VERIFY"; break;
-        case MI_STATE_COGGING_IDENTIFY: st_name="COG"; break;
-        case MI_STATE_COMPLETE: st_name="COMPLETE"; break;
-        case MI_STATE_ERROR: st_name="ERROR"; break;
+        case MI_STATE_IDLE: mi_st="IDLE"; pct=0; break;
+        case MI_STATE_PN_IDENTIFY: mi_st="PN"; pct=5; break;
+        case MI_STATE_RS_IDENTIFY: mi_st="RS"; pct=15; break;
+        case MI_STATE_LS_IDENTIFY: mi_st="LS"; pct=30; break;
+        case MI_STATE_KE_IDENTIFY: mi_st="KE"; pct=45; break;
+        case MI_STATE_J_IDENTIFY: mi_st="J"; pct=55; break;
+        case MI_STATE_ENCODER_ALIGN: mi_st="ENC_ALIGN"; pct=65; break;
+        case MI_STATE_MOTION_VERIFY: mi_st="MOTION_VERIFY"; pct=75; break;
+        case MI_STATE_COGGING_IDENTIFY: mi_st="COG"; pct=85; break;
+        case MI_STATE_COMPLETE: mi_st="COMPLETE"; pct=100; break;
+        case MI_STATE_ERROR: mi_st="ERROR"; pct=0; break;
         }
         (void)snprintf(resp, sizeof(resp),
-                 "CAL:STATUS,OK,step=%s,error=%u,motor_identified=%u\r\n",
-                 st_name, g_foc_app.mi_handle.error_code, g_foc_app.motor_identified);
+            "CAL:STATUS,OK,state=%s,step=%s,percent=%u,last_error=%u,identified=%u\r\n",
+            cal_st, mi_st, pct, g_foc_app.cal_last_error, g_foc_app.motor_identified);
         UART_CommandSendText(resp); return;
     }
-    if (strcmp(cmd, "CMD:ALL") == 0 || strcmp(cmd, "CAL:ALL") == 0) {
-        if (!g_foc_app.power_unlocked) {
-            UART_CommandSendText("CAL:ALL,FAIL,not_unlocked\r\n"); return;
+    if (strcmp(cmd, "CMD:STOP") == 0 || strcmp(cmd, "CAL:STOP") == 0) {
+        FOC_App_StopIdentify(&g_foc_app);
+        FOC_App_Disable(&g_foc_app);
+        g_foc_app.cal_state = 4U;  /* aborted */
+        UART_CommandSendText("CAL:STOP,OK,aborted\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:ALL") == 0 || strcmp(cmd, "CAL:ALL") == 0 ||
+        strcmp(cmd, "CMD:ALL,CONTINUE") == 0 || strcmp(cmd, "CAL:ALL,CONTINUE") == 0) {
+        uint8_t pre = FOC_App_CalPrecheck(&g_foc_app);
+        if (pre != 0U) {
+            char resp[60];
+            (void)snprintf(resp, sizeof(resp),
+                "CAL:ALL,FAIL,precheck=%u (0=OK 2=FAULT 3=VBUS 4=UNLOCK 5=DRV 6=ENC)\r\n", pre);
+            UART_CommandSendText(resp); return;
         }
         FOC_App_StartIdentify(&g_foc_app);
+        g_foc_app.cal_state = 1U;  /* running */
         UART_CommandSendText("CAL:ALL,OK,started\r\n"); return;
     }
     if (strcmp(cmd, "CMD:ENC") == 0 || strcmp(cmd, "CAL:ENC") == 0) {
-        UART_CommandSendText("CAL:ENC,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+        UART_CommandSendText("CAL:ENC,FAIL,unsupported (use CAL:ALL)\r\n"); return;
     }
     if (strcmp(cmd, "CMD:MOTOR") == 0 || strcmp(cmd, "CAL:MOTOR") == 0) {
-        UART_CommandSendText("CAL:MOTOR,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+        UART_CommandSendText("CAL:MOTOR,FAIL,unsupported (use CAL:ALL)\r\n"); return;
     }
     if (strcmp(cmd, "CMD:JB") == 0 || strcmp(cmd, "CAL:JB") == 0) {
-        UART_CommandSendText("CAL:JB,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+        UART_CommandSendText("CAL:JB,FAIL,unsupported (use CAL:ALL)\r\n"); return;
     }
     if (strcmp(cmd, "CMD:COG") == 0 || strcmp(cmd, "CAL:COG") == 0) {
-        UART_CommandSendText("CAL:COG,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+        UART_CommandSendText("CAL:COG,FAIL,unsupported (use CAL:ALL)\r\n"); return;
     }
     if (strcmp(cmd, "CMD:HOME") == 0 || strcmp(cmd, "CAL:HOME") == 0) {
-        /* reuse existing HOME logic below — redirect */
+        /* Falls through to existing CMD:HOME handler below */
     }
     if (strcmp(cmd, "CMD:SAVE") == 0 || strcmp(cmd, "CAL:SAVE") == 0) {
         if (g_foc_app.motor_identified) {
@@ -1076,9 +1095,17 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
-    if (strcmp(cmd, "CMD:ABORT") == 0 || strcmp(cmd, "CAL:ABORT") == 0) {
-        FOC_App_StopIdentify(&g_foc_app);
-        UART_CommandSendText("CAL:ABORT,OK\r\n"); return;
+
+    /* ── Phase 4: Busy protection — reject CTRL during CAL ── */
+    if (FOC_App_CalIsBusy(&g_foc_app)) {
+        if ((strncmp(cmd, "CMD:SREF,", 9) == 0) ||
+            (strncmp(cmd, "CMD:PREF,", 9) == 0) ||
+            (strncmp(cmd, "CMD:IREF,", 9) == 0) ||
+            (strncmp(cmd, "CMD:MODE,", 9) == 0) ||
+            (strncmp(cmd, "CMD:APP_MODE,", 13) == 0) ||
+            (strncmp(cmd, "CMD:ENABLE,1", 12) == 0)) {
+            UART_CommandSendText("CAL,FAIL,busy\r\n"); return;
+        }
     }
 
     /* ── TELEM: Telemetry control ── */

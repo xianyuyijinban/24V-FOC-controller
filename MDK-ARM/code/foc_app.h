@@ -237,7 +237,9 @@ typedef struct {
     FOC_ControlMode_t control_mode;  /* 底层FOC模式：力矩/速度/位置 */
     AppMode_t app_mode;              /* 上层应用模式 (Phase 3) */
     float gimbal_ramp_accel_radps2;  /* GIMBAL_SPEED SREF斜坡加速度 */
-    
+    uint8_t cal_state;               /* Phase 4: 0=idle 1=running 2=done 3=failed 4=aborted */
+    uint8_t cal_last_error;          /* Phase 4: last calibration error code */
+
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */
     float Vbus;                 /* 母线电压 V */
@@ -355,6 +357,8 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
 void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);
+uint8_t FOC_App_CalIsBusy(FOC_AppHandle_t *handle);
+uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
 void FOC_App_SetPolePairs(FOC_AppHandle_t *handle, uint8_t pole_pairs);
 float FOC_App_PositionSensorToControlFrame(const FOC_AppHandle_t *handle, float pos_ref_sensor);

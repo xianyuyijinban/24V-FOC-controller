@@ -196,6 +196,9 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->speedLoopIqMech = g_foc_app.speed_loop_iq_mech_diag;
     packet->speedLoopFriction = g_foc_app.speed_loop_friction_diag;
     packet->speedLoopIqCmd = g_foc_app.speed_loop_iq_cmd_diag;
+    packet->speedLoopPIq = g_foc_app.speed_loop_p_iq;
+    packet->speedLoopIIq = g_foc_app.speed_loop_i_iq;
+    packet->speedLoopIState = g_foc_app.speed_i_state;
     packet->positionLoopError = g_foc_app.position_loop_error_diag;
     packet->positionLoopPdOut = g_foc_app.position_loop_pd_out_diag;
     packet->positionLoopPdSat = g_foc_app.position_loop_pd_sat_diag;
@@ -532,6 +535,8 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     char speedLoopIqMechText[20];
     char speedLoopFrictionText[20];
     char speedLoopIqCmdText[20];
+    char speedLoopPIqText[20];
+    char speedLoopIIqText[20];
     char positionLoopErrorText[20];
     char positionLoopPdOutText[20];
     char trajCmdText[20];
@@ -612,6 +617,8 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
     DrvUart_FormatFixed(speedLoopIqMechText, sizeof(speedLoopIqMechText), packet->speedLoopIqMech, 3U);
     DrvUart_FormatFixed(speedLoopFrictionText, sizeof(speedLoopFrictionText), packet->speedLoopFriction, 3U);
     DrvUart_FormatFixed(speedLoopIqCmdText, sizeof(speedLoopIqCmdText), packet->speedLoopIqCmd, 3U);
+    DrvUart_FormatFixed(speedLoopPIqText, sizeof(speedLoopPIqText), packet->speedLoopPIq, 3U);
+    DrvUart_FormatFixed(speedLoopIIqText, sizeof(speedLoopIIqText), packet->speedLoopIIq, 3U);
     DrvUart_FormatFixed(positionLoopErrorText, sizeof(positionLoopErrorText), packet->positionLoopError, 3U);
     DrvUart_FormatFixed(positionLoopPdOutText, sizeof(positionLoopPdOutText), packet->positionLoopPdOut, 3U);
     DrvUart_FormatFixed(trajCmdText, sizeof(trajCmdText), packet->trajCmd, 3U);
@@ -707,13 +714,16 @@ static int16_t DrvUart_FormatFault(const DrvUart_DataPacket_t* packet, uint8_t* 
                (long)loopIa_mA,
                (long)loopIb_mA,
                (long)loopIc_mA);
-    APPEND_FMT("  SpeedLoopDiag: ref=%s rad/s | mech=%s rad/s | err=%s rad/s | iq_mech=%s A | friction=%s A | iq_cmd=%s A\r\n\r\n",
+    APPEND_FMT("  SpeedLoopDiag: ref=%s rad/s | mech=%s rad/s | err=%s rad/s | iq_mech=%s A | friction=%s A | iq_cmd=%s A | p_iq=%s A | i_iq=%s A | i_state=%u\r\n\r\n",
                speedLoopRefText,
                speedLoopMechText,
                speedLoopErrorText,
                speedLoopIqMechText,
                speedLoopFrictionText,
-               speedLoopIqCmdText);
+               speedLoopIqCmdText,
+               speedLoopPIqText,
+               speedLoopIIqText,
+               packet->speedLoopIState);
     APPEND_FMT("  PositionLoopDiag: err=%s rad | pd_out=%s rad/s | ramp_ref=%s rad/s | speed_err=%s rad/s | iq_mech=%s A | friction=%s A | iq_cmd=%s A | sat=pd:%u ramp:%u iq+:%u iq-:%u\r\n\r\n",
                positionLoopErrorText,
                positionLoopPdOutText,

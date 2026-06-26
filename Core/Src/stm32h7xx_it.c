@@ -1213,7 +1213,7 @@ static void UART_CommandExecute(const char *cmd)
     }
 
     if (strcmp(cmd, "CMD:PWM_DIAG") == 0) {
-        char resp[200];
+        char resp[256];
         ADC_Sampling_t *adc = ADC_Sampling_GetData();
         FOC_Handle_t *f = &g_foc_app.foc;
         uint16_t arr  = (uint16_t)__HAL_TIM_GET_AUTORELOAD(&htim1);
@@ -1244,11 +1244,18 @@ static void UART_CommandExecute(const char *cmd)
         int sl_ready   = (int)g_foc_app.speed_loop_ready;
         int sl_count   = (int)g_foc_app.speed_loop_count;
         int spd_ref_ma = (int)(g_foc_app.speed_ref * 1000.0f);
+        int ome_radps  = (int)(f->omega_elec_radps * 1000.0f);
+        int vqb_mv     = (int)(f->diag_vq_bemf * 1000.0f);
+        int vdb_mv     = (int)(f->diag_vd_bemf * 1000.0f);
+        int bem_blk    = (int)f->bemf_blocked;
+        float ke_used  = (f->bemf_Ke_temp > 1e-9f) ? f->bemf_Ke_temp : f->bemf_Ke;
+        int ke_uv      = (int)(ke_used * 1000000.0f);
         (void)snprintf(resp, sizeof(resp),
-            "PWM,ARR=%u,CCR=%u/%u/%u,TRIG=%u,CNT=%u,DIR=%u,Vd=%d,Vq=%d,Ta=%d,Tb=%d,Tc=%d,Ia=%d,Ib=%d,Ic=%d,lsv=%u%u%u,PI:Kp=%d,Ki=%d,Idref=%d,Iqref=%d,Id=%d,Iq=%d,Vdpi=%d,Vqpi=%d,ST:m=%d,so=%d,slr=%d,slc=%d,spref=%d\r\n",
+            "PWM,ARR=%u,CCR=%u/%u/%u,TRIG=%u,CNT=%u,DIR=%u,Vd=%d,Vq=%d,Ta=%d,Tb=%d,Tc=%d,Ia=%d,Ib=%d,Ic=%d,lsv=%u%u%u,PI:Kp=%d,Ki=%d,Idref=%d,Iqref=%d,Id=%d,Iq=%d,Vdpi=%d,Vqpi=%d,ome=%d,Vqb=%d,Vdb=%d,bemb=%d,Ke=%d,ST:m=%d,so=%d,slr=%d,slc=%d,spref=%d\r\n",
             arr, ccr1, ccr2, ccr3, trig, cnt, dir, vd_mv, vq_mv, ta, tb, tc, ia_ma, ib_ma, ic_ma,
             adc->lowSideValidA, adc->lowSideValidB, adc->lowSideValidC,
             kp_q, ki_q, idref_ma, iqref_ma, iqd_ma, iqq_ma, vdpi_mv, vqpi_mv,
+            ome_radps, vqb_mv, vdb_mv, bem_blk, ke_uv,
             ctrl_mode, stall_open, sl_ready, sl_count, spd_ref_ma);
         UART_CommandSendText(resp);
         return;

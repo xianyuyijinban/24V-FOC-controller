@@ -80,6 +80,9 @@ typedef struct {
     float    speedLoopIqMech;   /* 速度环最近一次机械方向Iq输出 */
     float    speedLoopFriction; /* 速度环最近一次静摩擦补偿 */
     float    speedLoopIqCmd;    /* 速度环最近一次映射后的Iq命令 */
+    float    speedLoopPIq;      /* 速度环比例贡献 A */
+    float    speedLoopIIq;      /* 速度环积分贡献 A */
+    uint8_t  speedLoopIState;   /* 积分状态: 0=inactive 1=active 2=frozen 3=cleared 4=sat_hold */
     float    positionLoopError; /* 位置环最近一次位置误差 */
     float    positionLoopPdOut; /* 位置环PD输出速度给定 */
     uint8_t  positionLoopPdSat; /* 位置环PD输出是否触及速度上限 */

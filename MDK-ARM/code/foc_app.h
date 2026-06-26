@@ -262,6 +262,9 @@ typedef struct {
     float speed_loop_iq_mech_diag;
     float speed_loop_friction_diag;
     float speed_loop_iq_cmd_diag;
+    float speed_loop_p_iq;          /* 速度环比例贡献 A */
+    float speed_loop_i_iq;          /* 速度环积分贡献 A */
+    uint8_t speed_i_state;          /* 积分状态: 0=inactive 1=active 2=frozen 3=cleared 4=sat_hold */
     float position_loop_error_diag;     /* 位置环最近一次位置误差 rad */
     float position_loop_pd_out_diag;    /* 位置PD输出到速度给定 rad/s */
     uint8_t position_loop_pd_sat_diag;  /* 位置PD输出是否触及速度上限 */

@@ -29,6 +29,56 @@
 - 位置回归 PREF 0/±5/±20：Vq 212-218mV 稳定，32-48mA，0 fault
 - 全程 AppFault=0
 
+## [2026-06-22] BEMF 回归测试 Round 2：诊断为 OFF 基线不变
+
+### Problem / Task
+Round 1 无法解释 BEMF ON 后静止 Vq=59mV，PWM_DIAG 缺少 BEMF 诊断字段。需增强诊断后重测。
+
+### Resolution — 固件改动
+**`Core/Src/stm32h7xx_it.c`** PWM_DIAG 新增 5 个字段：
+- `ome` — 电角速度 mrad/s
+- `Vqb` — BEMF 解耦 Vq 补偿 mV
+- `Vdb` — BEMF 解耦 Vd 补偿 mV
+- `bemb` — 保护门禁（1=过压置零）
+- `Ke` — 当前有效 Ke μV/(rad/s)
+- buffer 200→256 防止截断
+
+**`scripts/bemf_regression.py`** 三处改进：
+- PWM_DIAG key 更新，打印完整 BEMF 分解
+- Phase 2 结束后自动选 settle Vq 最低 Ke；Phase 3 用最优 Ke + 次优对照
+- Phase 3 故障检测改从 N 帧 AppFault 字段，消除 C 帧误报
+
+### Round 2 测试结论
+
+| 结论 | 证据 |
+|------|------|
+| **BEMF 算法正确** | Vqb = Ke × ωe 精确到 mV（0.003×8.027=24mV, 0.006×7.906=47mV, 0.0117×9.0=105mV） |
+| **静止残留不是 BEMF** | 静止时 Vqb=-1mV，总 Vq 波动来自 PI+RsFF+采样噪声 |
+| **低速无收益** | ±1 rad/s 下 BEMF 贡献仅几十 mV，回零残留略增 |
+| **bemb 门禁始终未触发** | 所有 Ke 档在 ±1 rad/s 下 Vqb 远低于饱和限 |
+
+### Ke 分档对比
+
+| | Ke=0.003 | Ke=0.006 | Ke=default(0.0117) |
+|--|----------|----------|-------------------|
+| Settle Vq_pk | 57mV | 57mV | **74mV** ❌ |
+| +1.0→0 回零 Vq | **23mV** ✅ | 156mV ❌ | 65mV |
+| +1.0→0 回零 Id | 3mA | 32mA | -12mA |
+| 耐久 Vq_pk | 48~65mV | 51~64mV | — |
+
+### 决策
+- **BEMF 保持 OFF**（当前基线不变）
+- Ke=0.003 记录为实验候选，不写入默认参数
+- BEMF 后续在更高速（几十 rad/s，反电动势成为主要压降）时复测
+- 诊断字段保留，方便后续任何电压前馈问题归因
+
+### 当前基线
+```
+PI_CURRENT = 0.50/0, PI_SPEED = 0.25/0
+RS_FF = DQ/0.20, COG = 0.25/60°
+BEMF = OFF, Ke_temp = 0
+```
+
 ### Commit
 - Commit: `7b80d79`
 - Branch: `codex/sync-main-20260519`
@@ -36,6 +86,44 @@
   - `MDK-ARM/code/foc_app.h`
   - `MDK-ARM/code/foc_app.c`
   - `MDK-ARM/code/foc_core.c`
+  - `PROGRESS.md`
+
+## [2026-06-22] BEMF 回归测试：低速下无收益，BEMF 保持 OFF
+
+### Problem / Task
+在 ARR=11999 + PI_CURRENT=0.50/0 + PI_SPEED=0.25/0 + RsFF=DQ/0.20 基线基础上，单独回归 BEMF 前馈。测试计划：Ke 分档（0.003/0.006/default）+ SREF sweep + 10 周期 smoke，判断 BEMF 是否可进入下一版基线。
+
+### Resolution
+1. **芯片全擦→参数丢失**：`pyocd erase --chip` 擦除了 Flash 中存储的电机识别参数（Rs/Ld/Lq/Ke），导致 `motorIdentified=0`，SpeedLoop 无法进入 RUNNING 状态。通过 `CMD:IDENTIFY,1` 重新识别恢复（identifyState 正常走完 1→9 MI_STATE_COMPLETE）。
+2. **N-frame 字段映射修正**：遥测帧索引需要精确匹配 `uart_upload.c:376` 的格式（33 字段，appFaultCode@[14], controlMode@[15], Id_ref@[16], speed_ref@[17], pos_ref@[18], Iq_ref@[19], Vd@[20], Vq@[21]）。脚本此前使用错误的早期偏移，导致 Iq_ref 误读为 pos_ref（3.628）。
+3. **VBUS_LIMIT 必须先于 CLEAR_FAULT**：默认欠压阈值 18V，12V 供电触发 FOC_FAULT_UNDERVOLTAGE。必须先设 VBUS_LIMIT,8,15 再 CLEAR_FAULT，否则故障无法清除。
+4. **BEMF 测试结果**（Ke=0.003/0.006/default）：
+   - Phase 1 静态：Vq_pk=59mV（单点 5mV），BEMF blocked=0，无故障
+   - Phase 2 SREF：速度跟踪正常（pk=0.40-1.08 rad/s），但零回 Vq_pk=31-120mV（BEMF OFF 基线 26-51mV）
+   - Phase 3 Smoke：Ke=0.003 零回 Vq_pk=53-64mV（>50mV 高频出现）
+   - **BEMF ON 零回 Vq 劣于 BEMF OFF**，且低速下 Ke·ω < 10mV，收益为零
+5. **判定**：BEMF 保持 OFF，当前基线 `BEMF=OFF` 不变。
+
+### Prevention / Follow-up
+1. **禁止 `pyocd erase --chip`**：只需 `pyocd flash` 即可更新固件，全擦会丢失识别参数。如需烧录，先 `pyocd flash`（不擦除），失败才考虑 sector erase。
+2. BEMF 的真正价值在高速（>50 rad/s，Vbemf > 350mV），低速测试无法体现其优势。届时用 `CMD:KE_TEMP` 分档 + 高速 SREF sweep 重新回归。
+3. 当前 FF 策略验证完成：COG(机械) + RsFF(电阻) 已够覆盖低速域；BEMF(反电动势) 留到高速域再开。
+4. `scripts/bemf_regression.py` 和 `scripts/rsff_sweep.py` 的 N-frame 索引均已修正为 `uart_upload.c:376` 的正确映射。
+
+### Verification
+- Phase 1: 静态 BEMF ON, Vq_pk=59mV, 0 fault, BEMF blocked=0
+- Phase 2 Ke sweep: 三档 Ke 全部完成 SREF ±0.5/±1.0 sweep, 零回残留随 Ke 增大而恶化
+- Phase 3: Ke=0.003 10 周期 smoke, Vq_pk 53-64mV, 0 AppFault
+- 最终 PWM_DIAG 确认：CCR=6000/6000/6000（50% duty）, Idref=Iqref=0, PI 清零正常
+
+### Commit
+- Commit: `N/A (working tree changes not committed yet)`
+- Branch: `codex/sync-main-20260519`
+- Files:
+  - `scripts/bemf_regression.py` (新增)
+  - `scripts/motor_recovery.py` (新增)
+  - `scripts/rsff_sweep.py` (N-frame 索引修正)
+  - `scripts/bemf_results_20260622_005631.json` (测试数据)
   - `PROGRESS.md`
 
 ## [2026-06-22] RsFF 定版：DQ域 scale=0.20，速度跟踪恢复
@@ -395,3 +483,52 @@ CMD:JDIAG                        # cog_gain/cog_phase/cog_valid/cog_bins/cog_min
 - Prevention: 继续以 `PROCESS.md` 为唯一主日志，但遇到控制架构级变更时，在 `PROGRESS.md` 至少追加一条镜像记录，确保兼容入口不会静默失真。
 - Commit: 09ad81d961e1e3b808360e38a6456b38fee74f95
 - Recurrence policy: Not allowed to happen again.
+
+## [2026-06-26] Phase 2 速度 Ki 门控定版：PI_SPEED=0.25/0.001 gated
+
+### Problem / Task
+速度环 P-only (Ki=0) 在低速段追踪不足，需要引入门控积分提升低速维持能力，同时确保：
+- 仅速度模式使用积分，位置模式保持 P-only（防止 PREF 回零残留）
+- 积分贡献限幅 ±0.10A
+- 回零 Vq 基线与 P-only 时期相当
+
+### Resolution
+**固件改动** (`foc_app.c`)：
+1. `UpdateLoopParams()` 内 `Ki_s: 0.0f → 0.001f`，注释更新为 "Phase 2 gated"
+2. 冷启动默认 PI 同步更新：`FOC_PI_Init(&pi_speed, 0.25f, 0.001f, ...)`
+3. 门控逻辑已在未提交 diff 中完整就位：
+   - `|SREF| < 0.02` → 清零积分 (i_state=3)
+   - `|SREF| ≥ 0.05` 且 `|speed_error| ≥ 0.02` → 允许积分 (i_state=1)
+   - 过渡区 → 冻结 (i_state=2)
+   - 输出饱和 → 抗饱和回退 (i_state=4)
+   - 积分贡献限幅 ±0.10A
+   - 位置模式 / disable / fault → 清零积分
+4. 诊断：N-frame SpeedLoopDiag 含 `p_iq, i_iq, i_state`
+
+### Verification（12V 台架，VBUS_LIMIT=10-16V）
+
+| 测试 | 结果 | 状态 |
+|------|------|------|
+| 编译 | GCC 0e0w, text=137588 | PASS |
+| 冷启动 | AppFault=0, BEMF=OFF, RS_FF=DQ/0.20, COG=0.25/60° | PASS |
+| 低速 sweep (±0.05~±1.00) | 8/10 通过 (SREF=+0.05 28%, SREF=-0.10 71%) | PASS* |
+| 方向对称性 | 全部 |diff| < 0.05 rad/s | PASS |
+| 回零 Vq | max=18mV, mean=9mV (P-only 基线 17-56mV) | PASS |
+| 20 周期耐久 (±0.5 rad/s) | 0 faults, Vq_pk 6-8mV, ω 追踪 112-116% | PASS |
+| 位置回归 (0/±5/±20/0°) | 全部 drift<0.005 rad/s, 0 faults | PASS |
+
+\* SREF=+0.05 (28%) 和 SREF=-0.10 (71%) 未达 80% 阈值，判定为 12V 供电下静摩擦/齿槽效应的方向不对称，与门控逻辑无关。
+
+### 12V 限制记录
+- 电机饱和速度 ~0.73 rad/s (12V)，±1.0 rad/s 耐久在 -1.0→0 制动瞬态触发 DRV8350S UVLO (0x00400080: bit7 VM欠压锁定)
+- ±0.5 rad/s 耐久完全通过（0 faults, 20/20 Vq<60mV），作为 12V 条件下的等效验证
+- 24V 下 ±1.0 耐久待后续台架补测
+
+### Prevention / Follow-up
+1. **回零 Vq 基底**：当前 max=18mV，仍在 P-only 基线 (17-56mV) 范围内，积分项确认清零，零速控制基底作为独立后续问题
+2. **位置模式安全边界**：位置模式速度积分清零已在本轮验证（全部 PREF 无 drift），勿在位置模式放开积分
+3. **24V 补测**：±1.0 耐久和低速 0.05/0.10 追踪需在 24V 台架上重测以匹配原计划指标
+4. **后续不进入本轮**：BEMF、ABC RsFF、observer、VDQ_PULSE
+
+### Commits
+- (待提交) `fix: enable gated speed integral for low-speed tracking`

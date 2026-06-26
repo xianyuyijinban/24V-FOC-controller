@@ -109,7 +109,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     FOC_SetCurrentResistance(&handle->foc, handle->motor_param.Rs);
     
     /* 初始化速度环PI控制器 */
-    FOC_PI_Init(&handle->pi_speed, 0.30f, 0.0f, 10.0f, -10.0f);
+    FOC_PI_Init(&handle->pi_speed, 0.25f, 0.001f, 10.0f, -10.0f);
 
 #if FOC_FF_ENABLE_OBSERVER
     /* 初始化负载转矩观测器（参数在UpdateLoopParams中更新） */
@@ -858,9 +858,69 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             iq_limit_pos = FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A;
             iq_limit_neg = -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A;
         }
-        iq_ref_mech = FOC_Saturate(FOC_PI_Update(&handle->pi_speed, speed_error),
-                                   iq_limit_pos,
-                                   iq_limit_neg);
+        /* ── Speed PI with conditional integration ── */
+        {
+            float p_iq = handle->pi_speed.Kp * speed_error;
+            float i_iq = 0.0f;
+            uint8_t i_state = 0U;  /* inactive */
+
+            if (handle->control_mode == FOC_MODE_SPEED && handle->enable_pwm != 0U) {
+                float abs_sref = fabsf(speed_ref_temp);
+
+                if (abs_sref < 0.02f) {
+                    /* SREF too small: clear integrator to prevent residual creep */
+                    handle->pi_speed.integral = 0.0f;
+                    i_state = 3U;  /* cleared */
+                } else if (abs_sref >= 0.05f && fabsf(speed_error) >= 0.02f) {
+                    /* Active zone: allow integration */
+                    handle->pi_speed.integral += speed_error;
+                    i_state = 1U;  /* active */
+                } else {
+                    /* Transition zone or small error: freeze integrator
+                     * (holds torque needed to maintain steady speed) */
+                    i_state = 2U;  /* frozen */
+                }
+
+                /* Integral contribution limit ±0.10A (converted to integral domain) */
+                {
+                    const float i_contrib_limit_A = 0.10f;
+                    float integral_limit;
+                    if (handle->pi_speed.Ki > 1e-6f) {
+                        integral_limit = i_contrib_limit_A / handle->pi_speed.Ki;
+                    } else {
+                        integral_limit = 0.0f;
+                    }
+                    handle->pi_speed.integral = FOC_Saturate(
+                        handle->pi_speed.integral, integral_limit, -integral_limit);
+                }
+
+                i_iq = handle->pi_speed.Ki * handle->pi_speed.integral;
+                float raw_output = p_iq + i_iq;
+
+                /* Anti-windup: when output exceeds limits, undo integration
+                 * that pushes further into saturation */
+                if (raw_output > iq_limit_pos && speed_error > 0.0f && i_state == 1U) {
+                    handle->pi_speed.integral -= speed_error;
+                    i_iq = handle->pi_speed.Ki * handle->pi_speed.integral;
+                    i_state = 4U;  /* sat_hold */
+                } else if (raw_output < iq_limit_neg && speed_error < 0.0f && i_state == 1U) {
+                    handle->pi_speed.integral -= speed_error;
+                    i_iq = handle->pi_speed.Ki * handle->pi_speed.integral;
+                    i_state = 4U;  /* sat_hold */
+                }
+
+                iq_ref_mech = FOC_Saturate(p_iq + i_iq, iq_limit_pos, iq_limit_neg);
+            } else {
+                /* Position mode or disabled: P-only, clear integrator */
+                handle->pi_speed.integral = 0.0f;
+                iq_ref_mech = FOC_Saturate(p_iq, iq_limit_pos, iq_limit_neg);
+            }
+
+            /* Diagnostics */
+            handle->speed_loop_p_iq = p_iq;
+            handle->speed_loop_i_iq = i_iq;
+            handle->speed_i_state = i_state;
+        }
 
         /* P2: Acceleration / Inertia Feedforward
          * alpha = d(speed_ref_ramped)/dt, Iq_ff = J * alpha / Kt (Kt ≈ Ke in SI)
@@ -1828,8 +1888,8 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
 
     /* 速度环参数 - 固定值，台架测试验证(12V, 24N22P, 74KV) */
     /* 使用台架实测整定值，不使用Ke/J自动计算(默认Ke/J参数不准确) */
-    float Kp_s = 0.25f;  /* P-only 定版：0.25 最佳，>=0.30 振荡 */
-    float Ki_s = 0.0f;   /* P-only baseline: Ki=0 after ARR fix removes integral residue */
+    float Kp_s = 0.25f;  /* Phase 2 定版：0.25 最佳，>=0.30 振荡 */
+    float Ki_s = 0.001f; /* Phase 2 gated: 仅速度模式门控积分，位置模式 P-only */
     
     /* 更新速度环PI */
     {

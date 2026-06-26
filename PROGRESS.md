@@ -606,4 +606,48 @@ SREF 命令限幅:  ±1.0 rad/s (MOTION_CFG_SPEED_LIMIT_DEFAULT)
 4. **回零 Vq 基底**（当前 <20mV）作为独立问题跟踪
 
 ### Commits
-- （当前工作树）12V 基线冻结：MOTION_CFG 默认值更新 + PROGRESS.md
+- `a2f0c5b` 12V 基线冻结：MOTION_CFG 默认值更新 + PROGRESS.md
+- `d9b50f9` `CMD:FW_INFO?` + git hash 编译时注入
+- `141c3ee` Phase 1：UART 指令别名体系 + SYS:CMDS? + UART_COMMANDS.md
+- `ce5bb09` Phase 2：UART TX ring buffer + IT 非阻塞发送 + TELEM 命令
+- `4e5d4d7` Phase 3A：APP_MODE 层（JOINT_POS, GIMBAL_SPEED, HOLD）
+
+## [2026-06-27] Phase 2: UART TX Ring Buffer + IT 非阻塞发送
+
+### Resolution
+- 1024B ring buffer + HAL_UART_Transmit_IT 替换所有阻塞 HAL_UART_Transmit
+- 3 级优先级准入：P0 不丢，P1 缓冲区近满时丢，P2 反压下丢
+- UART_CommandSendText 改为非阻塞
+- 新增 TELEM:ON/OFF, TELEM:RATE,<hz>, TELEM:RATE? 命令
+
+### Verification
+- TELEM:OFF 后停止周期遥测，命令回执仍正常
+- BSS +1040B (1024B ring buffer)
+
+### Commits
+- `ce5bb09`
+
+## [2026-06-27] Phase 3A: APP_MODE 产品模式外壳
+
+### Resolution
+- 新增 AppMode_t（RAW/JOINT_POS/GIMBAL_SPEED/HOLD），不替换底层 FOC_ControlMode_t
+- APP_MODE_RAW 完全兼容旧行为
+- JOINT_POS：底层 POSITION + 软限位裁剪，PREF 超限不触发 fault
+- GIMBAL_SPEED：底层 SPEED + 可配置 SREF 斜坡加速度
+- HOLD：底层 POSITION + 进入时捕获当前位置作为目标
+- 新增命令：CTRL:APP_MODE, JOINT:LIMIT, GIMBAL:RAMP
+- STOP 在所有 APP_MODE 下立即生效
+
+### Verification (12V bench)
+- RAW 模式 SREF=±0.5 追踪 98-101%
+- APP_MODE 命令正确切换并返回状态
+- JOINT:LIMIT 和 GIMBAL:RAMP 查询/设置正常
+- STOP 在 4 个模式下均无 fault
+- 位置模式/HOLD 追踪精度待解析器修复后定量验证
+
+### Known Issues
+- Phase 2 IT 发送在部分帧中出现 NUL 字节（~4% 帧受影响），不影响控制功能
+- 上位机解析器需适配以正确处理 IT 分片帧，作为 Phase 2b 工作项
+
+### Commits
+- `4e5d4d7`

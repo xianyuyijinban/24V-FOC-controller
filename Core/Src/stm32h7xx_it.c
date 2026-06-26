@@ -816,12 +816,128 @@ static void UART_CommandHandleAdcPhaseScan(uint16_t requestedSamples)
     UART_CommandSendText(response);
 }
 
+/* ── Phase 1: Command Alias Mapping ──────────────────────────────
+ * New protocol prefixes map to legacy CMD: dispatch.
+ * Old CMD: commands remain fully functional.
+ * Name-specific mappings for FF: group where names differ.
+ */
+typedef struct {
+    const char *new_prefix;
+    size_t      new_len;
+    const char *old_name;   /* complete old CMD:xxx prefix */
+    size_t      old_len;
+} CmdAliasEntry;
+
+static const CmdAliasEntry s_cmd_aliases[] = {
+    /* Simple prefix swaps (same command name) */
+    {"SYS:",  4, "CMD:", 4},
+    {"CTRL:", 5, "CMD:", 4},
+    {"GAIN:", 5, "CMD:", 4},
+    {"MOTION:",7, "CMD:", 4},
+    {"DIAG:", 5, "CMD:", 4},
+    {"CAL:",  4, "CMD:", 4},
+    /* FF: group — names differ from CMD: */
+    {"FF:COG,",         7, "CMD:COG_CFG,",        12},
+    {"FF:COG?",          6, "CMD:COG_CFG?",        11},
+    {"FF:BEMF,",        8, "CMD:BEMF_CFG,",       12},
+    {"FF:BEMF?",         7, "CMD:BEMF_CFG?",       11},
+    {"FF:RS_MODE,",    10, "CMD:RS_FF_MODE,",     14},
+    {"FF:RS_MODE?",      9, "CMD:RS_FF_MODE?",     13},
+    {"FF:RS_SCALE,",   11, "CMD:RS_FF_SCALE,",    14},
+    {"FF:RS_ADAPTIVE,",15, "CMD:RS_FF_ADAPTIVE,", 18},
+    {"FF:RS_ADAPTIVE?", 14, "CMD:RS_FF_ADAPTIVE?", 17},
+    {"FF:RS_SIGN,",    10, "CMD:RS_FF_SIGN_PROTECT,", 22},
+    {"FF:RS_SIGN?",      9, "CMD:RS_FF_SIGN_PROTECT?", 21},
+    {"FF:KE_TEMP,",    10, "CMD:KE_TEMP,",        11},
+    {"FF:COG_PHASE,",  12, "CMD:COG_PHASE,",      13},
+};
+
+static const char *UART_CommandMapAlias(const char *cmd, char *buf, size_t bufSize)
+{
+    size_t i;
+    size_t cmd_len;
+    size_t tail_len;
+
+    if (cmd == NULL || buf == NULL || bufSize < UART_CMD_LINE_MAX) {
+        return NULL;
+    }
+
+    /* Pass through legacy CMD: commands unchanged */
+    if (cmd[0] == 'C' && cmd[1] == 'M' && cmd[2] == 'D' && cmd[3] == ':') {
+        return NULL;
+    }
+
+    cmd_len = UART_BoundedStrLen(cmd, UART_CMD_LINE_MAX - 1U);
+
+    /* SYS:CMDS? — handled directly, not mapped */
+    if (cmd_len >= 9 && cmd[0]=='S' && cmd[1]=='Y' && cmd[2]=='S' &&
+        cmd[3]==':' && cmd[4]=='C' && cmd[5]=='M' && cmd[6]=='D' &&
+        cmd[7]=='S' && cmd[8]=='?') {
+        return NULL;  /* caller handles separately */
+    }
+
+    for (i = 0; i < (sizeof(s_cmd_aliases) / sizeof(s_cmd_aliases[0])); i++) {
+        if (cmd_len >= s_cmd_aliases[i].new_len &&
+            memcmp(cmd, s_cmd_aliases[i].new_prefix, s_cmd_aliases[i].new_len) == 0) {
+
+            /* Build mapped command: old_prefix + tail after new_prefix */
+            tail_len = cmd_len - s_cmd_aliases[i].new_len;
+            if (s_cmd_aliases[i].old_len + tail_len >= bufSize) {
+                return NULL;  /* would overflow */
+            }
+            memcpy(buf, s_cmd_aliases[i].old_name, s_cmd_aliases[i].old_len);
+            if (tail_len > 0) {
+                memcpy(buf + s_cmd_aliases[i].old_len,
+                       cmd + s_cmd_aliases[i].new_len, tail_len);
+            }
+            buf[s_cmd_aliases[i].old_len + tail_len] = '\0';
+            return buf;
+        }
+    }
+
+    return NULL;  /* unrecognized — fall through to legacy dispatch */
+}
+
 static void UART_CommandExecute(const char *cmd)
 {
     long int int_arg;
     float f1, f2;
+    char mapped_buf[UART_CMD_LINE_MAX];
+    const char *mapped;
 
     if (cmd == NULL) {
+        return;
+    }
+
+    /* ── Phase 1: Alias mapping ── */
+    mapped = UART_CommandMapAlias(cmd, mapped_buf, sizeof(mapped_buf));
+    if (mapped != NULL) {
+        cmd = mapped;
+    }
+
+    /* ── SYS:CMDS? command index ── */
+    if (strncmp(cmd, "SYS:CMDS?", 9) == 0) {
+        UART_CommandSendText(
+            "SYS:CMDS,OK,groups=SYS|CTRL|GAIN|MOTION|FF|CAL|DIAG\r\n"
+            " SYS: FW_INFO? CLEAR_FAULT\r\n"
+            " CTRL: UNLOCK,N ENABLE,N MODE,N IREF,Id,Iq SREF,speed PREF,pos STOP\r\n"
+            " GAIN: PI_CURRENT,Kp,Ki PI_SPEED,Kp,Ki PD_POS,Kp,Kd\r\n"
+            " MOTION: MOTION_CFG? MOTION_CFG,speed,accel,cruise MOTION_CFG,RESET\r\n"
+            " FF: COG? COG,gain,phase_deg COG_PHASE,rad BEMF? BEMF,0|1 KE_TEMP,Ke\r\n"
+            " FF: RS_MODE? RS_MODE,0|1|2 RS_SCALE,0..1 RS_ADAPTIVE? RS_ADAPTIVE,0|1 RS_SIGN? RS_SIGN,0|1\r\n"
+            " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,1..50 HOME CLEAR_HOME ADC_ZERO,N\r\n"
+            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG TLE_RAW TLE_GPIO,0|1\r\n"
+        );
+        return;
+    }
+
+    /* ── CTRL:STOP convenience alias ── */
+    if (strcmp(cmd, "CMD:STOP") == 0) {
+        __disable_irq();
+        FOC_App_SetSpeedRef(&g_foc_app, 0.0f);
+        FOC_App_Disable(&g_foc_app);
+        __enable_irq();
+        UART_CommandSendText("CTRL:STOP,OK\r\n");
         return;
     }
 

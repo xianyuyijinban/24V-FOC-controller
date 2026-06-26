@@ -847,6 +847,17 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* --- FW Info / Version --- */
+    if (strcmp(cmd, "CMD:FW_INFO?") == 0) {
+        char resp[160];
+        (void)snprintf(resp, sizeof(resp),
+                 "FW_INFO,OK,version=%s,param=%s,baseline=%s,git=%s\r\n",
+                 FOC_FW_VERSION, FOC_PARAM_VERSION,
+                 FOC_BASELINE_NAME, FOC_GIT_HASH);
+        UART_CommandSendText(resp);
+        return;
+    }
+
     /* --- V5 Motion Config: Query --- */
     if (strcmp(cmd, "CMD:MOTION_CFG?") == 0) {
         char resp[128];

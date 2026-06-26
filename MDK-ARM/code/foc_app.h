@@ -108,6 +108,14 @@ extern "C" {
 #define FOC_MOTION_CFG_ACCEL_LIMIT_MIN          0.5f   /* 加速度下限 */
 #define FOC_MOTION_CFG_ACCEL_LIMIT_MAX          5.0f   /* 加速度上限 (12V 安全限幅) */
 
+/* 固件版本信息 */
+#define FOC_FW_VERSION          "1.0.0"
+#define FOC_PARAM_VERSION       "1"
+#define FOC_BASELINE_NAME       "12V_STANDARD"
+#ifndef FOC_GIT_HASH
+#define FOC_GIT_HASH            "unknown"
+#endif
+
 #define FOC_WARNING_VBUS_UNDERVOLTAGE_BIT (1UL << 0)
 #define FOC_WARNING_VBUS_OVERVOLTAGE_BIT  (1UL << 1)
 /* 注意：CURRENT_IMBALANCE_THRESH 定义在 adc_sampling.h 中 */

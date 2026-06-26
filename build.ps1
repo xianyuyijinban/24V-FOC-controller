@@ -57,10 +57,16 @@ $INCLUDES = @(
 )
 
 # Defines
+$GIT_HASH = (git -C $PSScriptRoot rev-parse --short HEAD 2>$null) -replace '\s+', ''
+if (-not $GIT_HASH) { $GIT_HASH = "unknown" }
+
+$GIT_HASH_DEFINE = '-DFOC_GIT_HASH=\"' + $GIT_HASH + '\"'
+
 $DEFINES = @(
     "-DUSE_HAL_DRIVER",
     "-DSTM32H743xx",
-    "-DARM_MATH_CM7"
+    "-DARM_MATH_CM7",
+    $GIT_HASH_DEFINE
 )
 
 # MCU flags

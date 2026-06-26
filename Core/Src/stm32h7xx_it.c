@@ -833,6 +833,8 @@ static const CmdAliasEntry s_cmd_aliases[] = {
     {"MOTION:",7, "CMD:", 4},
     {"DIAG:", 5, "CMD:", 4},
     {"CAL:",  4, "CMD:", 4},
+    {"JOINT:",6, "CMD:", 4},
+    {"GIMBAL:",7,"CMD:", 4},
     /* TELEM handled directly (not aliased to CMD:) */
     /* FF: group — names differ from CMD: */
     {"FF:COG,",         7, "CMD:COG_CFG,",        12},
@@ -936,6 +938,85 @@ static void UART_CommandExecute(const char *cmd)
         FOC_App_Disable(&g_foc_app);
         __enable_irq();
         UART_CommandSendText("CTRL:STOP,OK\r\n");
+        return;
+    }
+
+    /* ── Phase 3: APP_MODE commands ── */
+    if (strcmp(cmd, "CMD:APP_MODE?") == 0) {
+        char resp[64];
+        const char *name = "RAW";
+        if (g_foc_app.app_mode == APP_MODE_JOINT_POS)    name = "JOINT_POS";
+        else if (g_foc_app.app_mode == APP_MODE_GIMBAL_SPEED) name = "GIMBAL_SPEED";
+        else if (g_foc_app.app_mode == APP_MODE_HOLD)    name = "HOLD";
+        (void)snprintf(resp, sizeof(resp),
+                 "APP_MODE,OK,%s (ctrl_mode=%u)\r\n", name, g_foc_app.control_mode);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,RAW") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_RAW);
+        UART_CommandSendText("APP_MODE,OK,RAW\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,JOINT_POS") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_JOINT_POS);
+        UART_CommandSendText("APP_MODE,OK,JOINT_POS\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,GIMBAL_SPEED") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_GIMBAL_SPEED);
+        UART_CommandSendText("APP_MODE,OK,GIMBAL_SPEED\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,HOLD") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_HOLD);
+        UART_CommandSendText("APP_MODE,OK,HOLD\r\n"); return;
+    }
+
+    /* ── Phase 3: JOINT soft limit commands ── */
+    if (strcmp(cmd, "CMD:LIMIT?") == 0 || strcmp(cmd, "JOINT:LIMIT?") == 0) {
+        char resp[96];
+        if (g_foc_app.joint_soft_limit_enabled) {
+            (void)snprintf(resp, sizeof(resp),
+                     "JOINT:LIMIT,OK,min=%.1fdeg,max=%.1fdeg\r\n",
+                     (double)(g_foc_app.joint_pos_limit_min_rad * 57.29578f),
+                     (double)(g_foc_app.joint_pos_limit_max_rad * 57.29578f));
+        } else {
+            (void)snprintf(resp, sizeof(resp), "JOINT:LIMIT,OK,OFF\r\n");
+        }
+        UART_CommandSendText(resp); return;
+    }
+    if (strcmp(cmd, "CMD:LIMIT,OFF") == 0 || strcmp(cmd, "JOINT:LIMIT,OFF") == 0) {
+        g_foc_app.joint_soft_limit_enabled = 0U;
+        UART_CommandSendText("JOINT:LIMIT,OK,OFF\r\n"); return;
+    }
+    if (UART_CommandParseFloat2(cmd, "CMD:LIMIT,", &f1, &f2) ||
+        UART_CommandParseFloat2(cmd, "JOINT:LIMIT,", &f1, &f2)) {
+        float min_rad = f1 * 0.0174533f;
+        float max_rad = f2 * 0.0174533f;
+        if (min_rad < max_rad) {
+            FOC_App_SetJointLimits(&g_foc_app, min_rad, max_rad);
+            g_foc_app.joint_soft_limit_enabled = 1U;
+            UART_CommandSendText("JOINT:LIMIT,OK\r\n");
+        } else {
+            UART_CommandSendText("JOINT:LIMIT,FAIL,range (min<max)\r\n");
+        }
+        return;
+    }
+
+    /* ── Phase 3: GIMBAL ramp commands ── */
+    if (strcmp(cmd, "CMD:RAMP?") == 0 || strcmp(cmd, "GIMBAL:RAMP?") == 0) {
+        char resp[64];
+        (void)snprintf(resp, sizeof(resp),
+                 "GIMBAL:RAMP,OK,accel=%.1fradps2\r\n",
+                 (double)g_foc_app.gimbal_ramp_accel_radps2);
+        UART_CommandSendText(resp); return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:RAMP,", &f1) ||
+        UART_CommandParseFloat1(cmd, "GIMBAL:RAMP,", &f1)) {
+        if (f1 >= 0.1f && f1 <= 20.0f) {
+            FOC_App_SetGimbalRamp(&g_foc_app, f1);
+            UART_CommandSendText("GIMBAL:RAMP,OK\r\n");
+        } else {
+            UART_CommandSendText("GIMBAL:RAMP,FAIL,range (0.1-20 rad/s^2)\r\n");
+        }
         return;
     }
 

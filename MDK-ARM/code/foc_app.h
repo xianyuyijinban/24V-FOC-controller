@@ -108,6 +108,9 @@ extern "C" {
 #define FOC_MOTION_CFG_ACCEL_LIMIT_MIN          0.5f   /* 加速度下限 */
 #define FOC_MOTION_CFG_ACCEL_LIMIT_MAX          5.0f   /* 加速度上限 (12V 安全限幅) */
 
+#define FOC_GIMBAL_RAMP_ACCEL_DEFAULT           2.0f   /* GIMBAL SREF斜坡默认加速度 rad/s^2 */
+#define FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED    1U
+
 /* 固件版本信息 */
 #define FOC_FW_VERSION          "1.0.0"
 #define FOC_PARAM_VERSION       "1"
@@ -144,12 +147,20 @@ typedef enum {
     FOC_FAULT_ADC_SAMPLING,
 } FOC_FaultCode_t;
 
-/* 控制模式 */
+/* 控制模式 (底层 FOC 模式) */
 typedef enum {
     FOC_MODE_TORQUE = 0,        /* 力矩模式：直接控制Iq */
     FOC_MODE_SPEED,             /* 速度模式：速度环控制 */
     FOC_MODE_POSITION,          /* 位置模式：位置环+速度环 */
 } FOC_ControlMode_t;
+
+/* 上层应用模式 (Phase 3 — 产品模式外壳) */
+typedef enum {
+    APP_MODE_RAW = 0,           /* 原始模式：兼容所有旧行为 */
+    APP_MODE_JOINT_POS,         /* 关节位置模式：底层POSITION + 软限位 + fault自动STOP */
+    APP_MODE_GIMBAL_SPEED,      /* 云台速度模式：底层SPEED + SREF斜坡平滑 */
+    APP_MODE_HOLD,              /* 当前位置保持：底层POSITION + 锁定当前角度 */
+} AppMode_t;
 
 /* 保护参数 */
 typedef struct {
@@ -223,7 +234,10 @@ typedef struct {
     FOC_AppState_t state;
     FOC_FaultCode_t fault_code;
     uint32_t warning_flags;            /* 非停机告警位 */
-    FOC_ControlMode_t control_mode;  /* 控制模式：力矩/速度/位置 */
+    FOC_ControlMode_t control_mode;  /* 底层FOC模式：力矩/速度/位置 */
+    AppMode_t app_mode;              /* 上层应用模式 (Phase 3) */
+    float gimbal_ramp_accel_radps2;  /* GIMBAL_SPEED SREF斜坡加速度 */
+    float gimbal_sref_ramped;        /* GIMBAL_SPEED 斜坡后的SREF */
     
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */
@@ -247,6 +261,9 @@ typedef struct {
     float position_speed_limit_radps;   /* 速度上限 rad/s */
     float position_accel_limit_radps2;  /* 加速度上限 rad/s^2 */
     float position_cruise_speed_radps;  /* 巡航下限 rad/s */
+    float joint_pos_limit_min_rad;      /* 关节软限位下限 rad (JOINT_POS) */
+    float joint_pos_limit_max_rad;      /* 关节软限位上限 rad (JOINT_POS) */
+    uint8_t joint_soft_limit_enabled;   /* 软限位使能 */
 
     /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
@@ -336,6 +353,9 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
+void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
+void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
+void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);
 void FOC_App_SetPolePairs(FOC_AppHandle_t *handle, uint8_t pole_pairs);
 float FOC_App_PositionSensorToControlFrame(const FOC_AppHandle_t *handle, float pos_ref_sensor);

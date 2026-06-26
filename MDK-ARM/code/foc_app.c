@@ -96,6 +96,12 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->state = FOC_STATE_INIT;
     handle->fault_code = FOC_FAULT_NONE;
     handle->control_mode = FOC_MODE_SPEED;  /* 默认速度模式 */
+    handle->app_mode = APP_MODE_RAW;        /* Phase 3: 默认原始模式 */
+    handle->gimbal_ramp_accel_radps2 = FOC_GIMBAL_RAMP_ACCEL_DEFAULT;
+    handle->gimbal_sref_ramped = 0.0f;
+    handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
+    handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
+    handle->joint_soft_limit_enabled = FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED;
     handle->protection.overcurrent_limit_a = FOC_DEFAULT_OVERCURRENT_LIMIT_A;
     handle->protection.overvoltage_limit_v = FOC_DEFAULT_OVERVOLTAGE_LIMIT_V;
     handle->protection.undervoltage_limit_v = FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V;
@@ -829,10 +835,14 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         speed_ref_temp = handle->speed_ref_ramped;
         handle->position_loop_speed_ramp_sat_diag = (fabsf(speed_ramp_delta) > speed_ramp_step) ? 1U : 0U;
     } else {
-        /* 速度模式：直接使用速度给定 */
+        /* 速度模式：使用速度给定斜坡 */
+        /* Phase 3: GIMBAL_SPEED uses gentler ramp accel for low-speed smoothness */
+        float ramp_rate = (handle->app_mode == APP_MODE_GIMBAL_SPEED)
+            ? handle->gimbal_ramp_accel_radps2
+            : FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2;
         handle->speed_ref_ramped += FOC_Saturate(handle->speed_ref - handle->speed_ref_ramped,
-                                                 FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ,
-                                                 -FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 / (float)FOC_SPEED_LOOP_FREQ);
+                                                 ramp_rate / (float)FOC_SPEED_LOOP_FREQ,
+                                                 -ramp_rate / (float)FOC_SPEED_LOOP_FREQ);
         speed_ref_temp = handle->speed_ref_ramped;
         handle->position_loop_speed_ramp_sat_diag = 0U;
     }
@@ -1642,6 +1652,16 @@ void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
         return;
     }
 
+    /* Phase 3: JOINT_POS soft limit clamping */
+    if (handle->app_mode == APP_MODE_JOINT_POS && handle->joint_soft_limit_enabled) {
+        float pos_deg = pos_ref * 57.29578f;  /* rad → deg for clamping */
+        float min_deg = handle->joint_pos_limit_min_rad * 57.29578f;
+        float max_deg = handle->joint_pos_limit_max_rad * 57.29578f;
+        if (pos_deg < min_deg) pos_deg = min_deg;
+        if (pos_deg > max_deg) pos_deg = max_deg;
+        pos_ref = pos_deg * 0.0174533f;  /* back to rad */
+    }
+
     handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, pos_ref);
     handle->position_ref_user_set = 1U;
     handle->position_friction_active = 0U;
@@ -1690,6 +1710,72 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
     /* 切换模式时清零积分，防止跳变 */
     handle->pi_speed.integral = 0.0f;
     handle->position_friction_active = 0U;
+}
+
+/* ── Phase 3: Application Mode Layer ────────────────────────── */
+void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
+{
+    if (handle == NULL) return;
+
+    handle->app_mode = mode;
+    handle->pi_speed.integral = 0.0f;
+    handle->position_friction_active = 0U;
+
+    switch (mode) {
+    case APP_MODE_RAW:
+        /* RAW: keep current control_mode, no special behavior */
+        break;
+
+    case APP_MODE_JOINT_POS:
+        /* JOINT_POS: switch to POSITION, soft limits active */
+        handle->control_mode = FOC_MODE_POSITION;
+        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+            FOC_App_RefreshEncoderFeedback(handle);
+            {
+                float theta_mech_zeroed = FOC_AngleNormalize(
+                    handle->theta_mech - handle->motor_param.mech_zero_offset);
+                float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                handle->pos_ref = theta_mech_zeroed * encoder_dir_f;
+            }
+        }
+        break;
+
+    case APP_MODE_GIMBAL_SPEED:
+        /* GIMBAL_SPEED: switch to SPEED, enable SREF ramp */
+        handle->control_mode = FOC_MODE_SPEED;
+        handle->gimbal_sref_ramped = handle->speed_ref;
+        break;
+
+    case APP_MODE_HOLD:
+        /* HOLD: switch to POSITION, lock current position */
+        handle->control_mode = FOC_MODE_POSITION;
+        if (handle->motor_identified) {
+            FOC_App_RefreshEncoderFeedback(handle);
+            {
+                float theta_mech_zeroed = FOC_AngleNormalize(
+                    handle->theta_mech - handle->motor_param.mech_zero_offset);
+                float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                handle->pos_ref = theta_mech_zeroed * encoder_dir_f;
+                handle->position_ref_user_set = 1U;
+            }
+        }
+        break;
+    }
+}
+
+void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad)
+{
+    if (handle == NULL) return;
+    if (min_rad > max_rad) return;
+    handle->joint_pos_limit_min_rad = min_rad;
+    handle->joint_pos_limit_max_rad = max_rad;
+}
+
+void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2)
+{
+    if (handle == NULL) return;
+    if (accel_radps2 < 0.1f) accel_radps2 = 0.1f;
+    handle->gimbal_ramp_accel_radps2 = accel_radps2;
 }
 
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)

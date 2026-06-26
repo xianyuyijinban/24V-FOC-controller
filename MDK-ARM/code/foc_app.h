@@ -99,14 +99,14 @@ extern "C" {
 #define FOC_POSITION_CRUISE_SPEED_RAD_PER_S          0.80f  /* V4 巡航速度下限 */
 #define FOC_POSITION_CRUISE_HOLD_THRESHOLD_RAD       0.087f /* V4 巡航切PD阈值 (~5 deg) */
 
-/* V5 位置模式运行时运动配置默认值与范围 */
-#define FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT      1.5f   /* 速度上限 rad/s (12V安全值; 24V可调高) */
-#define FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT      6.0f   /* 加速度上限 rad/s^2 */
-#define FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT     1.2f   /* 巡航下限 rad/s */
+/* V5 位置模式运行时运动配置默认值与范围 — 12V 标准基线 */
+#define FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT      1.0f   /* 速度上限 rad/s (12V 稳定包络; 极限 ±1.0) */
+#define FOC_MOTION_CFG_ACCEL_LIMIT_DEFAULT      2.0f   /* 加速度上限 rad/s^2 */
+#define FOC_MOTION_CFG_CRUISE_SPEED_DEFAULT     0.3f   /* 巡航下限 rad/s */
 #define FOC_MOTION_CFG_SPEED_LIMIT_MIN          0.2f   /* 速度下限 */
-#define FOC_MOTION_CFG_SPEED_LIMIT_MAX          8.0f   /* 速度上限 */
+#define FOC_MOTION_CFG_SPEED_LIMIT_MAX          2.0f   /* 速度上限 (12V 安全限幅) */
 #define FOC_MOTION_CFG_ACCEL_LIMIT_MIN          0.5f   /* 加速度下限 */
-#define FOC_MOTION_CFG_ACCEL_LIMIT_MAX          30.0f  /* 加速度上限 */
+#define FOC_MOTION_CFG_ACCEL_LIMIT_MAX          5.0f   /* 加速度上限 (12V 安全限幅) */
 
 #define FOC_WARNING_VBUS_UNDERVOLTAGE_BIT (1UL << 0)
 #define FOC_WARNING_VBUS_OVERVOLTAGE_BIT  (1UL << 1)

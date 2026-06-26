@@ -519,16 +519,91 @@ CMD:JDIAG                        # cog_gain/cog_phase/cog_valid/cog_bins/cog_min
 
 \* SREF=+0.05 (28%) 和 SREF=-0.10 (71%) 未达 80% 阈值，判定为 12V 供电下静摩擦/齿槽效应的方向不对称，与门控逻辑无关。
 
-### 12V 限制记录
-- 电机饱和速度 ~0.73 rad/s (12V)，±1.0 rad/s 耐久在 -1.0→0 制动瞬态触发 DRV8350S UVLO (0x00400080: bit7 VM欠压锁定)
-- ±0.5 rad/s 耐久完全通过（0 faults, 20/20 Vq<60mV），作为 12V 条件下的等效验证
-- 24V 下 ±1.0 耐久待后续台架补测
+### 12V 限制记录（已更新）
+- 电机 12V 稳态包络：±0.3 ~ ±1.0 rad/s 追踪 98-102%（16/16 全部 stable）
+- ±1.0 急减速（-1.0→0 制动）可触发 DRV8350S UVLO (0x00400080)
+- 12V 标准基线额定速度定为 ±0.5 rad/s，极限验证 ±1.0 rad/s
+- 控制地板 ±0.05 rad/s（需 2-3s settle for Ki=0.001 integration）
 
 ### Prevention / Follow-up
 1. **回零 Vq 基底**：当前 max=18mV，仍在 P-only 基线 (17-56mV) 范围内，积分项确认清零，零速控制基底作为独立后续问题
 2. **位置模式安全边界**：位置模式速度积分清零已在本轮验证（全部 PREF 无 drift），勿在位置模式放开积分
-3. **24V 补测**：±1.0 耐久和低速 0.05/0.10 追踪需在 24V 台架上重测以匹配原计划指标
+3. **12V 永久基线**：项目不再以 24V 为目标平台，所有默认参数按 12V 收敛
 4. **后续不进入本轮**：BEMF、ABC RsFF、observer、VDQ_PULSE
 
 ### Commits
-- (待提交) `fix: enable gated speed integral for low-speed tracking`
+- `319290c` `fix: enable gated speed integral for low-speed tracking`
+
+## [2026-06-26] 12V 标准基线冻结
+
+### Problem / Task
+将项目从 24V 目标平台切换为 12V 永久基线，需完整表征 12V 工作包络并更新所有默认参数。
+
+### 12V 工作包络表征结果
+
+**速度包络**（±0.3 ~ ±1.0 rad/s, 0.1 步长, 双向）：
+| 指标 | 结果 |
+|------|------|
+| 稳态追踪 | 16/16 全部 stable (98-102%) |
+| Vq_pk | 18-33mV |
+| Vbus_min | 11.9V 稳定 |
+| 饱和点 | >±1.0 rad/s（未触及） |
+
+**低速地板**（±0.05 ~ ±0.20, 双向, 3s settle）：
+| 指标 | 结果 |
+|------|------|
+| 追踪 (≥0.10) | 7/8 tracking (96-117%) |
+| ±0.05 | 69-75%（判定为 12V 控制地板） |
+
+**位置模式**：
+- PREF=0/±5/±20/0 全部 drift < 0.004 rad/s
+- speed_limit=1.0 正常追踪
+
+**负载安全**（手捏扰动, ±0.5/±0.7, 双向）：
+| 指标 | 结果 |
+|------|------|
+| Fault | 4/4 no fault |
+| UVLO | 0 复现（上次为急减速触发） |
+| Iq_peak | max=0.160A << 0.35A |
+| 回零 Vq | 10-18mV |
+
+注：手捏负载速度跌落数据因空载段预加载污染，不作为速度刚度定量依据。
+
+### 12V 标准基线参数
+
+```text
+PI_CURRENT  = 0.50 / 0
+PI_SPEED    = 0.25 / 0.001 gated
+RS_FF       = DQ / 0.20, adaptive OFF
+BEMF        = OFF
+COG         = 0.25 / +60deg
+
+额定速度:      ±0.5 rad/s
+验证极限:      ±1.0 rad/s 空载稳态
+控制地板:      ±0.05 rad/s (需 2-3s settle)
+位置 speed_limit: 1.0 rad/s
+位置 accel:       2.0 rad/s²
+位置 cruise:      0.3 rad/s
+
+SREF 命令限幅:  ±1.0 rad/s (MOTION_CFG_SPEED_LIMIT_DEFAULT)
+```
+
+### 代码改动
+
+**`foc_app.h`** — MOTION_CFG 默认值收敛到 12V：
+- `SPEED_LIMIT_DEFAULT`: 1.5 → 1.0 rad/s
+- `ACCEL_LIMIT_DEFAULT`: 6.0 → 2.0 rad/s²
+- `CRUISE_SPEED_DEFAULT`: 1.2 → 0.3 rad/s
+- `SPEED_LIMIT_MAX`: 8.0 → 2.0 rad/s
+- `ACCEL_LIMIT_MAX`: 30.0 → 5.0 rad/s²
+
+**`foc_app.c`** — 注释更新：SREF 限幅说明、"12V 标准基线"
+
+### Prevention / Follow-up
+1. **不再追 24V 性能**，所有后续开发以 12V 为唯一目标平台
+2. **速度刚度专项**留待后续固定负载（砝码/摩擦/关节装配）测试
+3. **UART 指令和上位机参数整理**为下一优先事项
+4. **回零 Vq 基底**（当前 <20mV）作为独立问题跟踪
+
+### Commits
+- （当前工作树）12V 基线冻结：MOTION_CFG 默认值更新 + PROGRESS.md

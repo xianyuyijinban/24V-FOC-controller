@@ -1619,9 +1619,8 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref)
                                  FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
                                  -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
     } else if (handle->control_mode == FOC_MODE_SPEED) {
-        /* Speed mode: clamp to motion config speed limit (default 4.0 rad/s).
-         * Protects against accidental high-speed commands that can cause
-         * runaway on low-voltage / unloaded bench setups. */
+        /* Speed mode: clamp to motion config speed limit (default 1.0 rad/s).
+         * Protects against accidental high-speed commands on 12V bench. */
         float max_speed = handle->position_speed_limit_radps;
         if (max_speed < 0.1f) {
             max_speed = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
@@ -1886,7 +1885,7 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
     }
 #endif
 
-    /* 速度环参数 - 固定值，台架测试验证(12V, 24N22P, 74KV) */
+    /* 速度环参数 - 12V 标准基线 (24N22P, 74KV) */
     /* 使用台架实测整定值，不使用Ke/J自动计算(默认Ke/J参数不准确) */
     float Kp_s = 0.25f;  /* Phase 2 定版：0.25 最佳，>=0.30 振荡 */
     float Ki_s = 0.001f; /* Phase 2 gated: 仅速度模式门控积分，位置模式 P-only */

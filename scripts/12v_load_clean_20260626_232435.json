@@ -1,0 +1,190 @@
+[
+  {
+    "sref": 0.5,
+    "empty": {
+      "n": 50,
+      "w_mean": 0.0182,
+      "w_std": 0.013951812112571248,
+      "Iq_mean": 0.05376,
+      "Iq_peak": 0.081,
+      "Vq_mean": 0.0721,
+      "Vq_pk": 0.083,
+      "Vbus_mean": 11.9092,
+      "Vbus_min": 11.88
+    },
+    "empty_fault": null,
+    "loaded": {
+      "n": 50,
+      "w_mean": 0.0284,
+      "w_std": 0.01582557991328712,
+      "Iq_mean": 0.10028,
+      "Iq_peak": 0.137,
+      "Vq_mean": 0.04426,
+      "Vq_pk": 0.067,
+      "Vbus_mean": 11.9232,
+      "Vbus_min": 11.88
+    },
+    "loaded_fault": null,
+    "zero": {
+      "n": 50,
+      "w_mean": -0.0034000000000000002,
+      "w_std": 0.014792441533790567,
+      "Iq_mean": 0.01044,
+      "Iq_peak": 0.016,
+      "Vq_mean": -0.0082,
+      "Vq_pk": 0.012,
+      "Vbus_mean": 11.9174,
+      "Vbus_min": 11.88
+    },
+    "zero_fault": null,
+    "checks": [
+      "speed_drop_OK",
+      "Iq_increase_OK",
+      "Iq_peak_OK",
+      "no_fault",
+      "zero_clean"
+    ],
+    "verdict": "PASS"
+  },
+  {
+    "sref": -0.5,
+    "empty": {
+      "n": 49,
+      "w_mean": -0.05918367346938776,
+      "w_std": 0.026365755464702503,
+      "Iq_mean": 0.04363265306122449,
+      "Iq_peak": 0.133,
+      "Vq_mean": 0.07514285714285714,
+      "Vq_pk": 0.082,
+      "Vbus_mean": 11.917551020408164,
+      "Vbus_min": 11.88
+    },
+    "empty_fault": null,
+    "loaded": {
+      "n": 49,
+      "w_mean": -0.2636734693877551,
+      "w_std": 0.03539620257121638,
+      "Iq_mean": 0.031020408163265303,
+      "Iq_peak": 0.154,
+      "Vq_mean": 0.008204081632653062,
+      "Vq_pk": 0.07,
+      "Vbus_mean": 11.917755102040816,
+      "Vbus_min": 11.88
+    },
+    "loaded_fault": null,
+    "zero": {
+      "n": 50,
+      "w_mean": 0.0007999999999999999,
+      "w_std": 0.014685825458167311,
+      "Iq_mean": 0.00296,
+      "Iq_peak": 0.01,
+      "Vq_mean": -0.0139,
+      "Vq_pk": 0.018,
+      "Vbus_mean": 11.9218,
+      "Vbus_min": 11.87
+    },
+    "zero_fault": null,
+    "checks": [
+      "speed_drop_41%",
+      "Iq_no_response",
+      "Iq_peak_OK",
+      "no_fault",
+      "zero_clean"
+    ],
+    "verdict": "CHECK"
+  },
+  {
+    "sref": 0.7,
+    "empty": {
+      "n": 50,
+      "w_mean": 0.3802,
+      "w_std": 0.09474972403169116,
+      "Iq_mean": -0.04184,
+      "Iq_peak": 0.151,
+      "Vq_mean": 0.01396,
+      "Vq_pk": 0.091,
+      "Vbus_mean": 11.9164,
+      "Vbus_min": 11.86
+    },
+    "empty_fault": null,
+    "loaded": {
+      "n": 50,
+      "w_mean": 0.037,
+      "w_std": 0.022968478844019324,
+      "Iq_mean": 0.01134,
+      "Iq_peak": 0.1,
+      "Vq_mean": 0.09612,
+      "Vq_pk": 0.106,
+      "Vbus_mean": 11.9154,
+      "Vbus_min": 11.88
+    },
+    "loaded_fault": null,
+    "zero": {
+      "n": 50,
+      "w_mean": -0.0018,
+      "w_std": 0.015996173011705275,
+      "Iq_mean": 0.01308,
+      "Iq_peak": 0.021,
+      "Vq_mean": -0.00552,
+      "Vq_pk": 0.01,
+      "Vbus_mean": 11.9216,
+      "Vbus_min": 11.88
+    },
+    "zero_fault": null,
+    "checks": [
+      "speed_drop_49%",
+      "Iq_increase_OK",
+      "Iq_peak_OK",
+      "no_fault",
+      "zero_clean"
+    ],
+    "verdict": "CHECK"
+  },
+  {
+    "sref": -0.7,
+    "empty": {
+      "n": 50,
+      "w_mean": -0.0446,
+      "w_std": 0.017520833080556835,
+      "Iq_mean": -0.09496,
+      "Iq_peak": 0.141,
+      "Vq_mean": 0.06542,
+      "Vq_pk": 0.092,
+      "Vbus_mean": 11.924,
+      "Vbus_min": 11.88
+    },
+    "empty_fault": null,
+    "loaded": {
+      "n": 50,
+      "w_mean": -0.3268,
+      "w_std": 0.1735280957078709,
+      "Iq_mean": 0.013300000000000001,
+      "Iq_peak": 0.16,
+      "Vq_mean": 0.03302,
+      "Vq_pk": 0.084,
+      "Vbus_mean": 11.917,
+      "Vbus_min": 11.88
+    },
+    "loaded_fault": null,
+    "zero": {
+      "n": 49,
+      "w_mean": 0.0012244897959183675,
+      "w_std": 0.015225068836903017,
+      "Iq_mean": 0.001673469387755102,
+      "Iq_peak": 0.011,
+      "Vq_mean": -0.014775510204081632,
+      "Vq_pk": 0.018,
+      "Vbus_mean": 11.918775510204082,
+      "Vbus_min": 11.88
+    },
+    "zero_fault": null,
+    "checks": [
+      "speed_drop_40%",
+      "Iq_increase_OK",
+      "Iq_peak_OK",
+      "no_fault",
+      "zero_clean"
+    ],
+    "verdict": "CHECK"
+  }
+]

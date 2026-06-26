@@ -287,6 +287,26 @@ void DrvUart_SetEnable(bool enable);
 void DrvUart_SetInterval(uint32_t intervalMs);
 
 /**
+ * @brief Send text with P0 priority (command echo, never dropped)
+ */
+void DrvUart_SendTextP0(const char *text);
+
+/**
+ * @brief Send data with P1 priority (DIAG output)
+ */
+void DrvUart_SendTextP1(const char *text);
+
+/**
+ * @brief Get current upload interval in ms
+ */
+uint32_t DrvUart_GetInterval(void);
+
+/**
+ * @brief Check if telemetry is enabled
+ */
+bool DrvUart_IsEnabled(void);
+
+/**
  * @brief 获取统计信息
  */
 void DrvUart_GetStatistics(DrvUart_Statistics_t* stats);

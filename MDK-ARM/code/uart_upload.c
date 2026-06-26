@@ -16,9 +16,24 @@
 static UART_HandleTypeDef* s_huart = NULL;
 static DRV8350S_Handle_t* s_drvHandle = NULL;
 
+/* ── Phase 2: UART TX Ring Buffer (IT-based, no DMA) ────────── */
+#define UART_TX_RING_SIZE       1024U
+#define UART_TX_P0_RESERVE       128U
+#define UART_TX_P1_RESERVE       512U
+
+typedef enum {
+    UART_PRIO_P0 = 0,  /* command echo, STOP, fault */
+    UART_PRIO_P1 = 1,  /* DIAG single output */
+    UART_PRIO_P2 = 2,  /* periodic telemetry */
+} UartTxPrio;
+
 static uint8_t s_txBuf[DRV_UART_BUF_SIZE];
 static uint8_t s_faultDetailBuf[DRV_UART_BUF_SIZE];
-static volatile bool s_txBusy = false;
+static volatile bool s_txITActive = false;
+static uint8_t  s_txRing[UART_TX_RING_SIZE];
+static volatile uint16_t s_txRingHead = 0U;
+static volatile uint16_t s_txRingTail = 0U;
+static volatile uint32_t s_txDropCount[3] = {0, 0, 0};
 static volatile bool s_enabled = true;
 static uint32_t s_uploadInterval = DRV_UPLOAD_INTERVAL_MS;
 static uint32_t s_lastUploadTime = 0;
@@ -72,7 +87,10 @@ HAL_StatusTypeDef DrvUart_Init(UART_HandleTypeDef* huart, DRV8350S_Handle_t* drv
     
     s_huart = huart;
     s_drvHandle = drvHandle;
-    s_txBusy = false;
+    s_txITActive = false;
+    s_txRingHead = 0U;
+    s_txRingTail = 0U;
+    s_txDropCount[0] = 0U; s_txDropCount[1] = 0U; s_txDropCount[2] = 0U;
     s_enabled = true;
     s_lastUploadTime = 0;
     s_lastPhaseCurrentUploadTime = 0;
@@ -102,13 +120,13 @@ HAL_StatusTypeDef DrvUart_Init(UART_HandleTypeDef* huart, DRV8350S_Handle_t* drv
  */
 void DrvUart_DeInit(void)
 {
-    if (s_huart != NULL && s_txBusy) {
+    if (s_huart != NULL && s_txITActive) {
         (void)HAL_UART_AbortTransmit(s_huart);
     }
     
     s_huart = NULL;
     s_drvHandle = NULL;
-    s_txBusy = false;
+    s_txITActive = false;
     s_enabled = false;
     s_faultDetailLen = 0U;
     s_faultDetailOffset = 0U;
@@ -1076,34 +1094,138 @@ static void DrvUart_QueueFaultDetail(const DrvUart_DataPacket_t* packet, uint32_
     }
 }
 
+/* Free space in ring buffer */
+static uint16_t UartTx_FreeSpace(void)
+{
+    if (s_txRingHead >= s_txRingTail) {
+        return (uint16_t)(UART_TX_RING_SIZE - (s_txRingHead - s_txRingTail) - 1U);
+    }
+    return (uint16_t)(s_txRingTail - s_txRingHead - 1U);
+}
+
+/* Enqueue data into ring buffer with priority-based admission */
+static bool UartTx_Enqueue(const uint8_t *data, uint16_t len, UartTxPrio prio)
+{
+    uint16_t free_space;
+    uint16_t i;
+
+    if (data == NULL || len == 0U || len >= UART_TX_RING_SIZE) {
+        return false;
+    }
+
+    __disable_irq();
+    free_space = UartTx_FreeSpace();
+
+    /* Admission control */
+    if (prio == UART_PRIO_P2 && free_space < (UART_TX_P1_RESERVE + len)) {
+        s_txDropCount[2]++;
+        __enable_irq();
+        return false;  /* drop telemetry under backpressure */
+    }
+    if (prio == UART_PRIO_P1 && free_space < (UART_TX_P0_RESERVE + len)) {
+        s_txDropCount[1]++;
+        __enable_irq();
+        return false;  /* drop DIAG only when nearly full */
+    }
+    /* P0 always accepted — if ring full, we spin briefly (should never happen) */
+
+    for (i = 0U; i < len; i++) {
+        s_txRing[s_txRingHead] = data[i];
+        s_txRingHead = (uint16_t)((s_txRingHead + 1U) % UART_TX_RING_SIZE);
+    }
+    __enable_irq();
+
+    return true;
+}
+
+/* Start IT transmission from ring buffer. Call with IRQ disabled or from ISR. */
+static void UartTx_StartIT(void)
+{
+    uint16_t avail;
+    uint16_t chunk;
+    uint16_t i;
+
+    if (s_txITActive || s_huart == NULL) {
+        return;
+    }
+
+    if (s_txRingHead == s_txRingTail) {
+        return;  /* empty */
+    }
+
+    /* Calculate contiguous readable chunk from tail */
+    if (s_txRingHead > s_txRingTail) {
+        avail = (uint16_t)(s_txRingHead - s_txRingTail);
+    } else {
+        avail = (uint16_t)(UART_TX_RING_SIZE - s_txRingTail);
+    }
+
+    if (avail == 0U) {
+        return;
+    }
+
+    /* Copy to flat TX buffer for HAL IT (HAL expects contiguous buffer) */
+    chunk = (avail > DRV_UART_BUF_SIZE) ? (uint16_t)DRV_UART_BUF_SIZE : avail;
+    for (i = 0U; i < chunk; i++) {
+        s_txBuf[i] = s_txRing[s_txRingTail];
+        s_txRingTail = (uint16_t)((s_txRingTail + 1U) % UART_TX_RING_SIZE);
+    }
+
+    s_txITActive = true;
+    if (HAL_UART_Transmit_IT(s_huart, s_txBuf, chunk) != HAL_OK) {
+        s_txITActive = false;
+        s_stats.txErrors++;
+    }
+}
+
+/* Called from main loop to kick IT if data is waiting */
+static void UartTx_Service(void)
+{
+    if (!s_txITActive && s_txRingHead != s_txRingTail) {
+        __disable_irq();
+        UartTx_StartIT();
+        __enable_irq();
+    }
+}
+
 /**
- * @brief Start UART send
+ * @brief Send data via ring buffer with priority (replaces blocking send)
  */
 static bool DrvUart_StartSend(uint16_t len)
 {
-    HAL_StatusTypeDef status;
-
-    if (s_huart == NULL || len == 0 || len > DRV_UART_BUF_SIZE) {
-        return false;
-    }
-    
-    if (s_txBusy) {
-        return false;  /* Send busy */
-    }
-
-    s_txBusy = true;
-    s_stats.isTxBusy = 1;
-
-    status = HAL_UART_Transmit(s_huart, s_txBuf, len, 100);
-
-    s_txBusy = false;
-    s_stats.isTxBusy = 0;
-
-    if (status != HAL_OK) {
-        s_stats.txErrors++;
+    if (s_huart == NULL || len == 0U || len > DRV_UART_BUF_SIZE) {
         return false;
     }
 
+    if (!UartTx_Enqueue(s_txBuf, len, UART_PRIO_P2)) {
+        return false;
+    }
+
+    /* Kick IT from main context */
+    if (!s_txITActive) {
+        __disable_irq();
+        UartTx_StartIT();
+        __enable_irq();
+    }
+    return true;
+}
+
+/* Send with explicit priority (for command echo, DIAG, etc.) */
+static bool DrvUart_StartSendPrio(uint16_t len, UartTxPrio prio)
+{
+    if (s_huart == NULL || len == 0U || len > DRV_UART_BUF_SIZE) {
+        return false;
+    }
+
+    if (!UartTx_Enqueue(s_txBuf, len, prio)) {
+        return false;
+    }
+
+    if (!s_txITActive) {
+        __disable_irq();
+        UartTx_StartIT();
+        __enable_irq();
+    }
     return true;
 }
 
@@ -1245,14 +1367,14 @@ void DrvUart_Process(void)
     
     currentTime = HAL_GetTick();
 
-    if (!s_txBusy && s_faultDetailOffset < s_faultDetailLen) {
+    if (s_faultDetailOffset < s_faultDetailLen) {
         chunkLen = (uint16_t)(s_faultDetailLen - s_faultDetailOffset);
         if (chunkLen > DRV_UART_FAULT_DETAIL_CHUNK_SIZE) {
             chunkLen = DRV_UART_FAULT_DETAIL_CHUNK_SIZE;
         }
 
         memcpy(s_txBuf, &s_faultDetailBuf[s_faultDetailOffset], chunkLen);
-        if (DrvUart_StartSend(chunkLen)) {
+        if (DrvUart_StartSendPrio(chunkLen, UART_PRIO_P0)) {
             s_faultDetailOffset += chunkLen;
             s_stats.totalUploads++;
             s_stats.lastUploadTime = currentTime;
@@ -1287,7 +1409,7 @@ void DrvUart_Process(void)
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_FAULT);
         
         len = DrvUart_FormatFaultSummary(&packet, s_txBuf, DRV_UART_BUF_SIZE);
-        if (len > 0 && DrvUart_StartSend(len)) {
+        if (len > 0 && DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P0)) {
             DrvUart_AddFaultHistory(&packet);
             s_stats.faultUploads++;
             s_stats.totalUploads++;
@@ -1302,12 +1424,12 @@ void DrvUart_Process(void)
             s_lastFaultActive = 1U;
         }
     }
-    else if (faultActive && !s_txBusy) {
+    else if (faultActive) {
         /* Active faults only resend short summaries; details are root-change or CMD:FAULT_DETAIL driven. */
         if ((currentTime - s_stats.lastUploadTime) >= 500 && s_faultDetailOffset >= s_faultDetailLen) {
             DrvUart_CollectData(&packet, DRV_PKT_TYPE_FAULT);
             len = DrvUart_FormatFaultSummary(&packet, s_txBuf, DRV_UART_BUF_SIZE);
-            if (len > 0 && DrvUart_StartSend(len)) {
+            if (len > 0 && DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P0)) {
                 s_stats.totalUploads++;
                 s_stats.lastUploadTime = currentTime;
                 s_lastUploadTime = currentTime;
@@ -1315,24 +1437,24 @@ void DrvUart_Process(void)
         }
     }
 
-    if (!s_txBusy && s_faultDetailLen == 0U && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
+    if (s_faultDetailLen == 0U && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_NORMAL);
         len = DrvUart_FormatPhaseCurrent(&packet, s_txBuf, DRV_UART_BUF_SIZE);
         if (len > 0) {
-            if (DrvUart_StartSend(len)) {
+            if (DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P2)) {
                 s_stats.totalUploads++;
                 s_lastPhaseCurrentUploadTime = currentTime;
             }
         }
     }
 
-    if (!s_txBusy && s_faultDetailLen == 0U && (currentTime - s_lastUploadTime) >= s_uploadInterval) {
+    if (s_faultDetailLen == 0U && (currentTime - s_lastUploadTime) >= s_uploadInterval) {
         /* Runtime telemetry continues in fault state so the GUI can still plot angle/current. */
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_NORMAL);
-        
+
         len = DrvUart_FormatNormal(&packet, s_txBuf, DRV_UART_BUF_SIZE);
         if (len > 0) {
-            if (DrvUart_StartSend(len)) {
+            if (DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P2)) {
                 s_stats.totalUploads++;
                 s_stats.lastUploadTime = currentTime;
                 s_lastUploadTime = currentTime;
@@ -1350,6 +1472,9 @@ void DrvUart_Process(void)
         s_faultDetailLen = 0U;
         s_faultDetailOffset = 0U;
     }
+
+    /* Service ring buffer: kick IT if data waiting and IT idle */
+    UartTx_Service();
 }
 
 /**
@@ -1367,7 +1492,7 @@ void DrvUart_UploadImmediate(void)
     
     /* Wait for the current transfer with a timeout. */
     waitStart = HAL_GetTick();
-    while (s_txBusy) {
+    while (s_txITActive) {
         if ((HAL_GetTick() - waitStart) > 100U) {
             s_stats.txErrors++;
             return;
@@ -1378,7 +1503,7 @@ void DrvUart_UploadImmediate(void)
     len = DrvUart_FormatFault(&packet, s_txBuf, DRV_UART_BUF_SIZE);
     
     if (len > 0) {
-        HAL_UART_Transmit(s_huart, s_txBuf, len, 100);
+        DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P1);
     }
 }
 
@@ -1411,7 +1536,6 @@ bool DrvUart_UploadFault(void)
 bool DrvUart_UploadJDiag(void)
 {
     extern FOC_AppHandle_t g_foc_app;
-    extern MI_Handle_t g_mi_handle;  /* may not exist — use g_foc_app.mi_handle */
     int16_t len;
     char jText[20], bText[20], tcText[20];
 
@@ -1419,7 +1543,7 @@ bool DrvUart_UploadJDiag(void)
         return false;
     }
 
-    if (s_txBusy) {
+    if (s_txITActive) {
         return false;
     }
 
@@ -1484,7 +1608,7 @@ void DrvUart_QueryCogCfg(void)
     char gainText[16], phaseText[16];
     int16_t len;
 
-    if (s_huart == NULL || s_txBusy) {
+    if (s_huart == NULL || s_txITActive) {
         return;
     }
 
@@ -1507,9 +1631,37 @@ void DrvUart_QueryCogCfg(void)
 void DrvUart_TxCpltCallback(UART_HandleTypeDef* huart)
 {
     if (huart == s_huart) {
-        s_txBusy = false;
+        s_txITActive = false;
         s_stats.isTxBusy = 0;
+        /* Dequeue next chunk from ring buffer */
+        UartTx_StartIT();
     }
+}
+
+/**
+ * @brief Send text with P0 priority (command echo — never dropped)
+ */
+void DrvUart_SendTextP0(const char *text)
+{
+    size_t len;
+    if (text == NULL || s_huart == NULL) return;
+    len = strlen(text);
+    if (len == 0 || len > DRV_UART_BUF_SIZE) return;
+    memcpy(s_txBuf, text, len);
+    DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P0);
+}
+
+/**
+ * @brief Send text with P1 priority (DIAG output)
+ */
+void DrvUart_SendTextP1(const char *text)
+{
+    size_t len;
+    if (text == NULL || s_huart == NULL) return;
+    len = strlen(text);
+    if (len == 0 || len > DRV_UART_BUF_SIZE) return;
+    memcpy(s_txBuf, text, len);
+    DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P1);
 }
 
 /**
@@ -1518,6 +1670,22 @@ void DrvUart_TxCpltCallback(UART_HandleTypeDef* huart)
 void DrvUart_SetEnable(bool enable)
 {
     s_enabled = enable;
+}
+
+/**
+ * @brief Get current upload interval in ms
+ */
+uint32_t DrvUart_GetInterval(void)
+{
+    return s_uploadInterval;
+}
+
+/**
+ * @brief Check if telemetry is enabled
+ */
+bool DrvUart_IsEnabled(void)
+{
+    return s_enabled;
 }
 
 /**

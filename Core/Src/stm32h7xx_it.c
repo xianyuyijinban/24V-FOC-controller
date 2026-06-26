@@ -300,14 +300,11 @@ static void UART_CommandQueuePush(const char *line)
 
 static void UART_CommandSendText(const char *text)
 {
-    size_t len;
-
+    /* Phase 2: non-blocking via ring buffer (P0 — never dropped) */
     if (text == NULL) {
         return;
     }
-
-    len = UART_BoundedStrLen(text, 512U);
-    (void)HAL_UART_Transmit(&huart1, (uint8_t*)text, (uint16_t)len, 200U);
+    DrvUart_SendTextP0(text);
 }
 
 static uint16_t UART_AdcNoiseIntegerSqrt(uint32_t value)
@@ -836,6 +833,7 @@ static const CmdAliasEntry s_cmd_aliases[] = {
     {"MOTION:",7, "CMD:", 4},
     {"DIAG:", 5, "CMD:", 4},
     {"CAL:",  4, "CMD:", 4},
+    /* TELEM handled directly (not aliased to CMD:) */
     /* FF: group — names differ from CMD: */
     {"FF:COG,",         7, "CMD:COG_CFG,",        12},
     {"FF:COG?",          6, "CMD:COG_CFG?",        11},
@@ -938,6 +936,51 @@ static void UART_CommandExecute(const char *cmd)
         FOC_App_Disable(&g_foc_app);
         __enable_irq();
         UART_CommandSendText("CTRL:STOP,OK\r\n");
+        return;
+    }
+
+    /* ── TELEM: Telemetry control ── */
+    if (strcmp(cmd, "CMD:ON") == 0 || strcmp(cmd, "TELEM:ON") == 0) {
+        DrvUart_SetEnable(true);
+        UART_CommandSendText("TELEM:ON,OK\r\n");
+        return;
+    }
+    if (strcmp(cmd, "CMD:OFF") == 0 || strcmp(cmd, "TELEM:OFF") == 0) {
+        DrvUart_SetEnable(false);
+        UART_CommandSendText("TELEM:OFF,OK\r\n");
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:RATE,", &f1) ||
+        UART_CommandParseFloat1(cmd, "TELEM:RATE,", &f1)) {
+        if (f1 >= 0.0f && f1 <= 100.0f) {
+            char resp[64];
+            uint32_t interval_ms;
+            if (f1 < 0.5f) {
+                interval_ms = 0;  /* 0 Hz = stop periodic telemetry */
+            } else {
+                interval_ms = (uint32_t)(1000.0f / f1);
+                if (interval_ms < 10U) interval_ms = 10U;  /* min 10ms = 100Hz */
+            }
+            DrvUart_SetInterval(interval_ms);
+            (void)snprintf(resp, sizeof(resp),
+                     "TELEM:RATE,OK,%luHz (interval=%lums)\r\n",
+                     (unsigned long)(interval_ms > 0 ? 1000/interval_ms : 0),
+                     (unsigned long)interval_ms);
+            UART_CommandSendText(resp);
+        } else {
+            UART_CommandSendText("TELEM:RATE,FAIL,range (0-100Hz)\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:RATE?") == 0 || strcmp(cmd, "TELEM:RATE?") == 0) {
+        char resp[64];
+        uint32_t interval = DrvUart_GetInterval();
+        uint32_t hz = (interval > 0U) ? (1000U / interval) : 0U;
+        (void)snprintf(resp, sizeof(resp),
+                 "TELEM:RATE,OK,%luHz (interval=%lums),enabled=%u\r\n",
+                 (unsigned long)hz, (unsigned long)interval,
+                 DrvUart_IsEnabled() ? 1U : 0U);
+        UART_CommandSendText(resp);
         return;
     }
 

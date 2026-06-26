@@ -237,7 +237,6 @@ typedef struct {
     FOC_ControlMode_t control_mode;  /* 底层FOC模式：力矩/速度/位置 */
     AppMode_t app_mode;              /* 上层应用模式 (Phase 3) */
     float gimbal_ramp_accel_radps2;  /* GIMBAL_SPEED SREF斜坡加速度 */
-    float gimbal_sref_ramped;        /* GIMBAL_SPEED 斜坡后的SREF */
     
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */

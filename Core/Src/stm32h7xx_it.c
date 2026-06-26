@@ -921,11 +921,14 @@ static void UART_CommandExecute(const char *cmd)
             "SYS:CMDS,OK,groups=SYS|CTRL|GAIN|MOTION|FF|CAL|DIAG\r\n"
             " SYS: FW_INFO? CLEAR_FAULT\r\n"
             " CTRL: UNLOCK,N ENABLE,N MODE,N IREF,Id,Iq SREF,speed PREF,pos STOP\r\n"
+            "  APP_MODE? APP_MODE,RAW|JOINT_POS|GIMBAL_SPEED|HOLD\r\n"
             " GAIN: PI_CURRENT,Kp,Ki PI_SPEED,Kp,Ki PD_POS,Kp,Kd\r\n"
-            " MOTION: MOTION_CFG? MOTION_CFG,speed,accel,cruise MOTION_CFG,RESET\r\n"
-            " FF: COG? COG,gain,phase_deg COG_PHASE,rad BEMF? BEMF,0|1 KE_TEMP,Ke\r\n"
-            " FF: RS_MODE? RS_MODE,0|1|2 RS_SCALE,0..1 RS_ADAPTIVE? RS_ADAPTIVE,0|1 RS_SIGN? RS_SIGN,0|1\r\n"
-            " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,1..50 HOME CLEAR_HOME ADC_ZERO,N\r\n"
+            " MOTION: MOTION_CFG? MOTION_CFG,s,a,c MOTION_CFG,RESET\r\n"
+            " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
+            " JOINT: LIMIT? LIMIT,min_deg,max_deg LIMIT,OFF\r\n"
+            " GIMBAL: RAMP? RAMP,accel\r\n"
+            " TELEM: ON OFF RATE,0..100 RATE?\r\n"
+            " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
             " DIAG: FAULT_DETAIL JDIAG PWM_DIAG TLE_RAW TLE_GPIO,0|1\r\n"
         );
         return;
@@ -1018,6 +1021,64 @@ static void UART_CommandExecute(const char *cmd)
             UART_CommandSendText("GIMBAL:RAMP,FAIL,range (0.1-20 rad/s^2)\r\n");
         }
         return;
+    }
+
+    /* ── Phase 4: CAL: Calibration commands ── */
+    if (strcmp(cmd, "CMD:STATUS?") == 0 || strcmp(cmd, "CAL:STATUS?") == 0) {
+        char resp[80];
+        const char *st_name = "IDLE";
+        switch (g_foc_app.mi_handle.state) {
+        case MI_STATE_IDLE: st_name="IDLE"; break;
+        case MI_STATE_PN_IDENTIFY: st_name="PN"; break;
+        case MI_STATE_RS_IDENTIFY: st_name="RS"; break;
+        case MI_STATE_LS_IDENTIFY: st_name="LS"; break;
+        case MI_STATE_KE_IDENTIFY: st_name="KE"; break;
+        case MI_STATE_J_IDENTIFY: st_name="J"; break;
+        case MI_STATE_ENCODER_ALIGN: st_name="ENC_ALIGN"; break;
+        case MI_STATE_MOTION_VERIFY: st_name="MOTION_VERIFY"; break;
+        case MI_STATE_COGGING_IDENTIFY: st_name="COG"; break;
+        case MI_STATE_COMPLETE: st_name="COMPLETE"; break;
+        case MI_STATE_ERROR: st_name="ERROR"; break;
+        }
+        (void)snprintf(resp, sizeof(resp),
+                 "CAL:STATUS,OK,step=%s,error=%u,motor_identified=%u\r\n",
+                 st_name, g_foc_app.mi_handle.error_code, g_foc_app.motor_identified);
+        UART_CommandSendText(resp); return;
+    }
+    if (strcmp(cmd, "CMD:ALL") == 0 || strcmp(cmd, "CAL:ALL") == 0) {
+        if (!g_foc_app.power_unlocked) {
+            UART_CommandSendText("CAL:ALL,FAIL,not_unlocked\r\n"); return;
+        }
+        FOC_App_StartIdentify(&g_foc_app);
+        UART_CommandSendText("CAL:ALL,OK,started\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:ENC") == 0 || strcmp(cmd, "CAL:ENC") == 0) {
+        UART_CommandSendText("CAL:ENC,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:MOTOR") == 0 || strcmp(cmd, "CAL:MOTOR") == 0) {
+        UART_CommandSendText("CAL:MOTOR,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:JB") == 0 || strcmp(cmd, "CAL:JB") == 0) {
+        UART_CommandSendText("CAL:JB,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:COG") == 0 || strcmp(cmd, "CAL:COG") == 0) {
+        UART_CommandSendText("CAL:COG,FAIL,not_implemented (use CAL:ALL)\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:HOME") == 0 || strcmp(cmd, "CAL:HOME") == 0) {
+        /* reuse existing HOME logic below — redirect */
+    }
+    if (strcmp(cmd, "CMD:SAVE") == 0 || strcmp(cmd, "CAL:SAVE") == 0) {
+        if (g_foc_app.motor_identified) {
+            FOC_App_SaveParam(&g_foc_app);
+            UART_CommandSendText("CAL:SAVE,OK\r\n");
+        } else {
+            UART_CommandSendText("CAL:SAVE,FAIL,not_identified\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:ABORT") == 0 || strcmp(cmd, "CAL:ABORT") == 0) {
+        FOC_App_StopIdentify(&g_foc_app);
+        UART_CommandSendText("CAL:ABORT,OK\r\n"); return;
     }
 
     /* ── TELEM: Telemetry control ── */

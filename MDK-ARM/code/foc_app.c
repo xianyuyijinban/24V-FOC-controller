@@ -98,7 +98,6 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->control_mode = FOC_MODE_SPEED;  /* 默认速度模式 */
     handle->app_mode = APP_MODE_RAW;        /* Phase 3: 默认原始模式 */
     handle->gimbal_ramp_accel_radps2 = FOC_GIMBAL_RAMP_ACCEL_DEFAULT;
-    handle->gimbal_sref_ramped = 0.0f;
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
     handle->joint_soft_limit_enabled = FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED;
@@ -1652,6 +1651,12 @@ void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
         return;
     }
 
+    /* Phase 3A: HOLD receives PREF → auto-switch to JOINT_POS
+     * to avoid semantic conflict (HOLD = lock current position). */
+    if (handle->app_mode == APP_MODE_HOLD) {
+        handle->app_mode = APP_MODE_JOINT_POS;
+    }
+
     /* Phase 3: JOINT_POS soft limit clamping */
     if (handle->app_mode == APP_MODE_JOINT_POS && handle->joint_soft_limit_enabled) {
         float pos_deg = pos_ref * 57.29578f;  /* rad → deg for clamping */
@@ -1698,6 +1703,13 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
     }
 
     handle->control_mode = mode;
+
+    /* Phase 3A: explicit CTRL:MODE in non-RAW app mode resets to RAW
+     * to prevent semantic conflict (e.g. JOINT_POS + speed mode). */
+    if (handle->app_mode != APP_MODE_RAW) {
+        handle->app_mode = APP_MODE_RAW;
+    }
+
     if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
         FOC_App_RefreshEncoderFeedback(handle);
         float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
@@ -1734,8 +1746,7 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(
                     handle->theta_mech - handle->motor_param.mech_zero_offset);
-                float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
-                handle->pos_ref = theta_mech_zeroed * encoder_dir_f;
+                handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
             }
         }
         break;
@@ -1743,7 +1754,6 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
     case APP_MODE_GIMBAL_SPEED:
         /* GIMBAL_SPEED: switch to SPEED, enable SREF ramp */
         handle->control_mode = FOC_MODE_SPEED;
-        handle->gimbal_sref_ramped = handle->speed_ref;
         break;
 
     case APP_MODE_HOLD:
@@ -1754,8 +1764,7 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(
                     handle->theta_mech - handle->motor_param.mech_zero_offset);
-                float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
-                handle->pos_ref = theta_mech_zeroed * encoder_dir_f;
+                handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
                 handle->position_ref_user_set = 1U;
             }
         }

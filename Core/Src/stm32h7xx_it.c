@@ -25,6 +25,7 @@
 #include "head.h"
 #include "uart_upload.h"
 #include "adc_sampling.h"
+#include "can_protocol.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -835,6 +836,7 @@ static const CmdAliasEntry s_cmd_aliases[] = {
     {"CAL:",  4, "CMD:", 4},
     {"JOINT:",6, "CMD:", 4},
     {"GIMBAL:",7,"CMD:", 4},
+    {"CAN:",   4, "CMD:", 4},
     /* TELEM handled directly (not aliased to CMD:) */
     /* FF: group — names differ from CMD: */
     {"FF:COG,",         7, "CMD:COG_CFG,",        12},
@@ -1076,6 +1078,30 @@ static void UART_CommandExecute(const char *cmd)
             FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dl);
             UART_CommandSendText("DETENT:CFG,OK\r\n"); return;
         }
+    }
+
+    /* ── Phase 6: CAN commands ── */
+    if (strcmp(cmd, "CMD:NODE?") == 0 || strcmp(cmd, "CAN:NODE?") == 0) {
+        char resp[48];
+        (void)snprintf(resp, sizeof(resp),
+            "CAN:NODE,OK,%u\r\n", CanProtocol_GetNodeId());
+        UART_CommandSendText(resp); return;
+    }
+    if (sscanf(cmd, "CMD:NODE,%ld", &int_arg) == 1 ||
+        sscanf(cmd, "CAN:NODE,%ld", &int_arg) == 1) {
+        if (int_arg >= 1L && int_arg <= (long int)CAN_NODE_ID_MAX) {
+            CanProtocol_SetNodeId((uint8_t)int_arg);
+            UART_CommandSendText("CAN:NODE,OK\r\n");
+        } else {
+            UART_CommandSendText("CAN:NODE,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:HEARTBEAT?") == 0 || strcmp(cmd, "CAN:HEARTBEAT?") == 0) {
+        char resp[48];
+        (void)snprintf(resp, sizeof(resp),
+            "CAN:HEARTBEAT,OK,ok=%u\r\n", CanProtocol_IsHeartbeatOk());
+        UART_CommandSendText(resp); return;
     }
 
     /* ── Phase 4: CAL: Calibration commands ── */

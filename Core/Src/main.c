@@ -33,6 +33,7 @@
 
 #include "head.h"
 #include "demo_button_control.h"
+#include "can_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -260,6 +261,7 @@ int main(void)
   
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
+  CanProtocol_Init(CAN_NODE_ID_DEFAULT);  /* Phase 6 */
   Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   
 	if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t*)urR_data, sizeof(urR_data)) != HAL_OK) {
@@ -380,7 +382,10 @@ int main(void)
     
     /* UART数据上传处理 */
     DrvUart_Process();
-    
+
+    /* Phase 6: CAN protocol heartbeat check */
+    CanProtocol_Process();
+
     /* 故障处理 */
     if (drv8350s.runtime.isFaultActive) {
         /* 故障时仅在功率级仍使能时执行一次下电，避免重复阻塞SPI */

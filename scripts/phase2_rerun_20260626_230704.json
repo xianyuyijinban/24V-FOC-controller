@@ -1,0 +1,270 @@
+{
+  "timestamp": "2026-06-26T23:05:09.007219",
+  "vbus": "12V",
+  "endurance_0.5": {
+    "cycles": 20,
+    "speed": 0.5,
+    "faults": 0,
+    "vq_ok_count": 20,
+    "vq_pk_max_mV": 10.0,
+    "results": [
+      {
+        "cycle": 1,
+        "speed_pos_mean": 0.3032,
+        "speed_neg_mean": -0.5745833333333333,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 2,
+        "speed_pos_mean": 0.5533333333333333,
+        "speed_neg_mean": -0.5691666666666667,
+        "vq_pk_mV": 7.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 3,
+        "speed_pos_mean": 0.5543478260869565,
+        "speed_neg_mean": -0.5695833333333333,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 4,
+        "speed_pos_mean": 0.5625,
+        "speed_neg_mean": -0.5632,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 5,
+        "speed_pos_mean": 0.5495833333333333,
+        "speed_neg_mean": -0.5733333333333334,
+        "vq_pk_mV": 7.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 6,
+        "speed_pos_mean": 0.585,
+        "speed_neg_mean": -0.5684,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 7,
+        "speed_pos_mean": 0.5650000000000001,
+        "speed_neg_mean": -0.5675,
+        "vq_pk_mV": 7.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 8,
+        "speed_pos_mean": 0.5579166666666666,
+        "speed_neg_mean": -0.5876,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 9,
+        "speed_pos_mean": 0.5695833333333333,
+        "speed_neg_mean": -0.5648,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 10,
+        "speed_pos_mean": 0.5420833333333334,
+        "speed_neg_mean": -0.5666666666666667,
+        "vq_pk_mV": 4.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 11,
+        "speed_pos_mean": 0.5420833333333334,
+        "speed_neg_mean": -0.5652,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 12,
+        "speed_pos_mean": 0.54375,
+        "speed_neg_mean": -0.5629166666666666,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 13,
+        "speed_pos_mean": 0.56125,
+        "speed_neg_mean": -0.57875,
+        "vq_pk_mV": 7.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 14,
+        "speed_pos_mean": 0.5700000000000001,
+        "speed_neg_mean": -0.5866666666666667,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 15,
+        "speed_pos_mean": 0.56875,
+        "speed_neg_mean": -0.5888,
+        "vq_pk_mV": 5.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 16,
+        "speed_pos_mean": 0.5729166666666666,
+        "speed_neg_mean": -0.5862499999999999,
+        "vq_pk_mV": 10.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 17,
+        "speed_pos_mean": 0.5695833333333333,
+        "speed_neg_mean": -0.5808,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 18,
+        "speed_pos_mean": 0.5820833333333333,
+        "speed_neg_mean": -0.5845833333333333,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 19,
+        "speed_pos_mean": 0.5729166666666666,
+        "speed_neg_mean": -0.5866666666666667,
+        "vq_pk_mV": 8.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      },
+      {
+        "cycle": 20,
+        "speed_pos_mean": 0.565,
+        "speed_neg_mean": -0.5808333333333333,
+        "vq_pk_mV": 6.0,
+        "fault": null,
+        "fp_fault": null,
+        "fz1_fault": null,
+        "fn_fault": null,
+        "fz2_fault": null
+      }
+    ]
+  },
+  "position": {
+    "PREF=+0.0": {
+      "n_frames": 96,
+      "mean_speed": -0.0015624999999999999,
+      "drift_ok": true,
+      "fault": null,
+      "status": "PASS"
+    },
+    "PREF=+5.0": {
+      "n_frames": 95,
+      "mean_speed": -0.0007368421052631579,
+      "drift_ok": true,
+      "fault": null,
+      "status": "PASS"
+    },
+    "PREF=-5.0": {
+      "n_frames": 100,
+      "mean_speed": 0.0006,
+      "drift_ok": true,
+      "fault": null,
+      "status": "PASS"
+    },
+    "PREF=+20.0": {
+      "n_frames": 100,
+      "mean_speed": -0.0009,
+      "drift_ok": true,
+      "fault": null,
+      "status": "PASS"
+    },
+    "PREF=-20.0": {
+      "n_frames": 99,
+      "mean_speed": 0.002121212121212121,
+      "drift_ok": true,
+      "fault": null,
+      "status": "PASS"
+    }
+  }
+}

@@ -27,7 +27,8 @@ typedef enum {
     UART_PRIO_P2 = 2,  /* periodic telemetry */
 } UartTxPrio;
 
-static uint8_t s_txBuf[DRV_UART_BUF_SIZE];
+static uint8_t s_txBuf[DRV_UART_BUF_SIZE];       /* staging buffer for format+enqueue */
+static uint8_t s_txITBuf[DRV_UART_BUF_SIZE];      /* dedicated IT transmission buffer (Phase 2b fix) */
 static uint8_t s_faultDetailBuf[DRV_UART_BUF_SIZE];
 static volatile bool s_txITActive = false;
 static uint8_t  s_txRing[UART_TX_RING_SIZE];
@@ -1164,15 +1165,15 @@ static void UartTx_StartIT(void)
         return;
     }
 
-    /* Copy to flat TX buffer for HAL IT (HAL expects contiguous buffer) */
+    /* Copy to dedicated IT TX buffer (Phase 2b: avoids race with s_txBuf staging) */
     chunk = (avail > DRV_UART_BUF_SIZE) ? (uint16_t)DRV_UART_BUF_SIZE : avail;
     for (i = 0U; i < chunk; i++) {
-        s_txBuf[i] = s_txRing[s_txRingTail];
+        s_txITBuf[i] = s_txRing[s_txRingTail];
         s_txRingTail = (uint16_t)((s_txRingTail + 1U) % UART_TX_RING_SIZE);
     }
 
     s_txITActive = true;
-    if (HAL_UART_Transmit_IT(s_huart, s_txBuf, chunk) != HAL_OK) {
+    if (HAL_UART_Transmit_IT(s_huart, s_txITBuf, chunk) != HAL_OK) {
         s_txITActive = false;
         s_stats.txErrors++;
     }

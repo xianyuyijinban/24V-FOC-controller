@@ -111,6 +111,14 @@ extern "C" {
 #define FOC_GIMBAL_RAMP_ACCEL_DEFAULT           2.0f   /* GIMBAL SREF斜坡默认加速度 rad/s^2 */
 #define FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED    1U
 
+#define FOC_SPRING_K_DEFAULT       0.5f   /* 弹簧刚度 A/rad */
+#define FOC_SPRING_D_DEFAULT       0.05f  /* 阻尼系数 A/(rad/s) */
+#define FOC_SPRING_LIMIT_DEFAULT   0.30f  /* 弹簧力限幅 A */
+#define FOC_DETENT_COUNT_DEFAULT   12.0f  /* 卡点数量 (12/圈 = 每30°) */
+#define FOC_DETENT_STRENGTH_DEFAULT 1.0f  /* 吸附强度 A/rad */
+#define FOC_DETENT_WIDTH_DEFAULT   0.13f  /* 卡点宽度 ~7.5° */
+#define FOC_DETENT_LIMIT_DEFAULT   0.25f  /* 卡点力限幅 A */
+
 /* 固件版本信息 */
 #define FOC_FW_VERSION          "1.0.0"
 #define FOC_PARAM_VERSION       "1"
@@ -160,6 +168,8 @@ typedef enum {
     APP_MODE_JOINT_POS,         /* 关节位置模式：底层POSITION + 软限位 + fault自动STOP */
     APP_MODE_GIMBAL_SPEED,      /* 云台速度模式：底层SPEED + SREF斜坡平滑 */
     APP_MODE_HOLD,              /* 当前位置保持：底层POSITION + 锁定当前角度 */
+    APP_MODE_SPRING_DAMPER,     /* 虚拟弹簧阻尼：Iq = K*(theta_ref - theta) - D*speed */
+    APP_MODE_DETENT,            /* 虚拟卡点：吸附到最近 detent 位置 */
 } AppMode_t;
 
 /* 保护参数 */
@@ -239,6 +249,14 @@ typedef struct {
     float gimbal_ramp_accel_radps2;  /* GIMBAL_SPEED SREF斜坡加速度 */
     uint8_t cal_state;               /* Phase 4: 0=idle 1=running 2=done 3=failed 4=aborted */
     uint8_t cal_last_error;          /* Phase 4: last calibration error code */
+    /* Phase 3B: spring-damper / detent config */
+    float    spring_K;               /* 弹簧刚度 A/rad */
+    float    spring_D;               /* 阻尼系数 A/(rad/s) */
+    float    spring_limit_A;         /* 弹簧力限幅 A */
+    float    detent_count;           /* 卡点数量 (每圈) */
+    float    detent_strength;        /* 卡点吸附强度 A/rad */
+    float    detent_width_rad;       /* 卡点宽度 rad */
+    float    detent_limit_A;         /* 卡点力限幅 A */
 
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */
@@ -398,6 +416,8 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
 void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);
+void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit);
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit);
 uint8_t FOC_App_CalIsBusy(FOC_AppHandle_t *handle);
 uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);

@@ -100,6 +100,13 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->gimbal_ramp_accel_radps2 = FOC_GIMBAL_RAMP_ACCEL_DEFAULT;
     handle->cal_state = 0U;                    /* Phase 4: idle */
     handle->cal_last_error = 0U;
+    handle->spring_K        = FOC_SPRING_K_DEFAULT;
+    handle->spring_D        = FOC_SPRING_D_DEFAULT;
+    handle->spring_limit_A  = FOC_SPRING_LIMIT_DEFAULT;
+    handle->detent_count    = FOC_DETENT_COUNT_DEFAULT;
+    handle->detent_strength = FOC_DETENT_STRENGTH_DEFAULT;
+    handle->detent_width_rad= FOC_DETENT_WIDTH_DEFAULT;
+    handle->detent_limit_A  = FOC_DETENT_LIMIT_DEFAULT;
     BlackBox_Init();                           /* Phase 5A */
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
@@ -1141,10 +1148,45 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             handle->position_loop_iq_neg_sat_diag = 0U;
         }
         FOC_App_ClampSpeedPiIntegral(&handle->pi_speed, iq_limit_pos, iq_limit_neg);
-        /* Speed PI output is already in q-axis convention.
-         * No encoder_dir mapping needed here — the error (speed_ref - speed_feedback)
-         * is computed in user-frame, but the PI output directly drives q-axis current
-         * whose positive direction matches positive user-frame speed (verified: +Iq -> +ω_user). */
+
+        /* ── Phase 3B: Spring-Damper / Detent torque injection ── */
+        if (handle->app_mode == APP_MODE_SPRING_DAMPER && handle->motor_identified) {
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_error = FOC_AngleNormalize(
+                handle->pos_ref - FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed));
+            float spring_torque = handle->spring_K * pos_error
+                               - handle->spring_D * speed_feedback;
+            spring_torque = FOC_Saturate(spring_torque,
+                                         handle->spring_limit_A,
+                                        -handle->spring_limit_A);
+            iq_ref_mech += spring_torque;
+        } else if (handle->app_mode == APP_MODE_DETENT && handle->motor_identified) {
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            float detent_spacing = (2.0f * FOC_PI) / handle->detent_count;
+            float nearest = roundf(pos_rad / detent_spacing) * detent_spacing;
+            float detent_error = FOC_AngleNormalize(nearest - pos_rad);
+            float detent_torque = handle->detent_strength * detent_error;
+            /* Width: ramp down outside detent_width */
+            {
+                float half_w = handle->detent_width_rad * 0.5f;
+                float abs_e = fabsf(detent_error);
+                if (abs_e > handle->detent_width_rad) {
+                    detent_torque = 0.0f;
+                } else if (abs_e > half_w) {
+                    float ramp = 1.0f - (abs_e - half_w) / half_w;
+                    detent_torque *= (ramp > 0.0f) ? ramp : 0.0f;
+                }
+            }
+            detent_torque = FOC_Saturate(detent_torque,
+                                         handle->detent_limit_A,
+                                        -handle->detent_limit_A);
+            iq_ref_mech += detent_torque;
+        }
+        iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
+
         float iq_cmd = iq_ref_mech;
 
         /* FFDiag 汇总 */
@@ -1776,6 +1818,39 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
             }
         }
         break;
+
+    case APP_MODE_SPRING_DAMPER:
+        /* SPRING_DAMPER: position loop drives virtual spring torque */
+        handle->control_mode = FOC_MODE_POSITION;
+        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+            FOC_App_RefreshEncoderFeedback(handle);
+            {
+                float theta_mech_zeroed = FOC_AngleNormalize(
+                    handle->theta_mech - handle->motor_param.mech_zero_offset);
+                handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            }
+        }
+        break;
+
+    case APP_MODE_DETENT:
+        /* DETENT: position loop holds at nearest detent */
+        handle->control_mode = FOC_MODE_POSITION;
+        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+            FOC_App_RefreshEncoderFeedback(handle);
+            {
+                float theta_mech_zeroed = FOC_AngleNormalize(
+                    handle->theta_mech - handle->motor_param.mech_zero_offset);
+                float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+                /* Snap to nearest detent */
+                if (handle->detent_count > 0.5f) {
+                    float detent_spacing = (2.0f * FOC_PI) / handle->detent_count;
+                    pos_rad = roundf(pos_rad / detent_spacing) * detent_spacing;
+                }
+                handle->pos_ref = FOC_AngleNormalize(pos_rad);
+                handle->position_ref_user_set = 1U;
+            }
+        }
+        break;
     }
 }
 
@@ -1792,6 +1867,32 @@ void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2)
     if (handle == NULL) return;
     if (accel_radps2 < 0.1f) accel_radps2 = 0.1f;
     handle->gimbal_ramp_accel_radps2 = accel_radps2;
+}
+
+void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit)
+{
+    if (handle == NULL) return;
+    if (K < 0.0f) K = 0.0f;
+    if (D < 0.0f) D = 0.0f;
+    if (limit < 0.01f) limit = 0.01f;
+    if (limit > 1.0f) limit = 1.0f;
+    handle->spring_K = K;
+    handle->spring_D = D;
+    handle->spring_limit_A = limit;
+}
+
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit)
+{
+    if (handle == NULL) return;
+    if (count < 1.0f) count = 1.0f;
+    if (strength < 0.0f) strength = 0.0f;
+    if (width < 0.01f) width = 0.01f;
+    if (limit < 0.01f) limit = 0.01f;
+    if (limit > 1.0f) limit = 1.0f;
+    handle->detent_count = count;
+    handle->detent_strength = strength;
+    handle->detent_width_rad = width;
+    handle->detent_limit_A = limit;
 }
 
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)

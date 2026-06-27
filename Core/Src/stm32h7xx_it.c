@@ -948,9 +948,11 @@ static void UART_CommandExecute(const char *cmd)
     if (strcmp(cmd, "CMD:APP_MODE?") == 0) {
         char resp[64];
         const char *name = "RAW";
-        if (g_foc_app.app_mode == APP_MODE_JOINT_POS)    name = "JOINT_POS";
+        if (g_foc_app.app_mode == APP_MODE_JOINT_POS)       name = "JOINT_POS";
         else if (g_foc_app.app_mode == APP_MODE_GIMBAL_SPEED) name = "GIMBAL_SPEED";
-        else if (g_foc_app.app_mode == APP_MODE_HOLD)    name = "HOLD";
+        else if (g_foc_app.app_mode == APP_MODE_HOLD)       name = "HOLD";
+        else if (g_foc_app.app_mode == APP_MODE_SPRING_DAMPER) name = "SPRING_DAMPER";
+        else if (g_foc_app.app_mode == APP_MODE_DETENT)     name = "DETENT";
         (void)snprintf(resp, sizeof(resp),
                  "APP_MODE,OK,%s (ctrl_mode=%u)\r\n", name, g_foc_app.control_mode);
         UART_CommandSendText(resp);
@@ -971,6 +973,14 @@ static void UART_CommandExecute(const char *cmd)
     if (strcmp(cmd, "CMD:APP_MODE,HOLD") == 0) {
         FOC_App_SetAppMode(&g_foc_app, APP_MODE_HOLD);
         UART_CommandSendText("APP_MODE,OK,HOLD\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,SPRING_DAMPER") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_SPRING_DAMPER);
+        UART_CommandSendText("APP_MODE,OK,SPRING_DAMPER\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,DETENT") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_DETENT);
+        UART_CommandSendText("APP_MODE,OK,DETENT\r\n"); return;
     }
 
     /* ── Phase 3: JOINT soft limit commands ── */
@@ -1021,6 +1031,51 @@ static void UART_CommandExecute(const char *cmd)
             UART_CommandSendText("GIMBAL:RAMP,FAIL,range (0.1-20 rad/s^2)\r\n");
         }
         return;
+    }
+
+    /* ── Phase 3B: SPRING:CFG commands ── */
+    if (strcmp(cmd, "CMD:CFG?") == 0 || strcmp(cmd, "SPRING:CFG?") == 0) {
+        char resp[100];
+        (void)snprintf(resp, sizeof(resp),
+            "SPRING:CFG,OK,K=%.3f,D=%.3f,limit=%.3f\r\n",
+            (double)g_foc_app.spring_K, (double)g_foc_app.spring_D,
+            (double)g_foc_app.spring_limit_A);
+        UART_CommandSendText(resp); return;
+    }
+    if (UART_CommandParseFloat2(cmd, "CMD:CFG,", &f1, &f2) ||
+        UART_CommandParseFloat2(cmd, "SPRING:CFG,", &f1, &f2)) {
+        float K = f1, D = f2, limit = FOC_SPRING_LIMIT_DEFAULT;
+        if (UART_CommandParseFloat2(cmd, "SPRING:CFG,", &f1, &f2)) {
+            /* 3-param form: re-parse; use helper */;
+        }
+        (void)K; (void)D;  /* suppress unused warning */
+        UART_CommandSendText("SPRING:CFG,FAIL,parse (use SPRING:CFG?,K,D,limit)\r\n"); return;
+    }
+    {
+        float sK, sD, sL;
+        if (sscanf(cmd, "CMD:CFG,%f,%f,%f", &sK, &sD, &sL) == 3 ||
+            sscanf(cmd, "SPRING:CFG,%f,%f,%f", &sK, &sD, &sL) == 3) {
+            FOC_App_SetSpringCfg(&g_foc_app, sK, sD, sL);
+            UART_CommandSendText("SPRING:CFG,OK\r\n"); return;
+        }
+    }
+
+    /* ── Phase 3B: DETENT:CFG commands ── */
+    if (strcmp(cmd, "CMD:DETENT_CFG?") == 0 || strcmp(cmd, "DETENT:CFG?") == 0) {
+        char resp[120];
+        (void)snprintf(resp, sizeof(resp),
+            "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,limit=%.3f\r\n",
+            (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
+            (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_limit_A);
+        UART_CommandSendText(resp); return;
+    }
+    {
+        float dc, ds, dw, dl;
+        if (sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4 ||
+            sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4) {
+            FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dl);
+            UART_CommandSendText("DETENT:CFG,OK\r\n"); return;
+        }
     }
 
     /* ── Phase 4: CAL: Calibration commands ── */

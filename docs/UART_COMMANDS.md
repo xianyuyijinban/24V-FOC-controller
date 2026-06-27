@@ -36,7 +36,7 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 | `CTRL:MODE,N` | `0`=TORQUE, `1`=SPEED, `2`=POSITION | Set control mode |
 | `CTRL:IREF,Id,Iq` | `float,float` A | Set current reference (torque mode) |
 | `CTRL:SREF,speed` | `float` rad/s | Set speed reference (clamped to MOTION speed_limit) |
-| `CTRL:PREF,pos` | `float` deg | Set position reference (position mode) |
+| `CTRL:PREF,pos` | `float` rad | Set position reference (position mode) |
 | `CTRL:STOP` | — | Zero speed ref + disable PWM |
 
 **Legacy**: `CMD:UNLOCK,N`, `CMD:ENABLE,N`, `CMD:MODE,N`, `CMD:IREF,Id,Iq`, `CMD:SREF,speed`, `CMD:PREF,pos`
@@ -132,7 +132,7 @@ BEMF        = OFF
 COG         = 0.25 / +60deg
 
 MOTION_CFG: speed_limit=1.0, accel=2.0, cruise=0.3
-VBUS_LIMIT: 10-16V (12V bench)
+VBUS_LIMIT: 10-18V (12V bench)
 ```
 
 Verify baseline: `SYS:FW_INFO?` → `baseline=12V_STANDARD`

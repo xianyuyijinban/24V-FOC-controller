@@ -938,10 +938,11 @@ static void UART_CommandExecute(const char *cmd)
 
     /* ── CTRL:STOP convenience alias ── */
     if (strcmp(cmd, "CMD:STOP") == 0) {
-        __disable_irq();
+        /* Phase 2a: no IRQ lock — HAL/SPI inside Disable need interrupts.
+           Also call StopIdentify: CAL:STOP aliases here and must abort identify. */
+        FOC_App_StopIdentify(&g_foc_app);
         FOC_App_SetSpeedRef(&g_foc_app, 0.0f);
         FOC_App_Disable(&g_foc_app);
-        __enable_irq();
         UART_CommandSendText("CTRL:STOP,OK\r\n");
         return;
     }
@@ -1758,13 +1759,15 @@ static void UART_CommandExecute(const char *cmd)
     /* BEMF 前馈运行时开关 */
     if (strcmp(cmd, "CMD:BEMF_CFG?") == 0) {
         char resp[128];
+        char keText[16], ketText[16];
+        DrvUart_FormatFixed(keText,  sizeof(keText),  g_foc_app.foc.bemf_Ke,      6U);
+        DrvUart_FormatFixed(ketText, sizeof(ketText), g_foc_app.foc.bemf_Ke_temp, 6U);
         (void)snprintf(resp, sizeof(resp),
-                 "BEMF_CFG,OK,user=%u,hw=%u,blocked=%u,Ke=%.6f,Ke_temp=%.6f\r\n",
+                 "BEMF_CFG,OK,user=%u,hw=%u,blocked=%u,Ke=%s,Ke_temp=%s\r\n",
                  g_foc_app.foc.bemf_user_enable,
                  g_foc_app.foc.bemf_enabled,
                  g_foc_app.foc.bemf_blocked,
-                 (double)g_foc_app.foc.bemf_Ke,
-                 (double)g_foc_app.foc.bemf_Ke_temp);
+                 keText, ketText);
         UART_CommandSendText(resp);
         return;
     }

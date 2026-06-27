@@ -1651,7 +1651,7 @@ void DrvUart_QueryCogCfg(void)
     char gainText[16], phaseText[16];
     int16_t len;
 
-    if (s_huart == NULL || s_txITActive) {
+    if (s_huart == NULL) {
         return;
     }
 
@@ -1664,7 +1664,8 @@ void DrvUart_QueryCogCfg(void)
                             "COG_CFG,gain=%s,phase_deg=%s\r\n",
                             gainText, phaseText);
     if (len > 0 && len < DRV_UART_BUF_SIZE) {
-        DrvUart_StartSend((uint16_t)len);
+        /* Use P0 priority — never dropped, same as other command responses */
+        DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P0);
     }
 }
 

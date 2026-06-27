@@ -81,8 +81,8 @@ extern "C" {
 
 /* 保护阈值默认值 */
 #define FOC_DEFAULT_OVERCURRENT_LIMIT_A   3.0f    /* 过流保护阈值 A */
-#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   30.0f   /* 24V系统过压阈值 V */
-#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  18.0f   /* 24V系统欠压阈值 V */
+#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   18.0f   /* 12V系统过压阈值 V */
+#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  10.0f   /* 12V系统欠压阈值 V */
 #define FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V  1.0f    /* 严重电压故障相对告警阈值的额外裕量 */
 #define FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V 0.5f /* 严重电压故障自动恢复滞回 */
 #define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */

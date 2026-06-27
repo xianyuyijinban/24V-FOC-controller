@@ -349,6 +349,47 @@ void FOC_App_RefreshTelemetry(FOC_AppHandle_t *handle);
 uint32_t FOC_App_GetVoltageWarningFlags(const FOC_AppHandle_t *handle);
 uint8_t FOC_App_GetVoltageTripFault(const FOC_AppHandle_t *handle, FOC_FaultCode_t *fault);
 uint8_t FOC_App_IsVoltageFaultRecovered(const FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
+
+/* ── Phase 5A: Black Box ───────────────────────────────────── */
+
+#define BLACKBOX_SAMPLES   100
+#define BLACKBOX_RATE_HZ   50
+
+typedef struct {
+    uint32_t timestamp_ms;
+    uint8_t  state;
+    uint8_t  control_mode;
+    uint8_t  app_mode;
+    uint8_t  fault_code;
+    uint32_t warning_flags;
+    float    Vbus;
+    float    theta_mech;
+    float    speed_mech;
+    float    Id;
+    float    Iq;
+    float    Id_ref;
+    float    Iq_ref;
+    float    Vd;
+    float    Vq;
+    float    speed_ref;
+    float    pos_ref;
+    uint32_t fault_flags;
+    uint16_t drv_fault1;
+    uint16_t drv_vgs2;
+    uint16_t encoder_crc_count;
+    uint8_t  encoder_valid;
+} BlackBoxSample_t;
+
+void     BlackBox_Init(void);
+void     BlackBox_Sample(void);
+void     BlackBox_Freeze(uint8_t reason);
+void     BlackBox_Clear(void);
+uint8_t  BlackBox_GetCount(void);
+uint8_t  BlackBox_IsFrozen(void);
+uint8_t  BlackBox_GetFreezeReason(void);
+uint32_t BlackBox_GetFreezeTime(void);
+const BlackBoxSample_t *BlackBox_GetSample(uint8_t index);  /* 0 = oldest */
+
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);

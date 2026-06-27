@@ -100,6 +100,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->gimbal_ramp_accel_radps2 = FOC_GIMBAL_RAMP_ACCEL_DEFAULT;
     handle->cal_state = 0U;                    /* Phase 4: idle */
     handle->cal_last_error = 0U;
+    BlackBox_Init();                           /* Phase 5A */
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
     handle->joint_soft_limit_enabled = FOC_JOINT_SOFT_LIMIT_DEFAULT_ENABLED;
@@ -576,6 +577,8 @@ static void FOC_App_EnterFault(FOC_AppHandle_t *handle, FOC_FaultCode_t fault)
     handle->state = FOC_STATE_FAULT;
     handle->enable_identify = 0U;
     handle->stall_mode_armed = 0U;
+
+    BlackBox_Freeze((uint8_t)fault);  /* Phase 5A: freeze on fault */
 }
 
 static uint8_t FOC_App_IsEncoderFaultActive(void)
@@ -710,6 +713,8 @@ static uint8_t FOC_App_ShouldBootstrapNeutralPwm(const FOC_AppHandle_t *handle, 
  */
 void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 {
+    BlackBox_Sample();  /* Phase 5A: 50Hz sampling */
+
     const float Ts = 1.0f / (float)FOC_SPEED_LOOP_FREQ;
     const float wc = 2.0f * FOC_PI * FOC_SPEED_LPF_CUTOFF_HZ;
     float alpha = (wc * Ts) / (1.0f + wc * Ts);
@@ -2315,4 +2320,102 @@ uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle)
     if (!TLE5012_IsDataValid()) return 6U;
 
     return 0U;  /* OK */
+}
+
+/* ── Phase 5A: RAM Fault Black Box ──────────────────────────── */
+
+extern FOC_AppHandle_t g_foc_app;
+
+static BlackBoxSample_t s_bb[BLACKBOX_SAMPLES];
+static uint8_t  s_bb_head = 0U;
+static uint8_t  s_bb_count = 0U;
+static uint8_t  s_bb_frozen = 0U;
+static uint8_t  s_bb_freeze_reason = 0U;
+static uint32_t s_bb_freeze_time = 0U;
+static uint16_t s_bb_decim = 0U;   /* decimation counter for 50Hz from 2kHz */
+
+void BlackBox_Init(void)
+{
+    s_bb_head = 0U;
+    s_bb_count = 0U;
+    s_bb_frozen = 0U;
+    s_bb_freeze_reason = 0U;
+    s_bb_freeze_time = 0U;
+    s_bb_decim = 0U;
+}
+
+void BlackBox_Sample(void)
+{
+    BlackBoxSample_t *s;
+    extern DRV8350S_Handle_t drv8350s;
+
+    if (s_bb_frozen) return;
+
+    /* Decimate to 50Hz from 2kHz speed loop (40:1) */
+    s_bb_decim++;
+    if (s_bb_decim < (2000U / BLACKBOX_RATE_HZ)) return;
+    s_bb_decim = 0U;
+
+    s = &s_bb[s_bb_head];
+
+    s->timestamp_ms   = HAL_GetTick();
+    s->state          = (uint8_t)g_foc_app.state;
+    s->control_mode   = (uint8_t)g_foc_app.control_mode;
+    s->app_mode       = (uint8_t)g_foc_app.app_mode;
+    s->fault_code     = (uint8_t)g_foc_app.fault_code;
+    s->warning_flags  = g_foc_app.warning_flags;
+    s->Vbus           = g_foc_app.Vbus;
+    s->theta_mech     = g_foc_app.theta_mech;
+    s->speed_mech     = g_foc_app.speed_mech;
+    s->Id             = g_foc_app.foc.Idq.d;
+    s->Iq             = g_foc_app.foc.Idq.q;
+    s->Id_ref         = g_foc_app.foc.Id_ref;
+    s->Iq_ref         = g_foc_app.foc.Iq_ref;
+    s->Vd             = g_foc_app.foc.Vdq.d;
+    s->Vq             = g_foc_app.foc.Vdq.q;
+    s->speed_ref      = g_foc_app.speed_ref;
+    s->pos_ref        = g_foc_app.pos_ref;
+    s->fault_flags    = drv8350s.runtime.faultFlags;
+    s->drv_fault1     = drv8350s.runtime.regFaultStatus1;
+    s->drv_vgs2       = drv8350s.runtime.regVgsStatus2;
+    s->encoder_crc_count = 0U;
+    s->encoder_valid  = TLE5012_IsDataValid() ? 1U : 0U;
+
+    s_bb_head = (uint8_t)((s_bb_head + 1U) % BLACKBOX_SAMPLES);
+    if (s_bb_count < BLACKBOX_SAMPLES) s_bb_count++;
+}
+
+void BlackBox_Freeze(uint8_t reason)
+{
+    if (s_bb_frozen) return;
+    /* Only freeze if we have enough pre-fault history (>=10 samples = 0.2s) */
+    if (s_bb_count < 10U) return;
+    s_bb_frozen = 1U;
+    s_bb_freeze_reason = reason;
+    s_bb_freeze_time = HAL_GetTick();
+    /* Capture one final sample at freeze moment */
+    BlackBox_Sample();
+}
+
+void BlackBox_Clear(void)
+{
+    s_bb_head = 0U;
+    s_bb_count = 0U;
+    s_bb_frozen = 0U;
+    s_bb_freeze_reason = 0U;
+    s_bb_freeze_time = 0U;
+}
+
+uint8_t BlackBox_GetCount(void)   { return s_bb_count; }
+uint8_t BlackBox_IsFrozen(void)    { return s_bb_frozen; }
+uint8_t BlackBox_GetFreezeReason(void) { return s_bb_freeze_reason; }
+uint32_t BlackBox_GetFreezeTime(void)  { return s_bb_freeze_time; }
+
+const BlackBoxSample_t *BlackBox_GetSample(uint8_t index)
+{
+    uint8_t idx;
+    if (index >= s_bb_count) return NULL;
+    /* index 0 = oldest, index (count-1) = newest */
+    idx = (uint8_t)((s_bb_head + BLACKBOX_SAMPLES - s_bb_count + index) % BLACKBOX_SAMPLES);
+    return &s_bb[idx];
 }

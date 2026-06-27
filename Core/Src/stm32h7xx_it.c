@@ -1321,6 +1321,69 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* ── Phase 5A: Black Box ── */
+    if (strcmp(cmd, "CMD:BLACKBOX?") == 0 || strcmp(cmd, "DIAG:BLACKBOX?") == 0) {
+        char resp[120];
+        (void)snprintf(resp, sizeof(resp),
+            "BLACKBOX,OK,frozen=%u,count=%u,reason=%u,time=%lu\r\n",
+            BlackBox_IsFrozen(), BlackBox_GetCount(),
+            BlackBox_GetFreezeReason(), (unsigned long)BlackBox_GetFreezeTime());
+        UART_CommandSendText(resp); return;
+    }
+    if (strcmp(cmd, "CMD:BLACKBOX,CLEAR") == 0 || strcmp(cmd, "DIAG:BLACKBOX,CLEAR") == 0) {
+        BlackBox_Clear();
+        UART_CommandSendText("BLACKBOX,CLEAR,OK\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:BLACKBOX,HEAD") == 0 || strcmp(cmd, "DIAG:BLACKBOX,HEAD") == 0) {
+        uint8_t i, count = BlackBox_GetCount();
+        char line[128];
+        int8_t start = (int8_t)count - 5;
+        if (start < 0) start = 0;
+        if (count == 0U) {
+            UART_CommandSendText("BLACKBOX,HEAD,OK,empty\r\n"); return;
+        }
+        for (i = (uint8_t)start; i < count; i++) {
+            const BlackBoxSample_t *s = BlackBox_GetSample(i);
+            if (s == NULL) continue;
+            (void)snprintf(line, sizeof(line),
+                "BB,%lu,%u,%u,%u,%.2f,%.3f,%.3f,%.3f,0x%08lX\r\n",
+                (unsigned long)s->timestamp_ms,
+                s->state, s->fault_code, s->app_mode,
+                (double)s->Vbus, (double)s->speed_mech,
+                (double)s->Iq, (double)s->Vq,
+                (unsigned long)s->fault_flags);
+            UART_CommandSendText(line);
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:BLACKBOX,DUMP") == 0 || strcmp(cmd, "DIAG:BLACKBOX,DUMP") == 0) {
+        uint8_t i, count = BlackBox_GetCount();
+        char line[160];
+        if (count == 0U) {
+            UART_CommandSendText("BLACKBOX,DUMP,OK,empty\r\n"); return;
+        }
+        for (i = 0U; i < count; i++) {
+            const BlackBoxSample_t *s = BlackBox_GetSample(i);
+            if (s == NULL) continue;
+            (void)snprintf(line, sizeof(line),
+                "BB,%lu,%u,%u,%u,%u,0x%08lX,%.3f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0x%08lX,%u,%u,%u\r\n",
+                (unsigned long)s->timestamp_ms,
+                s->state, s->control_mode, s->app_mode,
+                s->fault_code, (unsigned long)s->warning_flags,
+                (double)s->Vbus, (double)s->theta_mech,
+                (double)s->speed_mech, (double)s->Id,
+                (double)s->Iq, (double)s->Id_ref,
+                (double)s->Iq_ref, (double)s->Vd,
+                (double)s->Vq, (double)s->speed_ref,
+                (double)s->pos_ref,
+                (unsigned long)s->fault_flags,
+                s->drv_fault1, s->drv_vgs2,
+                s->encoder_valid);
+            UART_CommandSendText(line);
+        }
+        UART_CommandSendText("BLACKBOX,DUMP,OK,end\r\n"); return;
+    }
+
     if (sscanf(cmd, "CMD:STALL_MODE,%ld", &int_arg) == 1) {
         if (int_arg != 0) {
             g_foc_app.stall_mode_armed = 1U;

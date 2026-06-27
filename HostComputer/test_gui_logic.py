@@ -45,9 +45,9 @@ from gui_logic import (
 
 
 class TestGuiLogic(unittest.TestCase):
-    def test_gui_profile_defaults_to_230400_baud(self):
+    def test_gui_profile_defaults_to_1000000_baud(self):
         profile = GuiProfile()
-        self.assertEqual(profile.baud_rate, 230400)
+        self.assertEqual(profile.baud_rate, 1000000)
         self.assertEqual(profile.undervoltage_limit, 18.0)
         self.assertEqual(profile.overvoltage_limit, 30.0)
         self.assertEqual(profile.motor_pn, 11)

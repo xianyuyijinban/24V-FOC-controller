@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 
 PORT = 'COM9'
-BAUD = 230400
+BAUD = 1152000
 
 KI_VALUES = [0.0005, 0.001, 0.002]
 SREF_VALUES = [0.05, 0.10, 0.20, 0.30, 1.0]

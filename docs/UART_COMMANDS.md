@@ -1,6 +1,9 @@
 # UART Command Reference — 12V FOC Controller v1.0.0
 
-**Baseline**: `12V_STANDARD` | **Baud**: 230400 | **Protocol**: `CMD:\r\n` or `<GROUP>:<CMD>\r\n`
+**Baseline**: `12V_STANDARD` | **Baud**: `1000000` (V1.1) | **Protocol**: `CMD:\r\n` or `<GROUP>:<CMD>\r\n`
+
+> ⚠️ `1152000` is **disabled** — unreliable bidirectional link on CH340C + STM32H743 USART1.
+> Backup: `921600`. See `PROGRESS.md` 2026-06-28 baud sweep for details.
 
 All new commands follow the grouped prefix convention. Legacy `CMD:` prefix commands remain fully functional.
 
@@ -119,6 +122,32 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 | `DIAG:TLE_GPIO,0\|1` | `int` | Start/stop TLE5012 GPIO diagnostic (5s) |
 
 **Legacy**: `CMD:FAULT_DETAIL`, `CMD:JDIAG`, `CMD:PWM_DIAG`, `CMD:TLE_RAW`, `CMD:TLE_GPIO_DIAG,N`
+
+---
+
+## TELEM — Telemetry
+
+| Command | Params | Description |
+|---------|--------|-------------|
+| `TELEM:RATE?` | — | Query current telemetry rate (Hz) and interval (ms) |
+| `TELEM:RATE,N` | `0–100` Hz | Set N-frame telemetry rate |
+| `TELEM:CUR?` | — | Query current stream: mode, rate, sent, dropped |
+| `TELEM:CUR,OFF` | — | Disable current stream, restore normal telemetry rate |
+| `TELEM:CUR,BIN,N` | `100–5000` Hz | Enable **binary** current stream (CRC-8, 25B frame) |
+| `TELEM:CUR,ASCII,N` | `10–500` Hz | Enable ASCII current stream |
+
+### Current Stream Modes
+
+| Mode | Rate | N-frame | Bandwidth | Status |
+|------|------|---------|-----------|--------|
+| `OFF` | — | user-configured | — | default |
+| `BIN 1000` | ~1000 fps | auto-dropped (P2) | ~40 KB/s | ✅ **recommended** |
+| `BIN 2000` | ~1300 fps¹ | auto-reduced → 10Hz | ~53 KB/s | ⚠️ experimental |
+| `ASCII 200` | 200 fps | normal | — | legacy compat |
+
+> ¹ BIN 2000 does not achieve full 2000 fps due to TX ring backpressure at 1000000 baud.
+> N-frames are automatically reduced to 10Hz in this mode; restored on `CUR,OFF`.
+> Binary frame format: `A5 5A | 43 | 20 | payload(20B LE) | CRC-8(poly 0x07)`.
 
 ---
 

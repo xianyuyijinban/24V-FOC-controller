@@ -200,6 +200,12 @@ class HostMainWindow(QMainWindow):
         self._log_refresh_timer.timeout.connect(self._flush_pending_log_refresh)
         self._log_refresh_timer.start()
 
+        # Current stream stats refresh (20Hz)
+        self._cur_stream_stats_timer = QTimer(self)
+        self._cur_stream_stats_timer.setInterval(50)
+        self._cur_stream_stats_timer.timeout.connect(self._refresh_cur_stream_stats)
+        # Not started until stream is active
+
         self._load_profile_into_widgets()
         self.apply_mode_selection(self._state.selected_mode, emit_command=False)
         self.update_connection_state(False)
@@ -222,7 +228,7 @@ class HostMainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("波特率"))
         self.baud_combo = QComboBox()
-        self.baud_combo.addItems(["115200", "230400", "460800", "921600"])
+        self.baud_combo.addItems(["1000000", "921600", "460800", "230400", "115200"])
         self.baud_combo.currentTextChanged.connect(self._persist_profile_from_widgets)
         toolbar.addWidget(self.baud_combo)
 
@@ -379,6 +385,25 @@ class HostMainWindow(QMainWindow):
             self.plot_channel_checks[channel] = checkbox
             toggles_layout.addWidget(checkbox, index // 4, index % 4)
         layout.addLayout(toggles_layout)
+
+        # ── Current Stream Controls ──
+        cur_stream_group = QGroupBox("相电流流 (Current Stream)")
+        cur_stream_group.setCheckable(True)
+        cur_stream_group.setChecked(False)
+        cur_stream_group.toggled.connect(self._on_cur_stream_toggled)
+        self.cur_stream_group = cur_stream_group
+
+        cur_layout = QHBoxLayout(cur_stream_group)
+        cur_layout.addWidget(QLabel("模式"))
+        self.cur_mode_combo = QComboBox()
+        self.cur_mode_combo.addItems(["OFF", "ASCII 200Hz", "BIN 1kHz (推荐)", "BIN 2kHz (实验)"])
+        self.cur_mode_combo.currentIndexChanged.connect(self._on_cur_mode_changed)
+        cur_layout.addWidget(self.cur_mode_combo)
+
+        cur_layout.addWidget(QLabel("  "))
+        self.cur_stats_label = QLabel("rx: -- fps | gap: -- | CRC: -- | 填充: -- | baud: 1M")
+        cur_layout.addWidget(self.cur_stats_label, 1)
+        layout.addWidget(cur_stream_group)
 
         if pg is None:
             self.plot_widget = QLabel("当前环境未提供 pyqtgraph。")
@@ -807,6 +832,7 @@ class HostMainWindow(QMainWindow):
         worker.connection_changed.connect(self.update_connection_state)
         worker.log_line.connect(self.handle_log_line)
         worker.packet_received.connect(self.apply_packet)
+        worker.current_samples_batch.connect(self._on_current_samples_batch)
 
     def update_ports(self, ports: list[str]):
         self._state.available_ports = list(ports)
@@ -1594,6 +1620,59 @@ class HostMainWindow(QMainWindow):
             return
         self._plot_refresh_pending = False
         self._refresh_plot()
+
+    # ── Current Stream Callbacks ──────────────────────────────────────────
+
+    def _on_cur_stream_toggled(self, checked: bool):
+        if checked:
+            self._cur_stream_stats_timer.start()
+        else:
+            self._cur_stream_stats_timer.stop()
+            # Send OFF command
+            self.command_requested.emit("TELEM:CUR,OFF\n")
+            self.cur_mode_combo.setCurrentIndex(0)
+
+    def _on_cur_mode_changed(self, index: int):
+        if not self.cur_stream_group.isChecked():
+            return
+        commands = [
+            "TELEM:CUR,OFF\n",           # 0: OFF
+            "TELEM:CUR,ASCII,200\n",     # 1: ASCII 200Hz
+            "TELEM:CUR,BIN,1000\n",      # 2: BIN 1kHz
+            "TELEM:CUR,BIN,2000\n",      # 3: BIN 2kHz
+        ]
+        if index < len(commands):
+            self.command_requested.emit(commands[index])
+
+    def _on_current_samples_batch(self, samples: list):
+        """Receive batch of CurrentSample from serial worker.
+        We do NOT update the UI here — only track for stats.
+        UI refresh is driven by _refresh_cur_stream_stats timer."""
+        pass  # Stats are read directly from the ring in _refresh_cur_stream_stats
+
+    def _refresh_cur_stream_stats(self):
+        """Update current stream stats label (called at 20Hz)."""
+        worker = getattr(self, "_serial_worker", None)
+        if worker is None:
+            self.cur_stats_label.setText("rx: -- fps | gap: -- | CRC: -- | 填充: -- | baud: 1M")
+            return
+
+        ring = worker.current_ring()
+        stats = ring.stats()
+        total = stats["total_received"]
+        fill = stats["ring_fill"]
+        cap = stats["ring_capacity"]
+        pct = (fill / cap * 100) if cap > 0 else 0
+
+        # Approximate fps: delta since last tick
+        prev = getattr(self, "_cur_stats_prev_total", 0)
+        self._cur_stats_prev_total = total
+        fps = (total - prev) * 20  # 20Hz timer → multiply by 20 for fps
+
+        self.cur_stats_label.setText(
+            f"rx: {fps} fps | gap: {stats['seq_gaps']} | CRC: {stats['crc_errors']} | "
+            f"填充: {fill}/{cap} ({pct:.0f}%) | baud: 1M"
+        )
 
     def _on_tab_changed(self, index: int):
         if index == 1:

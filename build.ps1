@@ -159,6 +159,7 @@ $FOC_SOURCES = @(
     "MDK-ARM/code/param_storage.c",
     "MDK-ARM/code/tle5012.c",
     "MDK-ARM/code/uart_upload.c",
+    "MDK-ARM/code/current_stream.c",
     "MDK-ARM/code/can_protocol.c"
 )
 

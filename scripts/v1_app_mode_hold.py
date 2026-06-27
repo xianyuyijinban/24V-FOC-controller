@@ -2,7 +2,7 @@
 import serial, time, sys, math
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 def send(ser, cmd, wait=0.3):
     ser.reset_input_buffer()

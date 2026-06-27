@@ -297,6 +297,20 @@ void DrvUart_SendTextP0(const char *text);
 void DrvUart_SendTextP1(const char *text);
 
 /**
+ * @brief Send raw bytes with P1 priority (for binary streams)
+ * @param data  byte buffer to send
+ * @param len   number of bytes (max DRV_UART_BUF_SIZE)
+ */
+bool DrvUart_SendBytesP1(const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Enable/disable legacy ASCII C-frame phase current telemetry
+ * @note  When binary current stream is active, legacy C-frame should be
+ *        suppressed to avoid wasted bandwidth and command-channel contention.
+ */
+void DrvUart_SetLegacyPhaseCurrentEnable(bool enable);
+
+/**
  * @brief Get current upload interval in ms
  */
 uint32_t DrvUart_GetInterval(void);

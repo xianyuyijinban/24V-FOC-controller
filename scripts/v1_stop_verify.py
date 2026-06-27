@@ -2,7 +2,7 @@
 import serial, time, sys
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 def query(ser, cmd, wait=0.5):
     ser.reset_input_buffer()

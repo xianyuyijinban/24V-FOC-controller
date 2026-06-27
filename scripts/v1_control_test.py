@@ -6,7 +6,7 @@ import serial, time, math, sys
 from datetime import datetime
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 F_IDX = {
     "type": 0, "timestamp": 1, "state": 2, "angle": 3, "speed": 4,

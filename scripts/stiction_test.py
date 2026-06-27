@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 
 PORT = 'COM9'
-BAUD = 230400
+BAUD = 1152000
 
 # Test parameters
 SREF_VALUES = [0.03, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30]

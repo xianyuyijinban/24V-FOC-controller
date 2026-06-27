@@ -1,7 +1,7 @@
 """V1 BLACKBOX test (1.6)."""
 import serial, time, sys
 
-PORT, BAUD = "COM9", 230400
+PORT, BAUD = "COM9", 1152000
 
 def send(ser, cmd, wait=0.4):
     ser.reset_input_buffer()

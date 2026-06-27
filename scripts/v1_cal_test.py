@@ -2,7 +2,7 @@
 import serial, time, sys
 from datetime import datetime
 
-PORT, BAUD = "COM9", 230400
+PORT, BAUD = "COM9", 1152000
 
 def send(ser, cmd, wait=0.3):
     ser.reset_input_buffer()

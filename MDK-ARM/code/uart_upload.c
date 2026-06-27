@@ -51,7 +51,7 @@ static DrvUart_DataPacket_t s_lastFault = {0};
 
 static uint32_t s_lastFaultFlags = 0;  /* Used to detect new fault roots */
 static uint8_t s_lastAppFaultCode = 0U;
-
+static bool    s_legacyPhaseCurrentEnabled = true;  /* suppressed when bin stream active */
 
 
 
@@ -1438,7 +1438,7 @@ void DrvUart_Process(void)
         }
     }
 
-    if (s_faultDetailLen == 0U && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
+    if (s_legacyPhaseCurrentEnabled && s_faultDetailLen == 0U && (currentTime - s_lastPhaseCurrentUploadTime) >= DRV_PHASE_CURRENT_UPLOAD_INTERVAL_MS) {
         DrvUart_CollectData(&packet, DRV_PKT_TYPE_NORMAL);
         len = DrvUart_FormatPhaseCurrent(&packet, s_txBuf, DRV_UART_BUF_SIZE);
         if (len > 0) {
@@ -1706,6 +1706,24 @@ void DrvUart_SendTextP1(const char *text)
     if (len == 0 || len > DRV_UART_BUF_SIZE) return;
     memcpy(s_txBuf, text, len);
     DrvUart_StartSendPrio((uint16_t)len, UART_PRIO_P1);
+}
+
+/**
+ * @brief Send raw bytes with P1 priority (for binary streams)
+ */
+bool DrvUart_SendBytesP1(const uint8_t *data, uint16_t len)
+{
+    if (data == NULL || s_huart == NULL || len == 0U || len > DRV_UART_BUF_SIZE) return false;
+    memcpy(s_txBuf, data, len);
+    return DrvUart_StartSendPrio(len, UART_PRIO_P1);
+}
+
+/**
+ * @brief Enable or disable legacy ASCII C-frame phase current telemetry
+ */
+void DrvUart_SetLegacyPhaseCurrentEnable(bool enable)
+{
+    s_legacyPhaseCurrentEnabled = enable;
 }
 
 /**

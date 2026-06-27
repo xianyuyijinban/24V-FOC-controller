@@ -10,7 +10,7 @@ HOST_DIR = Path(__file__).resolve().parent.parent / "HostComputer"
 sys.path.insert(0, str(HOST_DIR))
 from data_parser import FOCDataParser, CommandBuilder
 
-PORT = "COM9"; BAUD = 230400
+PORT = "COM9"; BAUD = 1152000
 
 def main():
     ser = serial.Serial(PORT, BAUD, timeout=0.05)

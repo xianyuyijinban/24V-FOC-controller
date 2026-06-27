@@ -20,7 +20,7 @@ import statistics
 from datetime import datetime
 
 PORT = 'COM9'
-BAUD = 230400
+BAUD = 1152000
 RESULTS_FILE = f"scripts/phase2_ki_gated_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
 

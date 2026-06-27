@@ -34,6 +34,7 @@
 #include "head.h"
 #include "demo_button_control.h"
 #include "can_protocol.h"
+#include "current_stream.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -261,6 +262,7 @@ int main(void)
   
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
+  CurStream_Init();  /* V1.1: binary current stream */
   CanProtocol_Init(CAN_NODE_ID_DEFAULT);  /* Phase 6 */
   Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   
@@ -382,6 +384,9 @@ int main(void)
     
     /* UART数据上传处理 */
     DrvUart_Process();
+
+    /* V1.1: Binary current stream drain (after telemetry, P1 priority) */
+    CurStream_Process();
 
     /* Phase 6: CAN protocol heartbeat check */
     CanProtocol_Process();

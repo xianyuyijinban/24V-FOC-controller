@@ -6,7 +6,7 @@ Sweep 0->+-0.05->0->+-0.10->0->+-0.20->0->+-0.30->0->+-1.0->0, then durability.
 import serial, time, json
 from datetime import datetime
 
-PORT, BAUD = 'COM9', 230400
+PORT, BAUD = 'COM9', 1152000
 HOLD, ZERO = 3.0, 1.5
 
 class FOCBoard:

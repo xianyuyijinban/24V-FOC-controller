@@ -3,10 +3,12 @@ import serial
 from serial.tools import list_ports
 
 try:
-    from .data_parser import FOCDataParser
+    from .data_parser import FOCDataParser, BinaryCurrentParser
+    from .gui_logic import CurrentStreamRing
     from .serial_service import SerialService
 except ImportError:
-    from data_parser import FOCDataParser
+    from data_parser import FOCDataParser, BinaryCurrentParser
+    from gui_logic import CurrentStreamRing
     from serial_service import SerialService
 
 
@@ -15,6 +17,8 @@ class SerialWorker(QObject):
     log_line = pyqtSignal(str, str)
     packet_received = pyqtSignal(object)
     ports_updated = pyqtSignal(list)
+    # Current stream batch signal (emitted ~20Hz, not per-sample)
+    current_samples_batch = pyqtSignal(list)
 
     def __init__(self):
         super().__init__()
@@ -25,11 +29,17 @@ class SerialWorker(QObject):
         self._packet_count = 0
         self._unparsed_rx_notice_budget = 5
 
+        # Binary current stream
+        self._bin_parser: BinaryCurrentParser = BinaryCurrentParser()
+        self._cur_ring: CurrentStreamRing = CurrentStreamRing()
+        self._cur_stream_active: bool = False
+
     @pyqtSlot()
     def start(self):
         if self._poll_timer is None:
+            # Poll at 10ms to keep up with 2kHz data inflow
             self._poll_timer = QTimer(self)
-            self._poll_timer.setInterval(50)
+            self._poll_timer.setInterval(10)
             self._poll_timer.timeout.connect(self._poll_serial)
             self._poll_timer.start()
         self.refresh_ports()
@@ -45,9 +55,9 @@ class SerialWorker(QObject):
         ports = [port.device for port in list_ports.comports()]
         self.ports_updated.emit(ports)
         if ports:
-            self.log_line.emit("INFO", f"检测到串口：{', '.join(ports)}")
+            self.log_line.emit("INFO", f"Detected serial ports: {', '.join(ports)}")
         else:
-            self.log_line.emit("INFO", "未检测到串口。")
+            self.log_line.emit("INFO", "No serial ports detected.")
 
     @pyqtSlot(str, int)
     def connect_port(self, port_name: str, baud_rate: int):
@@ -63,14 +73,18 @@ class SerialWorker(QObject):
             )
             self._packet_count = 0
             self._unparsed_rx_notice_budget = 5
+            # Reset binary parser state
+            self._bin_parser = BinaryCurrentParser()
+            self._cur_ring = CurrentStreamRing()
+            self._cur_stream_active = False
             self.connection_changed.emit(True)
-            self.log_line.emit("INFO", f"已连接到 {port_name} @ {baud_rate}。")
+            self.log_line.emit("INFO", f"Connected to {port_name} @ {baud_rate}.")
         except Exception as exc:
             self._serial = None
             self._parser = None
             self._service = None
             self.connection_changed.emit(False)
-            self.log_line.emit("ERROR", f"打开 {port_name} 失败：{exc}")
+            self.log_line.emit("ERROR", f"Failed to open {port_name}: {exc}")
 
     @pyqtSlot()
     def disconnect_port(self):
@@ -80,26 +94,33 @@ class SerialWorker(QObject):
                 if self._serial.is_open:
                     self._serial.close()
             except Exception as exc:
-                self.log_line.emit("ERROR", f"关闭串口时出现异常：{exc}")
+                self.log_line.emit("ERROR", f"Error closing serial port: {exc}")
         self._serial = None
         self._parser = None
         self._service = None
         self._packet_count = 0
+        self._cur_stream_active = False
         self.connection_changed.emit(False)
         if was_connected:
-            self.log_line.emit("INFO", "串口已断开。")
+            self.log_line.emit("INFO", "Serial port disconnected.")
 
     @pyqtSlot(str)
     def send_command(self, command: str):
         if self._service is None:
-            self.log_line.emit("ERROR", "当前未连接，无法发送命令。")
+            self.log_line.emit("ERROR", "Not connected, cannot send command.")
             return
         try:
             self._service.send_command(command)
             self.log_line.emit("TX", command.strip())
         except Exception as exc:
-            self.log_line.emit("ERROR", f"命令发送失败：{exc}")
+            self.log_line.emit("ERROR", f"Command send failed: {exc}")
             self.disconnect_port()
+
+    def current_ring(self) -> CurrentStreamRing:
+        return self._cur_ring
+
+    def current_parser(self) -> BinaryCurrentParser:
+        return self._bin_parser
 
     def _poll_serial(self):
         if self._service is None or self._serial is None or not self._serial.is_open:
@@ -110,19 +131,35 @@ class SerialWorker(QObject):
             if waiting:
                 payload = self._serial.read(waiting)
                 if payload:
-                    before_packets = self._packet_count
-                    read_result = self._service.handle_bytes(payload)
-                    if (
-                        self._packet_count == before_packets
-                        and read_result.diagnostic_lines == 0
-                        and self._unparsed_rx_notice_budget > 0
-                    ):
-                        preview = payload[:32].hex(" ")
-                        suffix = " ..." if len(payload) > 32 else ""
-                        self.log_line.emit("RX", f"收到 {len(payload)} 字节，但还没有解析成遥测包：{preview}{suffix}")
-                        self._unparsed_rx_notice_budget -= 1
+                    # Phase 1: Extract binary current frames
+                    bin_samples, text_bytes = self._bin_parser.feed(payload)
+
+                    if bin_samples:
+                        self._cur_stream_active = True
+                        self._cur_ring.extend(bin_samples)
+                        # Update parser stats in ring
+                        self._cur_ring.update_parser_stats(
+                            self._bin_parser.crc_errors,
+                            self._bin_parser.seq_gaps,
+                        )
+                        # Emit batch (caller throttles UI refresh, not us)
+                        self.current_samples_batch.emit(bin_samples)
+
+                    # Phase 2: Feed residual text bytes to ASCII parser
+                    if text_bytes:
+                        before_packets = self._packet_count
+                        read_result = self._service.handle_bytes(text_bytes)
+                        if (
+                            self._packet_count == before_packets
+                            and read_result.diagnostic_lines == 0
+                            and self._unparsed_rx_notice_budget > 0
+                        ):
+                            preview = text_bytes[:32].hex(" ")
+                            suffix = " ..." if len(text_bytes) > 32 else ""
+                            self.log_line.emit("RX", f"Received {len(text_bytes)} bytes but no telemetry packet parsed: {preview}{suffix}")
+                            self._unparsed_rx_notice_budget -= 1
         except Exception as exc:
-            self.log_line.emit("ERROR", f"串口读取失败：{exc}")
+            self.log_line.emit("ERROR", f"Serial read failed: {exc}")
             self.disconnect_port()
 
     def _handle_packet(self, packet):

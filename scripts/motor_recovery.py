@@ -1,7 +1,7 @@
 """Quick motor parameter recovery: clear fault, run IDENTIFY, verify"""
 import serial, time, sys
 
-s = serial.Serial('COM9', 230400, timeout=0.3)
+s = serial.Serial('COM9', 1152000, timeout=0.3)
 time.sleep(1.0)
 s.reset_input_buffer()
 

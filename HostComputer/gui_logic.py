@@ -5,15 +5,16 @@ import io
 import json
 import math
 import re
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 try:
-    from .data_parser import CommandBuilder, FOCDataPacket, control_to_user_angle
+    from .data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle
 except ImportError:
-    from data_parser import CommandBuilder, FOCDataPacket, control_to_user_angle
+    from data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle
 
 
 MODE_LABELS = {
@@ -134,7 +135,7 @@ def _default_position_tuning() -> PositionLoopTuning:
 @dataclass
 class GuiProfile:
     last_port: str = ""
-    baud_rate: int = 230400
+    baud_rate: int = 1000000  # V1.1 baseline
     selected_mode: int = 0
     log_filters: list[str] = field(default_factory=lambda: list(LOG_LEVELS))
     undervoltage_limit: float = 18.0
@@ -857,3 +858,71 @@ def format_plot_csv(rows: list[dict[str, float]]) -> str:
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue().replace("\r\n", "\n")
+
+
+# ── Current Stream Ring Buffer ────────────────────────────────────────────────
+
+class CurrentStreamRing:
+    """Thread-safe ring buffer for CurrentSample from the 2kHz binary stream.
+
+    Capacity: 20000 samples (~10s at 2kHz).
+    """
+    def __init__(self, capacity: int = 20000):
+        self._buffer: deque[CurrentSample] = deque(maxlen=capacity)
+        self._lock = threading.Lock()
+        self._total_received: int = 0
+        self._total_dropped: int = 0
+        self._crc_errors: int = 0
+        self._seq_gaps: int = 0
+
+    def extend(self, samples: List[CurrentSample]) -> int:
+        """Thread-safe append. Returns number of samples dropped due to overflow."""
+        dropped = 0
+        with self._lock:
+            old_len = len(self._buffer)
+            self._buffer.extend(samples)
+            new_len = len(self._buffer)
+            # dequeue with maxlen auto-drops oldest; approximate drop count
+            expected = old_len + len(samples)
+            if new_len < expected:
+                dropped = expected - new_len
+            self._total_received += len(samples)
+            self._total_dropped += dropped
+        return dropped
+
+    def get_recent(self, count: int) -> List[CurrentSample]:
+        """Get the most recent N samples (thread-safe snapshot)."""
+        with self._lock:
+            items = list(self._buffer)
+            if count >= len(items):
+                return items
+            return items[-count:]
+
+    def get_all(self) -> List[CurrentSample]:
+        """Get all samples (thread-safe snapshot)."""
+        with self._lock:
+            return list(self._buffer)
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "total_received": self._total_received,
+                "total_dropped": self._total_dropped,
+                "crc_errors": self._crc_errors,
+                "seq_gaps": self._seq_gaps,
+                "ring_fill": len(self._buffer),
+                "ring_capacity": self._buffer.maxlen,
+            }
+
+    def update_parser_stats(self, crc_errors: int, seq_gaps: int):
+        with self._lock:
+            self._crc_errors = crc_errors
+            self._seq_gaps = seq_gaps
+
+    def clear(self):
+        with self._lock:
+            self._buffer.clear()
+            self._total_received = 0
+            self._total_dropped = 0
+            self._crc_errors = 0
+            self._seq_gaps = 0

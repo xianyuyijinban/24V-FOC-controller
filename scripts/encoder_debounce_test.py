@@ -4,7 +4,7 @@ import time
 import sys
 
 def main():
-    ser = serial.Serial('COM9', 230400, timeout=0.5, rtscts=False, dsrdtr=False)
+    ser = serial.Serial('COM9', 1152000, timeout=0.5, rtscts=False, dsrdtr=False)
     time.sleep(2.0)
     ser.reset_input_buffer()
     ser.reset_output_buffer()

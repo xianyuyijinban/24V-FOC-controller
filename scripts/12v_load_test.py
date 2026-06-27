@@ -3,7 +3,7 @@
 Prompts user to apply/release load at each speed point.
 """
 import serial, time, sys, statistics
-PORT='COM9'; BAUD=230400
+PORT='COM9'; BAUD = 1152000
 
 s = serial.Serial(PORT, BAUD, timeout=0.1)
 time.sleep(0.5)

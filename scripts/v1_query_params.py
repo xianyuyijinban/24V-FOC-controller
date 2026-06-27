@@ -2,7 +2,7 @@
 import serial, time, sys
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 def is_telemetry(line):
     """Only filter true telemetry frames: N,... and C,... (compact/normal packets)."""

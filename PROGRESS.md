@@ -1,8 +1,82 @@
 # PROGRESS
 
+## [2026-06-28] Step 2C：上位机体验收口与 V1.1 发布前整理
+
+### Problem / Task
+收口 Step 2A/2B 成果，做 GUI 体验打磨、文档同步、发布前 regression。
+
+### Resolution
+- **GUI**：BIN 1kHz 标注"推荐"，BIN 2kHz 标注"实验"；stats label 显示 fps + baud
+- **Docs**：`docs/UART_COMMANDS.md` baud → 1000000，新增 TELEM 章节（RATE + CUR），1152000 标为禁用
+- **固件行为定版**：1000000 baud，BIN 1000 推荐默认，BIN 2000 实验档（≤1330fps），OFF 恢复 N 帧
+- **不扩大 TX ring**，**不改 IT chunk**，**不改 binary payload**
+
+### Verification
+- HostComputer: 112 tests OK
+- 固件编译: 0 error / 0 warning
+- CUR OFF → N-frame 50Hz 恢复 ✓
+- BIN 1000: 2001f/2s (1001fps ✓), CRC=0, FW_INFO? 50/50
+- BIN 2000: 2662f/2s (~1330fps), N-frame→10Hz 自动降载 ✓, FW_INFO? 50/50
+
+## [2026-06-28] V1.1 Current Stream / Host GUI 问题定位
+
+### Problem / Task
+- 继续 Step 2A：在 1000000 baud 基线上验证 2kHz binary current stream 与上位机适配。
+
+### Resolution
+- 修复 HostComputer 入口语法错误：`GuiProfile.baud_rate` 的 C 风格注释改为 Python 注释。
+- 同步 HostComputer 单测期望：默认 baud 从 230400 更新为 1000000。
+- 指出固件侧关键问题：TIM1 center-aligned update IRQ 实际约 20kHz（overflow + underflow），但 `current_stream.c` 中 `CUR_STREAM_ISR_HZ` 写成 10000，导致 `TELEM:CUR,BIN,1000` 实际约 2kfps、`BIN,2000` 实际逼近 4kfps 并触发串口背压/seq gap。
+
+### Prevention / Follow-up
+- 将 `CUR_STREAM_ISR_HZ` 修正为 20000，并同步注释；修正后再复测 1000/2000 档。
+- 后续按用户要求由执行方继续测试，当前 Codex 仅指出问题。
+
+### Verification
+- `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_serial_service HostComputer.test_main_window`：112 tests OK。
+- 无界面串口采样曾观察到 `BIN,1000` 约 2003fps、`BIN,2000` 约 3433fps 且有 seq gap，和 ISR 基准倍率问题一致。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `c865e09014da4eed0a8a5495eda0ff50204ca306`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/test_gui_logic.py`
+  - `PROGRESS.md`
+
 已并入 [PROCESS.md](PROCESS.md)。
 
 从 `2026-04-05 20:10` 起，`PROCESS.md` 是唯一主日志；本文件仅保留为兼容入口，避免后续台架调试继续分叉记录。
+
+## [2026-06-28] V1.1 UART Baud Sweep：1000000 定版，1152000 禁用
+
+### Problem / Task
+Step 2A 目标升级 UART 至 1152000。测试发现该波特率下命令 RX（DMA+IDLE）不稳定：
+- 230400 / 921600 / 1000000 全部 20/20 PASS（FW_INFO? 命令 + N/C 遥测）
+- 1152000 仅 1/20 PASS，遥测 IT TX 正常但 DMA RX 几乎不可用
+
+### Resolution
+**V1.1 高速通信基线定为 1000000 baud**（GPIO_SPEED_FREQ_VERY_HIGH 保留）：
+- 2kHz 电流流带宽需求：25B × 2000 = 50 kB/s
+- 1000000 baud 实际约 100 kB/s，约 50% 余量给命令 + 低频遥测
+- 921600 作为备选档，1152000 禁用
+
+### 1152000 现象记录（避免以后再踩）
+- 不是完全不通：第 1 次 FW_INFO? 成功（返回完整响应），后续 19 次失败
+- 失败时读取到的是遥测行（C/N 帧），不是命令响应
+- 根因未深究，判断为高波特率边界下 RX DMA/IDLE restart、UART error recovery 或 TX IT 抢占导致接收链路变脆
+- 物理链路 CH340C + PC + STM32H743 USART1 在 1152000 不构成可靠双向通道
+
+### Decision Rule
+- 若后续发现 1000000 也不够稳定，回退到 921600
+- 1152000 永久禁用，不再投入时间
+
+### Verification
+- 1000000: FW_INFO? 20/20, N=100, C=399, 0 错误
+- 921600: FW_INFO? 20/20, N=100, C=399, 0 错误
+- 1152000: FW_INFO? 1/20 ❌
+- 230400: 历史已知稳定（未重复测试）
 
 ## [2026-06-21] ARR=11999 后 PI 基线定版：PI_CURRENT=0.50/0, PI_SPEED=0.25/0
 

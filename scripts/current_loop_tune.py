@@ -14,7 +14,7 @@ sys.path.insert(0, str(HOST_DIR))
 from data_parser import FOCDataParser, CommandBuilder
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 STAGES = [
     ("S1_Kp0.30_Ki300",  0.30, 300),

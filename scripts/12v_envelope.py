@@ -13,7 +13,7 @@ Tests:
 import serial, time, sys, json, statistics
 from datetime import datetime
 
-PORT='COM9'; BAUD=230400
+PORT='COM9'; BAUD = 1152000
 
 class FOCBoard:
     def __init__(self):

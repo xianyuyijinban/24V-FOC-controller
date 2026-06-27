@@ -5,6 +5,7 @@
  */
 
 #include "foc_app.h"
+#include "current_stream.h"
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
@@ -505,6 +506,26 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
 exit_cycle:
     ADC_Sampling_EndControlCycle();
+
+    /* ── V1.1: Current stream sample push (all FOC states) ── */
+    {
+        CurStreamSample_t s;
+        s.tick_ms = HAL_GetTick();
+        s.ia_mA   = (int16_t)(handle->Ia * 1000.0f);
+        s.ib_mA   = (int16_t)(handle->Ib * 1000.0f);
+        s.ic_mA   = (int16_t)(handle->Ic * 1000.0f);
+        /* Id/Iq only valid in RUNNING/IDENTIFY; zero otherwise */
+        if (handle->state == FOC_STATE_RUNNING || handle->state == FOC_STATE_PARAM_IDENTIFY) {
+            s.id_mA = (int16_t)(handle->foc.Idq.d * 1000.0f);
+            s.iq_mA = (int16_t)(handle->foc.Idq.q * 1000.0f);
+        } else {
+            s.id_mA = 0;
+            s.iq_mA = 0;
+        }
+        s.vbus_mV = (uint16_t)(handle->Vbus * 1000.0f);
+        s.flags   = 0U;
+        CurStream_PushSample(&s);
+    }
 }
 
 /**
@@ -1286,6 +1307,7 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         handle->traj_active_diag = cruise_active;
         handle->traj_cmd_diag = cruise_cmd;
     }
+
 }
 
 /**

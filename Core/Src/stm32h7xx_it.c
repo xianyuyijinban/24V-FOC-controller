@@ -85,6 +85,7 @@ static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
 static volatile uint8_t s_uartCmdDropUntilEol = 0U;
 static volatile uint32_t s_uartRxRestartFailCount = 0U;
+volatile uint32_t g_trigger[2];  /* dummy: 8 bytes BSS, referenced from ProcessPending */
 
 typedef struct {
     uint32_t sum;
@@ -1235,6 +1236,65 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* ── TELEM:CUR — binary/ASCII current stream ────────────── */
+    {
+        extern void CurStream_SetMode(int mode, uint16_t rate_hz);
+        extern int  CurStream_GetMode(void);
+        extern uint16_t CurStream_GetRate(void);
+        extern uint32_t CurStream_GetSentCount(void);
+        extern uint32_t CurStream_GetDropCount(void);
+
+        if (strcmp(cmd, "TELEM:CUR?") == 0) {
+            char resp[80];
+            const char *mode_str = "OFF";
+            int mode = CurStream_GetMode();
+            if (mode == 1) mode_str = "ASCII";
+            else if (mode == 2) mode_str = "BIN";
+            (void)snprintf(resp, sizeof(resp),
+                     "CUR_STREAM,OK,mode=%s,rate=%u,sent=%lu,drop=%lu\r\n",
+                     mode_str,
+                     (unsigned int)CurStream_GetRate(),
+                     (unsigned long)CurStream_GetSentCount(),
+                     (unsigned long)CurStream_GetDropCount());
+            UART_CommandSendText(resp);
+            return;
+        }
+
+        if (strcmp(cmd, "TELEM:CUR,OFF") == 0) {
+            CurStream_SetMode(0, 0);  /* CUR_STREAM_OFF */
+            UART_CommandSendText("CUR_STREAM,OK,mode=OFF\r\n");
+            return;
+        }
+
+        if (strncmp(cmd, "TELEM:CUR,BIN,", 14) == 0) {
+            unsigned int hz = 0U;
+            if (sscanf(cmd + 14, "%u", &hz) == 1 && hz >= 100U && hz <= 5000U) {
+                CurStream_SetMode(2, (uint16_t)hz);  /* CUR_STREAM_BIN */
+                char resp[48];
+                (void)snprintf(resp, sizeof(resp),
+                         "CUR_STREAM,OK,mode=BIN,rate=%u\r\n", hz);
+                UART_CommandSendText(resp);
+            } else {
+                UART_CommandSendText("CUR_STREAM,FAIL,rate range (100-5000Hz)\r\n");
+            }
+            return;
+        }
+
+        if (strncmp(cmd, "TELEM:CUR,ASCII,", 16) == 0) {
+            unsigned int hz = 0U;
+            if (sscanf(cmd + 16, "%u", &hz) == 1 && hz >= 10U && hz <= 500U) {
+                CurStream_SetMode(1, (uint16_t)hz);  /* CUR_STREAM_ASCII */
+                char resp[48];
+                (void)snprintf(resp, sizeof(resp),
+                         "CUR_STREAM,OK,mode=ASCII,rate=%u\r\n", hz);
+                UART_CommandSendText(resp);
+            } else {
+                UART_CommandSendText("CUR_STREAM,FAIL,rate range (10-500Hz)\r\n");
+            }
+            return;
+        }
+    }
+
     if (strcmp(cmd, "CMD:FAULT_DETAIL") == 0) {
         DrvUart_UploadImmediate();
         return;
@@ -1953,6 +2013,7 @@ void UART_Command_ProcessPending(void)
     char cmd[UART_CMD_LINE_MAX];
     size_t copyLen;
 
+    (void)g_trigger;  /* prevent --gc-sections */
     while (s_uartCmdQueueRead != s_uartCmdQueueWrite) {
         __disable_irq();
         copyLen = UART_BoundedStrLen(s_uartCmdQueue[s_uartCmdQueueRead], UART_CMD_LINE_MAX - 1U);

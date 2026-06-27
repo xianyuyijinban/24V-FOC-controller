@@ -11,7 +11,7 @@ import sys
 from datetime import datetime
 
 PORT = "COM9"
-BAUD = 230400
+BAUD = 1152000
 
 def flush_and_send(ser, cmd, wait=0.35):
     """Send command and collect response, filtering telemetry frames."""

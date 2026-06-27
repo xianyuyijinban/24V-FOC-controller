@@ -10,7 +10,7 @@ import json
 from datetime import datetime
 
 PORT = 'COM9'
-BAUD = 230400
+BAUD = 1152000
 
 class FOCBoard:
     def __init__(self, port=PORT, baud=BAUD):

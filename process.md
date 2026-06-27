@@ -1,5 +1,37 @@
 # PROCESS
 
+## [2026-06-27] V1 Release Regression — ALL PASS (v1.0.1-12V_STANDARD_RELEASE_TESTED)
+
+### Context
+V1 firmware release tested on 12V bench (STM32H743 + DRV8350S + TLE5012B).  
+6-pass automated test suite. 6 firmware bugfixes applied.
+
+### Bugfixes in this release
+1. **foc_app.h**: UV/OV voltage thresholds 18/30→10/18V for 12V bench
+2. **uart_upload.c**: `DrvUart_QueryCogCfg()` uses P0 ring buffer priority (was dropped when TX busy)
+3. **stm32h7xx_it.c**: `CMD:BEMF_CFG?` Ke/Ke_temp uses `DrvUart_FormatFixed` (was empty with `snprintf %.6f`)
+4. **stm32h7xx_it.c**: `CMD:STOP` removed `__disable_irq()` around `FOC_App_Disable()` (blocked HAL/SPI, caused HOLD→STOP UART silence)
+5. **stm32h7xx_it.c**: `CMD:STOP` now calls `FOC_App_StopIdentify()` (CAL:STOP was shadowed by CTRL:STOP handler)
+6. **docs**: `CTRL:PREF` unit corrected deg→rad, VBUS limit updated
+
+### Test Results (11 scripts)
+| Test | Result | Notes |
+|------|--------|-------|
+| 1.1 Baseline | 6/6 PASS | 12V_STANDARD, RS_FF=DQ/0.20, COG=0.25/60°, BEMF=OFF |
+| 1.2 Control Mode | PASS | PREF unit=rad, ±0.5 rad/s standard, ±1.0=12V limit |
+| 1.3 APP_MODE | AUTO PASS | 6/6 STOP, HOLD drift <1.5°, JOINT_POS limit clamp |
+| 1.4 Telemetry | 12/12 PASS | 0% NUL @10/50/100Hz, STOP works under 100Hz load |
+| 1.5 CAL Wizard | PASS | STATUS/precheck/STOP/SAVE all respond correctly |
+| 1.6 BLACKBOX | 4/4 PASS | 100-sample ring buffer, CSV format, CLEAR works |
+
+### Known Limitations
+- ±1.0 rad/s not reachable on 12V bus (voltage headroom) — documented, not a bug
+- SPRING_DAMPER/DETENT hand-feel testing pending (non-blocking for firmware release)
+- CAL mid-step STOP may not immediately abort identify step (PN needs PWM to complete)
+
+### Next Phase
+Step 2 — Host GUI Adaptation: new UART protocol groups, APP_MODE controls, telemetry panels
+
 ## Mandatory Rules
 
 1. Before each act/execution, read this file and remember prior mistakes and prevention controls.

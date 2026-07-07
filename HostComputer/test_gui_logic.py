@@ -7,7 +7,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from data_parser import FOCDataPacket
+from data_parser import FOCDataPacket, AckResult
 from gui_logic import (
     FOC_STATE_FAULT,
     FOC_STATE_PARAM_IDENTIFY,
@@ -19,6 +19,7 @@ from gui_logic import (
     PLOT_CHANNELS,
     PositionLoopTuning,
     RollingPlotBuffer,
+    apply_ack_effects,
     apply_command_effects,
     apply_packet_effects,
     build_current_ref_command,
@@ -28,6 +29,7 @@ from gui_logic import (
     build_speed_ref_command,
     build_vbus_limit_command,
     button_enable_state,
+    can_dispatch_command,
     can_edit_vbus_limits,
     fault_error_log_entry,
     fault_packet_log_entry,
@@ -37,6 +39,7 @@ from gui_logic import (
     load_gui_profile,
     mode_target_label,
     packet_snapshot,
+    parse_app_mode_response,
     parse_float_field,
     save_gui_profile,
     stall_mode_confirmation_text,
@@ -60,6 +63,16 @@ class TestGuiLogic(unittest.TestCase):
     def test_parse_float_field_rejects_empty_input(self):
         with self.assertRaisesRegex(ValueError, "速度.*必填"):
             parse_float_field("", "速度")
+
+    def test_parse_app_mode_response_accepts_set_and_query_forms(self):
+        self.assertEqual(
+            parse_app_mode_response("APP_MODE,OK,JOINT_POS"),
+            {"mode": "JOINT_POS", "ctrl": None},
+        )
+        self.assertEqual(
+            parse_app_mode_response("APP_MODE,OK,JOINT_POS (ctrl_mode=2)"),
+            {"mode": "JOINT_POS", "ctrl": 2},
+        )
 
     def test_reference_dispatch_routes_to_expected_commands(self):
         self.assertEqual(build_current_ref_command("0.25", "1.5"), "CMD:IREF,0.250,1.500\n")
@@ -96,6 +109,7 @@ class TestGuiLogic(unittest.TestCase):
         connected = button_enable_state(HostAppState(is_connected=True, power_unlocked=False))
         self.assertTrue(connected["can_unlock"])
         self.assertFalse(connected["can_enable"])
+        self.assertTrue(connected["can_quick_arm"])
         self.assertFalse(connected["can_identify_start"])
 
         armed = button_enable_state(
@@ -104,26 +118,187 @@ class TestGuiLogic(unittest.TestCase):
         self.assertFalse(armed["can_unlock"])
         self.assertTrue(armed["can_lock"])
         self.assertFalse(armed["can_enable"])
+        self.assertFalse(armed["can_quick_arm"])
         self.assertTrue(armed["can_disable"])
         self.assertFalse(armed["can_identify_start"])
         self.assertTrue(armed["can_identify_stop"])
 
-    def test_apply_command_effects_updates_runtime_state(self):
+    def test_button_enable_state_blocks_advancing_actions_while_pending(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_enabled=False,
+            pending_command="ENABLE",
+        )
+        button_state = button_enable_state(state)
+        self.assertFalse(button_state["can_unlock"])
+        self.assertTrue(button_state["can_lock"])
+        self.assertFalse(button_state["can_enable"])
+        self.assertFalse(button_state["can_quick_arm"])
+        self.assertFalse(button_state["can_send_target"])
+        self.assertFalse(button_state["app_mode_selector"])
+        self.assertFalse(button_state["motion_target"])
+
+    def test_can_dispatch_command_blocks_pending_advancement_but_allows_fallback(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            pending_command="ENABLE",
+        )
+        allowed, reason = can_dispatch_command(state, "CMD:ENABLE,1\n")
+        self.assertFalse(allowed)
+        self.assertIn("ENABLE", reason)
+
+        allowed, _ = can_dispatch_command(state, "CMD:ENABLE,0\n")
+        self.assertTrue(allowed)
+
+        allowed, _ = can_dispatch_command(state, "CMD:CLEAR_FAULT\n")
+        self.assertTrue(allowed)
+
+    def test_can_dispatch_command_blocks_fault_drive_commands(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            fault_active=True,
+        )
+        self.assertFalse(can_dispatch_command(state, "CMD:ENABLE,1\n")[0])
+        self.assertFalse(can_dispatch_command(state, "CMD:SREF,0.500\n")[0])
+        self.assertTrue(can_dispatch_command(state, "CMD:CLEAR_FAULT\n")[0])
+        self.assertTrue(can_dispatch_command(state, "CMD:UNLOCK,0\n")[0])
+
+    def test_can_dispatch_command_requires_enabled_motor_for_targets(self):
+        state = HostAppState(is_connected=True, power_unlocked=True, motor_enabled=False)
+        self.assertFalse(can_dispatch_command(state, "CMD:SREF,0.500\n")[0])
+        state.motor_enabled = True
+        self.assertTrue(can_dispatch_command(state, "CMD:SREF,0.500\n")[0])
+
+    def test_apply_command_effects_sets_pending_not_state(self):
+        """V1.2: key commands set pending_command, not direct state booleans."""
         state = HostAppState(is_connected=True)
         apply_command_effects(state, "CMD:UNLOCK,1")
-        self.assertTrue(state.power_unlocked)
+        self.assertFalse(state.power_unlocked)  # NOT set yet
+        self.assertEqual(state.pending_command, "UNLOCK")
+        self.assertEqual(state.pending_command_value, "1")
+
         apply_command_effects(state, "CMD:ENABLE,1")
-        self.assertTrue(state.motor_enabled)
+        self.assertFalse(state.motor_enabled)  # NOT set yet
+        self.assertEqual(state.pending_command, "ENABLE")
+        self.assertEqual(state.pending_command_value, "1")
+
         apply_command_effects(state, "CMD:IDENTIFY,1")
-        self.assertTrue(state.identify_active)
+        self.assertFalse(state.identify_active)  # NOT set yet
+        self.assertEqual(state.pending_command, "IDENTIFY")
+        self.assertEqual(state.pending_command_value, "1")
+
         apply_command_effects(state, "CMD:STALL_MODE,1")
-        self.assertTrue(state.stall_mode_armed)
-        apply_command_effects(state, "CMD:STALL_MODE,0")
-        self.assertFalse(state.stall_mode_armed)
+        self.assertFalse(state.stall_mode_armed)  # NOT set yet
+        self.assertEqual(state.pending_command, "STALL_MODE")
+        self.assertEqual(state.pending_command_value, "1")
+
+    def test_apply_command_effects_lock_is_destructive_immediate(self):
+        """V1.2: UNLOCK,0 cascades immediately because destructive."""
+        state = HostAppState(is_connected=True, power_unlocked=True, motor_enabled=True,
+                             identify_active=True, stall_mode_armed=True,
+                             stall_open_loop_active=True)
         apply_command_effects(state, "CMD:UNLOCK,0")
         self.assertFalse(state.power_unlocked)
         self.assertFalse(state.motor_enabled)
         self.assertFalse(state.identify_active)
+        self.assertFalse(state.stall_mode_armed)
+        self.assertFalse(state.stall_open_loop_active)
+        self.assertEqual(state.pending_command_value, "0")
+
+    def test_apply_ack_effects_updates_state_on_ok(self):
+        state = HostAppState(is_connected=True, pending_command="UNLOCK")
+        ack = AckResult(command="UNLOCK", ok=True, raw="UNLOCK,OK")
+        apply_ack_effects(state, ack, now_ms=1000)
+        self.assertTrue(state.power_unlocked)
+        self.assertIsNone(state.pending_command)
+        self.assertIsNone(state.pending_command_value)
+        self.assertEqual(state.last_ack, "UNLOCK,OK")
+        self.assertEqual(state.last_ack_at_ms, 1000)
+        self.assertIsNone(state.last_command_error)
+
+    def test_apply_ack_effects_honors_pending_zero_payloads(self):
+        state = HostAppState(
+            is_connected=True,
+            pending_command="ENABLE",
+            pending_command_value="0",
+            motor_enabled=True,
+            stall_open_loop_active=True,
+        )
+        apply_ack_effects(state, AckResult(command="ENABLE", ok=True, raw="ENABLE,OK"), now_ms=1000)
+        self.assertFalse(state.motor_enabled)
+        self.assertFalse(state.stall_open_loop_active)
+
+        state = HostAppState(
+            is_connected=True,
+            pending_command="UNLOCK",
+            pending_command_value="0",
+            power_unlocked=True,
+            motor_enabled=True,
+            identify_active=True,
+            stall_mode_armed=True,
+            stall_open_loop_active=True,
+        )
+        apply_ack_effects(state, AckResult(command="UNLOCK", ok=True, raw="UNLOCK,OK"), now_ms=1000)
+        self.assertFalse(state.power_unlocked)
+        self.assertFalse(state.motor_enabled)
+        self.assertFalse(state.identify_active)
+        self.assertFalse(state.stall_mode_armed)
+        self.assertFalse(state.stall_open_loop_active)
+
+    def test_apply_ack_effects_uses_ack_payload_when_pending_value_missing(self):
+        state = HostAppState(is_connected=True, pending_command="UNLOCK")
+        apply_ack_effects(
+            state,
+            AckResult(command="UNLOCK", ok=True, command_value="1", raw="UNLOCK,OK,1"),
+            now_ms=1000,
+        )
+        self.assertTrue(state.power_unlocked)
+
+        state = HostAppState(is_connected=True, pending_command="ENABLE", motor_enabled=True)
+        apply_ack_effects(
+            state,
+            AckResult(command="ENABLE", ok=True, command_value="0", raw="ENABLE,OK,0"),
+            now_ms=1000,
+        )
+        self.assertFalse(state.motor_enabled)
+
+    def test_apply_ack_effects_reports_failure(self):
+        state = HostAppState(is_connected=True, pending_command="UNLOCK",
+                             power_unlocked=False)
+        ack = AckResult(command="UNLOCK", ok=False, reason="busy", raw="UNLOCK,FAIL,busy")
+        apply_ack_effects(state, ack, now_ms=2000)
+        self.assertFalse(state.power_unlocked)  # unchanged on failure
+        self.assertIsNone(state.pending_command)  # pending cleared
+        self.assertEqual(state.last_command_error, "busy")
+        self.assertEqual(state.last_ack, "UNLOCK,FAIL,busy")
+
+    def test_apply_ack_effects_mode_updates_control_mode(self):
+        state = HostAppState(is_connected=True, pending_command="MODE")
+        ack = AckResult(command="MODE", ok=True, mode_value=2, raw="MODE,OK,2")
+        apply_ack_effects(state, ack, now_ms=3000)
+        self.assertEqual(state.control_mode, 2)
+
+    def test_apply_ack_effects_app_mode_with_ctrl(self):
+        state = HostAppState(is_connected=True, pending_command="APP_MODE")
+        ack = AckResult(command="APP_MODE", ok=True, app_mode_name="JOINT_POS",
+                        app_mode_ctrl=2, raw="APP_MODE,OK,JOINT_POS (ctrl_mode=2)")
+        apply_ack_effects(state, ack, now_ms=4000)
+        self.assertEqual(state.app_mode, "JOINT_POS")
+        self.assertEqual(state.app_mode_ctrl, 2)
+
+    def test_apply_packet_effects_does_not_confirm_app_mode_pending(self):
+        state = HostAppState(
+            is_connected=True,
+            pending_command="APP_MODE",
+            pending_command_value="DETENT",
+        )
+        apply_packet_effects(state, FOCDataPacket(foc_state=FOC_STATE_RUNNING, control_mode=2))
+        self.assertEqual(state.pending_command, "APP_MODE")
+        self.assertEqual(state.pending_command_value, "DETENT")
+        self.assertIsNone(state.app_mode)
 
     def test_apply_packet_effects_reconciles_runtime_flags_from_foc_state(self):
         state = HostAppState(is_connected=True, power_unlocked=True, motor_enabled=True, identify_active=True)
@@ -425,12 +600,14 @@ class TestGuiLogic(unittest.TestCase):
         self.assertTrue(can_edit_vbus_limits(HostAppState(is_connected=True)))
         self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=True, motor_enabled=True)))
         self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=True, identify_active=True)))
+        self.assertFalse(can_edit_vbus_limits(HostAppState(is_connected=True, pending_command="ENABLE")))
 
     def test_should_confirm_stall_mode_enable_only_when_unidentified_and_unarmed(self):
         state = HostAppState(is_connected=True, power_unlocked=True)
         self.assertTrue(should_confirm_stall_mode_enable(state))
 
         state.motor_identified = True
+        state.encoder_detected = True
         self.assertFalse(should_confirm_stall_mode_enable(state))
 
         state.motor_identified = False
@@ -443,6 +620,15 @@ class TestGuiLogic(unittest.TestCase):
             power_unlocked=True,
             motor_identified=True,
             encoder_detected=False,
+        )
+        self.assertTrue(should_confirm_stall_mode_enable(state))
+
+    def test_should_confirm_stall_mode_enable_when_encoder_state_unknown(self):
+        state = HostAppState(
+            is_connected=True,
+            power_unlocked=True,
+            motor_identified=True,
+            encoder_detected=None,
         )
         self.assertTrue(should_confirm_stall_mode_enable(state))
 

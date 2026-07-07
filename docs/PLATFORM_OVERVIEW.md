@@ -129,7 +129,8 @@ Failure reasons: `parse | range | state | busy | fault | unsupported`
 
 ## Safety Boundaries
 
-- MOTION_CFG speed limit: 1.0 rad/s (SREF clamped)
+- MOTION_CFG speed limit: 1.0 rad/s for position/joint/gimbal trajectories
+- RAW SPEED SREF clamp: +/-8 rad/s; default ramp is 2 rad/s^2
 - All APP_MODE forces clamped to ±0.30A
 - STOP always available (all modes, during CAL, during telemetry)
 - CLEAR_FAULT does not clear black box

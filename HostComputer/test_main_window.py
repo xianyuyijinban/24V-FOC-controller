@@ -11,9 +11,9 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QScrollArea
 
-from data_parser import FOCDataPacket
+from data_parser import CurrentSample, FOCDataPacket, CommandBuilder
 from main_window import HostMainWindow
 
 
@@ -25,6 +25,12 @@ class TestHostMainWindow(unittest.TestCase):
     def _window(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         return HostMainWindow(profile_path=Path(self.temp_dir.name) / "profile.json")
+
+    def _settle_pending(self, window):
+        window._state.pending_command = None
+        window._state.pending_command_value = None
+        window._state.pending_command_sent_at_ms = None
+        window._apply_control_enable_state()
 
     def tearDown(self):
         temp_dir = getattr(self, "temp_dir", None)
@@ -43,9 +49,18 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(window.current_pi_apply_button.text(), "应用电流环 PI")
         self.assertEqual(window.position_pd_apply_button.text(), "应用位置环 PD")
 
+    def test_tall_configuration_tabs_are_scrollable(self):
+        window = self._window()
+
+        self.assertIsInstance(window.tabs.widget(0), QScrollArea)
+        self.assertNotIsInstance(window.tabs.widget(1), QScrollArea)
+        self.assertIsInstance(window.tabs.widget(2), QScrollArea)
+        self.assertIsInstance(window.tabs.widget(3), QScrollArea)
+        self.assertIsInstance(window.tabs.widget(4), QScrollArea)
+
     def test_angle_plot_channel_is_enabled_by_default(self):
         window = self._window()
-        self.assertTrue(window.plot_channel_checks["angle"].isChecked())
+        self.assertTrue(window.plot_channel_checks["Ia"].isChecked())
 
     def test_motor_pn_defaults_to_11_for_12v_bench_motor(self):
         window = self._window()
@@ -143,7 +158,7 @@ class TestHostMainWindow(unittest.TestCase):
         window = self._window()
         window.update_connection_state(True)
         window.speed_ref_input.setText("abc")
-        window.speed_apply_button.click()
+        window.speed_apply_button.clicked.emit()
         self.assertIn("有效数字", window.statusBar().currentMessage())
 
     def test_vbus_limit_apply_emits_expected_command(self):
@@ -291,7 +306,9 @@ class TestHostMainWindow(unittest.TestCase):
         window.command_requested.connect(commands.append)
         window.update_connection_state(True)
         commands.clear()
+        window._state.identify_active = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:IDENTIFY,1")
+        self._settle_pending(window)
 
         window.apply_packet(FOCDataPacket(foc_state=3, is_fault_active=False, motor_identified=True))
 
@@ -305,32 +322,157 @@ class TestHostMainWindow(unittest.TestCase):
         commands.clear()
 
         window.position_ref_input.setText("90")
-        window.position_apply_button.click()
+        window.position_apply_button.clicked.emit()
 
         self.assertEqual(commands, [])
         self.assertIn("先解锁并使能", window.statusBar().currentMessage())
+
+    def test_pending_command_disables_advancing_controls(self):
+        window = self._window()
+        window.update_connection_state(True)
+        window._state.power_unlocked = True
+        window._state.pending_command = "ENABLE"
+
+        window._apply_control_enable_state()
+
+        self.assertFalse(window.enable_button.isEnabled())
+        self.assertFalse(window.quick_arm_button.isEnabled())
+        self.assertFalse(window.speed_apply_button.isEnabled())
+        self.assertFalse(window.app_mode_set_button.isEnabled())
+        self.assertTrue(window.lock_button.isEnabled())
+        self.assertTrue(window.clear_fault_button.isEnabled())
+
+    def test_dispatch_command_blocks_duplicate_enable_while_pending(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.power_unlocked = True
+        window._state.pending_command = "ENABLE"
+
+        window._dispatch_command(CommandBuilder.enable_motor(True))
+
+        self.assertEqual(commands, [])
+        self.assertIn("ENABLE", window.statusBar().currentMessage())
+
+    def test_dispatch_command_allows_safe_fallback_while_pending(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.power_unlocked = True
+        window._state.pending_command = "ENABLE"
+
+        window._dispatch_command(CommandBuilder.enable_motor(False))
+
+        self.assertEqual(commands, [CommandBuilder.enable_motor(False)])
 
     def test_advanced_control_apply_buttons_emit_expected_commands(self):
         window = self._window()
         commands = []
         window.command_requested.connect(commands.append)
         window.update_connection_state(True)
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        window._state.motor_enabled = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:ENABLE,1")
+        self._settle_pending(window)
 
         window.current_id_input.setText("0.10")
         window.current_iq_input.setText("1.50")
-        window.current_apply_button.click()
+        window.current_apply_button.clicked.emit()
 
         window.speed_ref_input.setText("5.0")
-        window.speed_apply_button.click()
+        window.speed_apply_button.clicked.emit()
 
         window.position_ref_input.setText("90")
-        window.position_apply_button.click()
+        window.position_apply_button.clicked.emit()
 
         self.assertIn("CMD:IREF,0.100,1.500\n", commands)
         self.assertIn("CMD:SREF,5.000\n", commands)
         self.assertIn("CMD:PREF,1.571\n", commands)
+
+    def test_current_stream_toggle_starts_recommended_binary_scope(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+
+        window.cur_stream_group.setChecked(True)
+
+        self.assertTrue(window._scope_enabled)
+        self.assertTrue(window.scope_toggle_button.isChecked())
+        self.assertEqual(window.scope_window_combo.currentText(), "1s")
+        self.assertEqual(window.cur_mode_combo.currentIndex(), 2)
+        self.assertIn(CommandBuilder.telem_cur_bin(1000), commands)
+
+    def test_current_stream_mode_change_starts_scope_when_enabled(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+
+        window.cur_stream_group.blockSignals(True)
+        window.cur_stream_group.setChecked(True)
+        window.cur_stream_group.blockSignals(False)
+        window.cur_mode_combo.setCurrentIndex(1)
+
+        self.assertTrue(window._scope_enabled)
+        self.assertIn(CommandBuilder.telem_cur_ascii(200), commands)
+
+    def test_current_stream_plot_data_is_scaled_to_milliamps(self):
+        window = self._window()
+
+        class FakeRing:
+            def __init__(self):
+                self._samples = [
+                    CurrentSample(seq=10, tick_ms=1000, ia=0.123, ib=-0.045, ic=-0.078),
+                    CurrentSample(seq=11, tick_ms=1001, ia=0.125, ib=-0.047, ic=-0.079),
+                ]
+
+            def get_all(self):
+                return list(self._samples)
+
+        class FakeWorker:
+            def __init__(self):
+                self._ring = FakeRing()
+
+            def current_ring(self):
+                return self._ring
+
+        window._serial_worker = FakeWorker()
+        window._scope_start_seq = 10
+        window._scope_start_tick_ms = 1000
+
+        _, series = window._get_current_stream_plot_data(["Ia", "Ib", "Ic"])
+
+        self.assertEqual(series["Ia"], [123.0, 125.0])
+        self.assertEqual(series["Ib"], [-45.0, -47.0])
+        self.assertEqual(series["Ic"], [-78.0, -79.0])
+
+    def test_current_stream_diagnostics_report_window_metrics(self):
+        samples = [
+            CurrentSample(seq=1, tick_ms=1000, ia=0.100, ib=-0.040, ic=-0.060, id=0.010, iq=0.020),
+            CurrentSample(seq=2, tick_ms=1001, ia=0.120, ib=-0.050, ic=-0.070, id=0.020, iq=0.030),
+        ]
+
+        text = HostMainWindow._format_current_diagnostics(samples)
+
+        self.assertIn("diag n=2", text)
+        self.assertIn("sumABC mean=+0.0mA", text)
+        self.assertIn("Id mean=+15.0mA", text)
+        self.assertIn("Iq mean=+25.0mA", text)
+        self.assertIn("phase p-p=20/10/10mA", text)
+
+    def test_scope_ignores_zero_timestamp_as_time_origin(self):
+        window = self._window()
+        window._scope_enabled = True
+
+        window.apply_packet(FOCDataPacket(timestamp=0, angle=1.0))
+        self.assertIsNone(window._scope_start_timestamp)
+
+        window.apply_packet(FOCDataPacket(timestamp=10000, angle=2.0))
+        self.assertEqual(window._scope_start_timestamp, 10000.0)
 
     def test_unidentified_enable_confirms_stall_mode_before_enabling(self):
         window = self._window()
@@ -338,7 +480,9 @@ class TestHostMainWindow(unittest.TestCase):
         window.command_requested.connect(commands.append)
         window.update_connection_state(True)
         commands.clear()
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
         window._state.motor_identified = False
         window._confirm_stall_mode_enable = lambda: True
 
@@ -346,7 +490,7 @@ class TestHostMainWindow(unittest.TestCase):
 
         self.assertEqual(
             commands,
-            ["CMD:STALL_MODE,1\n", "CMD:MODE,1\n", "CMD:ENABLE,1\n"],
+            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n"],
         )
 
     def test_encoder_offline_enable_confirms_stall_mode_before_enabling(self):
@@ -355,7 +499,9 @@ class TestHostMainWindow(unittest.TestCase):
         window.command_requested.connect(commands.append)
         window.update_connection_state(True)
         commands.clear()
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
         window._state.motor_identified = True
         window._state.encoder_detected = False
         window._confirm_stall_mode_enable = lambda: True
@@ -364,7 +510,27 @@ class TestHostMainWindow(unittest.TestCase):
 
         self.assertEqual(
             commands,
-            ["CMD:STALL_MODE,1\n", "CMD:MODE,1\n", "CMD:ENABLE,1\n"],
+            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n"],
+        )
+
+    def test_encoder_unknown_enable_confirms_stall_mode_before_enabling(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.power_unlocked = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
+        window._state.motor_identified = True
+        window._state.encoder_detected = None
+        window._confirm_stall_mode_enable = lambda: True
+
+        window.enable_button.clicked.emit()
+
+        self.assertEqual(
+            commands,
+            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n"],
         )
 
     def test_identify_panel_exposes_stall_open_loop_runtime_state(self):
@@ -377,7 +543,9 @@ class TestHostMainWindow(unittest.TestCase):
         window.command_requested.connect(commands.append)
         window.update_connection_state(True)
         commands.clear()
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
         window._state.motor_identified = False
         window._confirm_stall_mode_enable = lambda: False
 
@@ -391,7 +559,9 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertFalse(window.identify_start_page_button.isEnabled())
 
         window.update_connection_state(True)
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
         self.assertTrue(window.identify_start_page_button.isEnabled())
         self.assertIn("已连接", window.identify_connection_value.text())
         self.assertIn("已解锁", window.identify_power_value.text())
@@ -399,13 +569,19 @@ class TestHostMainWindow(unittest.TestCase):
     def test_ready_packet_clears_identify_and_enable_latched_button_state(self):
         window = self._window()
         window.update_connection_state(True)
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
+        window._state.identify_active = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:IDENTIFY,1")
+        self._settle_pending(window)
         window.apply_packet(FOCDataPacket(foc_state=3, is_fault_active=False))
         self.assertTrue(window.identify_start_page_button.isEnabled())
         self.assertFalse(window.identify_stop_page_button.isEnabled())
 
+        window._state.motor_enabled = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:ENABLE,1")
+        self._settle_pending(window)
         window.apply_packet(FOCDataPacket(foc_state=3, is_fault_active=False))
         self.assertTrue(window.enable_button.isEnabled())
         self.assertFalse(window.disable_button.isEnabled())
@@ -571,14 +747,210 @@ class TestHostMainWindow(unittest.TestCase):
         window._confirm_stall_mode_enable = lambda: True
         window.quick_arm_button.click()
         self.assertEqual(
-            commands[:4],
-            ["CMD:UNLOCK,1\n", "CMD:STALL_MODE,1\n", "CMD:MODE,1\n", "CMD:ENABLE,1\n"],
+            commands[:3],
+            ["CMD:UNLOCK,1\n", "CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n"],
         )
 
+        window._state.power_unlocked = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:UNLOCK,1")
+        window._state.motor_enabled = True  # V1.2: simulate ACK
         window.handle_log_line("TX", "CMD:ENABLE,1")
+        self._settle_pending(window)
         window.quick_safe_stop_button.click()
         self.assertEqual(commands[-2:], ["CMD:ENABLE,0\n", "CMD:UNLOCK,0\n"])
+
+    def test_power_ack_payload_updates_buttons_and_status_text(self):
+        window = self._window()
+        window.update_connection_state(True)
+
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        window.handle_log_line("RX", "UNLOCK,OK,1")
+
+        self.assertTrue(window._state.power_unlocked)
+        self.assertFalse(window.unlock_button.isEnabled())
+        self.assertTrue(window.lock_button.isEnabled())
+        self.assertTrue(window.enable_button.isEnabled())
+        self.assertEqual(window.power_status_label.text(), "已解锁 | 未使能")
+        self.assertEqual(window.app_power_status.text(), "已解锁 | 未使能")
+
+        window.handle_log_line("TX", "CMD:ENABLE,1")
+        window.handle_log_line("RX", "ENABLE,OK,1")
+
+        self.assertTrue(window._state.motor_enabled)
+        self.assertFalse(window.enable_button.isEnabled())
+        self.assertTrue(window.disable_button.isEnabled())
+        self.assertEqual(window.power_status_label.text(), "已解锁 | 已使能")
+        self.assertEqual(window.app_power_status.text(), "已解锁 | 已使能")
+
+    def test_app_power_buttons_use_enable_state_machine(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+
+        self.assertTrue(window.app_arm_button.isEnabled())
+        self.assertTrue(window.quick_arm_button.isEnabled())
+        self.assertFalse(window.app_enable_button.isEnabled())
+
+        window._state.motor_identified = True
+        window._state.encoder_detected = True
+        window.app_arm_button.clicked.emit()
+        # V1.2+: sequence emits APP_MODE first; rest waits for ACK advancement
+        self.assertEqual(commands, ["CMD:APP_MODE,RAW"])
+
+        commands.clear()
+        window._state.power_unlocked = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
+        window.enable_button.clicked.emit()
+        window.app_enable_button.clicked.emit()
+        # Top enable stays legacy; app enable emits APP_MODE first
+        self.assertEqual(
+            commands,
+            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n", "CMD:APP_MODE,RAW"],
+        )
+
+    def test_app_enable_preserves_stall_mode_confirmation_sequence(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+
+        window._state.power_unlocked = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
+        window._state.motor_identified = False
+        window._confirm_stall_mode_enable = lambda: True
+
+        window.app_enable_button.clicked.emit()
+
+    def test_joint_position_target_reasserts_app_mode_before_pref(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        window._state.power_unlocked = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        window._state.motor_enabled = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:ENABLE,1")
+        self._settle_pending(window)
+        commands.clear()
+        window._state.app_mode = "JOINT_POS"
+        window._state.control_mode = 1
+        window.joint_pos_target_spin.setValue(20.0)
+
+        window.joint_pos_start_btn.clicked.emit()
+        self.assertEqual(commands, ["CMD:APP_MODE,JOINT_POS"])
+
+    def test_detent_cfg_reasserts_app_mode_even_when_host_thinks_detent(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.app_mode = "DETENT"
+        window.detent_count_spin.setValue(12)
+        window.detent_strength_spin.setValue(1.0)
+        window.detent_width_spin.setValue(0.13)
+        window.detent_limit_spin.setValue(0.25)
+
+        window.detent_cfg_set_btn.clicked.emit()
+
+
+    def test_detent_preset_reasserts_app_mode_even_when_host_thinks_detent(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.app_mode = "DETENT"
+
+        window.detent_preset_std_btn.clicked.emit()
+        self.assertEqual(commands, ["CMD:APP_MODE,DETENT"])
+        self.assertEqual(commands, ["CMD:APP_MODE,DETENT"])
+
+    def test_hold_panel_status_uses_runtime_telemetry(self):
+        window = self._window()
+        window.update_connection_state(True)
+
+        window.handle_log_line("RX", "APP_MODE,OK,HOLD")
+        window.apply_packet(FOCDataPacket(foc_state=4, angle=295.7, speed=0.02, control_mode=1))
+
+        self.assertIn("产品：位置保持", window.advanced_mode_value.text())
+        self.assertIn("底层：位置", window.advanced_mode_value.text())
+        self.assertEqual(window.hold_angle_label.text(), "295.70 deg")
+        self.assertEqual(window.hold_speed_label.text(), "0.02 rad/s")
+
+    # ── V1.2 Chinese display tests ──
+
+    def test_app_mode_combo_shows_chinese_labels_with_protocol_userdata(self):
+        window = self._window()
+        combo = window.app_mode_combo
+        self.assertEqual(combo.count(), 6)
+        labels = [combo.itemText(i) for i in range(combo.count())]
+        self.assertEqual(labels, ["原始控制", "关节位置", "云台速度", "位置保持", "弹簧阻尼", "卡点旋钮"])
+        tokens = [combo.itemData(i) for i in range(combo.count())]
+        self.assertEqual(tokens, ["RAW", "JOINT_POS", "GIMBAL_SPEED", "HOLD", "SPRING_DAMPER", "DETENT"])
+
+    def test_app_mode_set_button_uses_currentData(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        idx = window.app_mode_combo.findData("HOLD")
+        window.app_mode_combo.setCurrentIndex(idx)
+        window.app_mode_set_button.clicked.emit()
+        self.assertIn("CMD:APP_MODE,HOLD\n", commands)
+
+    def test_app_mode_ack_reselects_combo_via_findData(self):
+        window = self._window()
+        window.update_connection_state(True)
+        self.assertEqual(window.app_mode_combo.currentIndex(), 0)
+        window.handle_log_line("RX", "APP_MODE,OK,HOLD")
+        self.assertEqual(window.app_mode_combo.currentText(), "位置保持")
+        self.assertEqual(window.app_mode_combo.currentData(), "HOLD")
+
+    def test_app_control_status_shows_chinese_format_raw(self):
+        window = self._window()
+        window._state.app_mode = "RAW"
+        window._state.control_mode = 0
+        text = window._app_control_status_text()
+        self.assertIn("产品：原始控制", text)
+        self.assertIn("底层：力矩", text)
+
+    def test_app_control_status_shows_chinese_format_non_raw(self):
+        window = self._window()
+        window._state.app_mode = "SPRING_DAMPER"
+        text = window._app_control_status_text()
+        self.assertIn("产品：弹簧阻尼", text)
+        self.assertIn("底层：位置", text)
+
+    def test_enable_and_arm_buttons_disable_during_fault_or_identify(self):
+        window = self._window()
+        window.update_connection_state(True)
+        window._state.power_unlocked = True  # V1.2: simulate ACK
+        window.handle_log_line("TX", "CMD:UNLOCK,1")
+        self._settle_pending(window)
+
+        window._state.identify_active = True
+        window._state.fault_active = False
+        window._state.motor_enabled = False
+        window._apply_control_enable_state()
+        self.assertFalse(window.enable_button.isEnabled())
+        self.assertFalse(window.quick_arm_button.isEnabled())
+        self.assertFalse(window.app_enable_button.isEnabled())
+        self.assertFalse(window.app_arm_button.isEnabled())
+
+        window._state.identify_active = False
+        window._state.fault_active = True
+        window._apply_control_enable_state()
+        self.assertFalse(window.enable_button.isEnabled())
+        self.assertFalse(window.quick_arm_button.isEnabled())
+        self.assertFalse(window.app_enable_button.isEnabled())
+        self.assertFalse(window.app_arm_button.isEnabled())
 
 
 if __name__ == "__main__":

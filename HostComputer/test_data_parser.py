@@ -6,7 +6,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from data_parser import CommandBuilder, FOCDataParser
+from data_parser import CommandBuilder, FOCDataParser, AckParser, AckResult, BinaryCurrentParser
 
 COMPACT_NORMAL_FRAME = "N,1234,4,12.34,9.87,0.111,1.234,11.98,0x00000000,1,1,0,1,18.00,28.00\n"
 COMPACT_FAULT_FRAME = "F,3456,5,0x00000020,1,0,1,0x0640,0x00C0,0xFFFF,11.98,18.00,28.00\n"
@@ -565,6 +565,228 @@ class TestCommandBuilder(unittest.TestCase):
         self.assertEqual(CommandBuilder.set_current_pi(0.2, 0.01), "CMD:PI_CURRENT,0.200000,0.010000\n")
         self.assertEqual(CommandBuilder.set_speed_pi(1.0, 0.1), "CMD:PI_SPEED,1.000000,0.100000\n")
         self.assertEqual(CommandBuilder.set_position_pd(3.0, 0.5), "CMD:PD_POS,3.000000,0.500000\n")
+
+    def test_telem_cur_commands(self):
+        self.assertEqual(CommandBuilder.telem_cur_off(), "TELEM:CUR,OFF\n")
+        self.assertEqual(CommandBuilder.telem_cur_ascii(200), "TELEM:CUR,ASCII,200\n")
+        self.assertEqual(CommandBuilder.telem_cur_bin(1000), "TELEM:CUR,BIN,1000\n")
+        self.assertEqual(CommandBuilder.telem_cur_bin(2000), "TELEM:CUR,BIN,2000\n")
+
+
+class TestBinaryCurrentParserTextResidual(unittest.TestCase):
+    def test_short_ascii_ack_is_released_immediately(self):
+        parser = BinaryCurrentParser()
+
+        samples, text = parser.feed(b"UNLOCK,OK,1\r\n")
+
+        self.assertEqual(samples, [])
+        self.assertEqual(text, b"UNLOCK,OK,1\r\n")
+
+    def test_single_sync_prefix_is_kept_for_next_chunk(self):
+        parser = BinaryCurrentParser()
+
+        samples, text = parser.feed(b"abc\xA5")
+
+        self.assertEqual(samples, [])
+        self.assertEqual(text, b"abc")
+
+        samples, text = parser.feed(b"not_binary\r\n")
+        self.assertEqual(samples, [])
+        self.assertEqual(text, b"\xA5not_binary\r\n")
+
+    def test_text_before_binary_sync_is_released(self):
+        parser = BinaryCurrentParser()
+
+        samples, text = parser.feed(b"ENABLE,OK,1\r\n\xA5\x5A")
+
+        self.assertEqual(samples, [])
+        self.assertEqual(text, b"ENABLE,OK,1\r\n")
+
+
+class TestAckParser(unittest.TestCase):
+    def test_parse_unlock_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("UNLOCK,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "UNLOCK")
+        self.assertIsNone(result.reason)
+        self.assertIsNone(result.command_value)
+
+    def test_parse_power_ok_with_value(self):
+        parser = AckParser()
+
+        unlock = parser.parse_line("UNLOCK,OK,1")
+        self.assertIsNotNone(unlock)
+        self.assertTrue(unlock.ok)
+        self.assertEqual(unlock.command, "UNLOCK")
+        self.assertEqual(unlock.command_value, "1")
+
+        enable = parser.parse_line("ENABLE,OK,0")
+        self.assertIsNotNone(enable)
+        self.assertTrue(enable.ok)
+        self.assertEqual(enable.command, "ENABLE")
+        self.assertEqual(enable.command_value, "0")
+
+    def test_parse_unlock_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("UNLOCK,FAIL,busy")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.command, "UNLOCK")
+        self.assertEqual(result.reason, "busy")
+
+    def test_parse_enable_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("ENABLE,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "ENABLE")
+
+    def test_parse_enable_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("ENABLE,FAIL,not unlocked")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.command, "ENABLE")
+        self.assertEqual(result.reason, "not unlocked")
+
+    def test_parse_identify_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("IDENTIFY,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "IDENTIFY")
+
+    def test_parse_identify_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("IDENTIFY,FAIL,motor not idle")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "motor not idle")
+
+    def test_parse_mode_ok_with_value(self):
+        parser = AckParser()
+        result = parser.parse_line("MODE,OK,2")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "MODE")
+        self.assertEqual(result.mode_value, 2)
+
+    def test_parse_mode_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("MODE,FAIL,invalid mode")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "invalid mode")
+
+    def test_parse_app_mode_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("APP_MODE,OK,JOINT_POS (ctrl_mode=2)")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "APP_MODE")
+        self.assertEqual(result.app_mode_name, "JOINT_POS")
+        self.assertEqual(result.app_mode_ctrl, 2)
+
+    def test_parse_app_mode_ok_no_ctrl(self):
+        parser = AckParser()
+        result = parser.parse_line("APP_MODE,OK,GIMBAL_SPEED")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.app_mode_name, "GIMBAL_SPEED")
+        self.assertIsNone(result.app_mode_ctrl)
+
+    def test_parse_app_mode_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("APP_MODE,FAIL,unknown mode")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "unknown mode")
+
+    def test_parse_stall_mode_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("STALL_MODE,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "STALL_MODE")
+
+    def test_parse_clear_fault_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("CLEAR_FAULT,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "CLEAR_FAULT")
+
+    def test_parse_iref_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("IREF,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "IREF")
+
+    def test_parse_pref_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("PREF,FAIL,out of range")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.command, "PREF")
+        self.assertEqual(result.reason, "out of range")
+
+    def test_parse_motor_pn_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("MOTOR_PN,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "MOTOR_PN")
+
+    def test_parse_encoder_dir_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("ENCODER_DIR,FAIL,must be +1 or -1")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "must be +1 or -1")
+
+    def test_parse_home_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("HOME,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "HOME")
+
+    def test_parse_clear_home_fail(self):
+        parser = AckParser()
+        result = parser.parse_line("CLEAR_HOME,FAIL,no home set")
+        self.assertIsNotNone(result)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.command, "CLEAR_HOME")
+        self.assertEqual(result.reason, "no home set")
+
+    def test_parse_non_ack_line_returns_none(self):
+        parser = AckParser()
+        self.assertIsNone(parser.parse_line("N,1234,4,12.34,..."))
+        self.assertIsNone(parser.parse_line(""))
+        self.assertIsNone(parser.parse_line("JOINT:LIMIT,OK,min=-30.0deg,max=30.0deg"))
+        self.assertIsNone(parser.parse_line("GIMBAL:RAMP,OK,accel=2.0radps2"))
+        self.assertIsNone(parser.parse_line("random noise"))
+        self.assertIsNone(parser.parse_line("   "))
+
+    def test_parse_sref_ok(self):
+        parser = AckParser()
+        result = parser.parse_line("SREF,OK")
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.command, "SREF")
+
+
+class TestBinaryCurrentParser(unittest.TestCase):
+    def test_short_ascii_ack_not_held_for_binary_frame(self):
+        """Short ASCII ACK lines (e.g. UNLOCK,OK,1\\r\\n) must be returned
+        as residual text, not held waiting for a 25-byte binary frame."""
+        parser = BinaryCurrentParser()
+        samples, text = parser.feed(b"UNLOCK,OK,1\r\n")
+        self.assertEqual(samples, [])
+        self.assertEqual(text, b"UNLOCK,OK,1\r\n")
 
 
 if __name__ == "__main__":

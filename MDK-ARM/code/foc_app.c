@@ -725,6 +725,9 @@ static uint8_t FOC_App_ShouldBootstrapNeutralPwm(const FOC_AppHandle_t *handle, 
     return 1U;
 }
 
+/* Forward declaration: used in SpeedLoop before its full definition below */
+static uint8_t FOC_App_IsHapticMode(const FOC_AppHandle_t *handle);
+
 /**
  * @brief 转速计算和速度环控制（2kHz）
  * @param handle FOC应用层句柄指针
@@ -901,6 +904,12 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         } else if (handle->control_mode == FOC_MODE_POSITION) {
             iq_limit_pos = FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A;
             iq_limit_neg = -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A;
+        }
+        /* Haptic modes (SPRING_DAMPER / DETENT): bypass speed PI + all feedforward;
+         * torque is computed purely from spring/detent physics below. */
+        if (FOC_App_IsHapticMode(handle)) {
+            iq_ref_mech = 0.0f;
+            goto haptic_torque_injection;
         }
         /* ── Speed PI with conditional integration ── */
         {
@@ -1170,6 +1179,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         }
         FOC_App_ClampSpeedPiIntegral(&handle->pi_speed, iq_limit_pos, iq_limit_neg);
 
+haptic_torque_injection:
         /* ── Phase 3B: Spring-Damper / Detent torque injection ── */
         if (handle->app_mode == APP_MODE_SPRING_DAMPER && handle->motor_identified) {
             float theta_mech_zeroed = FOC_AngleNormalize(
@@ -1257,9 +1267,25 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
  * - 输出速度给定到handle->speed_ref
  * - 速度环在FOC_App_SpeedLoop中单独执行（2kHz）
  */
+
+/* ── Haptic mode helper ── */
+static uint8_t FOC_App_IsHapticMode(const FOC_AppHandle_t *handle)
+{
+    return (handle->app_mode == APP_MODE_SPRING_DAMPER ||
+            handle->app_mode == APP_MODE_DETENT) ? 1U : 0U;
+}
+
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
 {
     if ((handle == NULL) || handle->stall_open_loop_active) {
+        return;
+    }
+
+    /* Haptic modes (SPRING_DAMPER, DETENT) bypass normal PositionLoop —
+     * they compute torque directly in SpeedLoop, not via position PD. */
+    if (FOC_App_IsHapticMode(handle)) {
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
         return;
     }
 
@@ -1380,6 +1406,7 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
 
         stall_enable = 1U;
         handle->control_mode = FOC_MODE_SPEED;
+        handle->app_mode = APP_MODE_RAW;
     }
 
     /* Normal precheck contract remains: FOC_App_PrecheckPowerStage(handle, &fault) */
@@ -1699,13 +1726,11 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref)
                                  FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S,
                                  -FOC_STALL_OPEN_LOOP_SPEED_MAX_RAD_PER_S);
     } else if (handle->control_mode == FOC_MODE_SPEED) {
-        /* Speed mode: clamp to motion config speed limit (default 1.0 rad/s).
-         * Protects against accidental high-speed commands on 12V bench. */
-        float max_speed = handle->position_speed_limit_radps;
-        if (max_speed < 0.1f) {
-            max_speed = FOC_MOTION_CFG_SPEED_LIMIT_DEFAULT;
-        }
-        speed_ref = FOC_Saturate(speed_ref, max_speed, -max_speed);
+        /* RAW SPEED uses the explicit SREF command range. MOTION_CFG remains
+         * the conservative trajectory limit for position/joint/gimbal flows. */
+        speed_ref = FOC_Saturate(speed_ref,
+                                 FOC_SPEED_REF_MAX_RAD_PER_S,
+                                 -FOC_SPEED_REF_MAX_RAD_PER_S);
     }
 
     handle->speed_ref = speed_ref;
@@ -1775,11 +1800,42 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 
     handle->control_mode = mode;
 
-    /* Phase 3A: explicit CTRL:MODE in non-RAW app mode resets to RAW
-     * to prevent semantic conflict (e.g. JOINT_POS + speed mode). */
-    if (handle->app_mode != APP_MODE_RAW) {
-        handle->app_mode = APP_MODE_RAW;
+    if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
+        FOC_App_RefreshEncoderFeedback(handle);
+        float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+        float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        handle->pos_ref = FOC_AngleNormalize(theta_mech_zeroed * encoder_dir_f);
+        handle->speed_ref = 0.0f;
+        handle->position_ref_user_set = 0U;
     }
+
+    /* 切换模式时清零积分，防止跳变 */
+    handle->pi_speed.integral = 0.0f;
+    handle->position_friction_active = 0U;
+}
+
+/**
+ * @brief 设置底层控制模式并显式切回 RAW 产品模式
+ * @param handle FOC应用层句柄指针
+ * @param mode 控制模式（力矩/速度/位置）
+ *
+ * 与 FOC_App_SetControlMode() 的区别：
+ * - 本函数同时设置 app_mode = APP_MODE_RAW
+ * - 用于用户显式选择底层 RAW 控制模式（如 CMD:MODE,N）
+ * - 不应在 APP_MODE 内部切换时调用
+ */
+void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    if (handle->stall_open_loop_active && (mode == FOC_MODE_POSITION)) {
+        mode = FOC_MODE_SPEED;
+    }
+
+    handle->control_mode = mode;
+    handle->app_mode = APP_MODE_RAW;
 
     if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
         FOC_App_RefreshEncoderFeedback(handle);
@@ -1842,22 +1898,28 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
         break;
 
     case APP_MODE_SPRING_DAMPER:
-        /* SPRING_DAMPER: position loop drives virtual spring torque */
+        /* SPRING_DAMPER: always capture current position as equilibrium.
+         * Must not inherit a stale PREF target from a previous mode. */
         handle->control_mode = FOC_MODE_POSITION;
-        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+        if (handle->motor_identified) {
             FOC_App_RefreshEncoderFeedback(handle);
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(
                     handle->theta_mech - handle->motor_param.mech_zero_offset);
                 handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+                handle->position_ref_user_set = 1U;
             }
         }
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
         break;
 
     case APP_MODE_DETENT:
-        /* DETENT: position loop holds at nearest detent */
+        /* DETENT: always capture the nearest detent on entry.  A previous
+         * PREF/JOINT_POS command may leave position_ref_user_set latched,
+         * but detent mode must not keep chasing that old position target. */
         handle->control_mode = FOC_MODE_POSITION;
-        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+        if (handle->motor_identified) {
             FOC_App_RefreshEncoderFeedback(handle);
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(

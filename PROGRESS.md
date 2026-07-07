@@ -1,5 +1,758 @@
 # PROGRESS
 
+## [2026-07-07] APP_MODE Sync And UART ACK Release Candidate
+
+### Problem / Task
+- Product-mode GUI selection was not reliably synchronized with firmware `APP_MODE` before enable, target, or config commands.
+- DETENT/Spring config responses exposed a `%f` formatting gap in the firmware build flags, and 1Mbaud UART RX needed the circular-DMA command path retained in the release candidate.
+
+### Resolution
+- Implemented APP_MODE-aware command sequencing in HostComputer so advanced control actions send `CMD:APP_MODE,<mode>` before enable/arm, PREF/SREF, SPRING:CFG, and DETENT:CFG dependent commands.
+- Kept top-level RAW power controls independent from product-mode synchronization.
+- Added firmware ACK responses for power/mode/target commands, circular UART RX diagnostics/recovery, full `DETENT:CFG` response echo, and `_printf_float` linker support for floating-point config echoes.
+- Preserved haptic-mode safeguards: SPRING_DAMPER/DETENT require identified motor and valid encoder instead of stall fallback.
+
+### Prevention / Follow-up
+- Hardware smoke passed per user report; future product-mode UI commands should use the ACK sequence engine rather than direct multi-command emits.
+- `scripts/pid_auto_tune.py` remains an unrelated untracked/experimental script and was not included in this release candidate.
+
+### Verification
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 183 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: build completed successfully, 0 errors, 0 warnings; text=158824, bss=38888.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `pending release commit`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `Core/Src/stm32h7xx_it.c`
+  - `Core/Src/usart.c`
+  - `MDK-ARM/code/foc_app.c`
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/head.h`
+  - `HostComputer/data_parser.py`
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_data_parser.py`
+  - `HostComputer/test_gui_logic.py`
+  - `HostComputer/test_main_window.py`
+  - `build.ps1`
+  - `docs/PLATFORM_OVERVIEW.md`
+  - `docs/UART_COMMANDS.md`
+
+## [2026-07-07] Hardware Bring-up And UART Regression Completed
+
+### Problem / Task
+- User completed the post-move hardware bring-up and wanted the results captured before mechanical assembly resumes.
+- A separate HostComputer/UART communication regression was needed after the firmware UART RX circular DMA changes.
+
+### Resolution
+- Recorded the completed firmware build/flash and bring-up flow: GCC `0 errors / 0 warnings`, CMSIS-DAP programmed `155648 bytes`, communication burst passed, unlock/enable/stop passed, existing motor parameters were valid, RAW speed/position control passed, current stream BIN1000 passed, APP_MODE modes passed, and fault/blackbox diagnostics responded.
+- Key control data reported: `SREF +0.5 -> avg_speed=0.500`, `SREF -0.5 -> avg_speed=-0.496`, `PREF +5deg -> error=1.6deg`, `PREF +20deg -> error=1.1deg`, `HOLD drift=0.0deg over 3s`, JOINT soft limits clipped around `+30.9deg / -31.1deg`, and BIN1000 ran 10s with `0 RX errors`.
+- Recorded UART regression report results: HostComputer unit tests `183/183 PASS`, `FW_INFO? 100/100`, RX errors `0->0`, ACK matrix all pass, N-frame 50Hz measured about `42Hz`, N-frame 100Hz measured about `64Hz` with `33/33` concurrent command success, BIN1000 and BIN2000 command coexistence passed, STOP recovery passed, and long text responses parsed under both current-stream OFF and BIN1000.
+- Noted current test port from the report as `COM7 @ 1000000 baud`; previous docs/scripts may still assume COM9.
+
+### Prevention / Follow-up
+- Mechanical bracket/payload tests remain deferred until the hardware bracket is finished and assembled.
+- Do not run the 26 legacy scripts listed in `UART_REGRESSION_REPORT.md` until their `1152000` baud constants are updated to `1000000` and the correct port is selected.
+- Treat BIN1000 as the validated current-stream baseline; BIN2000 remains experimental but command/STOP coexistence passed in this regression.
+
+### Verification
+- Reviewed the user's bring-up report and `UART_REGRESSION_REPORT.md`; no new build, flash, hardware action, or test was run by Codex in this turn.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63c`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `PROGRESS.md`
+  - `UART_REGRESSION_REPORT.md`
+  - `bringup_full_test.py`
+  - `uart_regression_test.py`
+
+## [2026-07-03] HostComputer Command Gate And GUI Pending Guard
+
+### Problem / Task
+- User wanted the command-gating idea implemented in the HostComputer GUI, not only explained as a function.
+- Repeated clicks could still send multiple state-advancing commands while a prior command was pending ACK/N-frame confirmation.
+
+### Resolution
+- Added host-side command gate helpers in `HostComputer\gui_logic.py`: `is_safe_fallback_command()`, `is_motion_target_command()`, and `can_dispatch_command()`.
+- Updated `button_enable_state()` and `can_edit_vbus_limits()` so GUI controls for advancing actions, motion targets, APP_MODE/product controls, and configuration edits are disabled while `pending_command` is active.
+- Wired `HostMainWindow._dispatch_command()` through `can_dispatch_command()` so direct programmatic sends cannot bypass disabled buttons.
+- Added sequence-level guarding in `_dispatch_sequence()` so pending/fault states block advancing command sequences while still allowing safety/fallback sequences.
+- Preserved safe fallback behavior for commands such as disable, lock, clear fault, fault detail, and queries.
+- Added/updated unit tests covering pending-state GUI disabling, duplicate enable blocking, safe fallback during pending, fault-state drive blocking, target-command requirements, and pending-settle behavior in existing GUI tests.
+
+### Prevention / Follow-up
+- Future command entry points should call `can_dispatch_command()` or share the same sequence-gating policy instead of emitting serial commands directly.
+- A later cleanup should fix mojibake Chinese strings in `main_window.py` / `gui_logic.py` so user-facing messages and tests are easier to maintain.
+
+### Verification
+- `python -m unittest HostComputer.test_gui_logic HostComputer.test_main_window`: 116 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 183 tests OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\main_window.py`
+  - `HostComputer\test_gui_logic.py`
+  - `HostComputer\test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-02] HostComputer Duplicate Command Gate Lesson
+
+### Problem / Task
+- Continued teaching by investigating why repeated button clicks can send repeated HostComputer CMD lines while a command is already pending.
+
+### Resolution
+- Reviewed `button_enable_state()`, `_dispatch_command()`, `_dispatch_sequence()`, and related enable button wiring.
+- Found that the current button enable logic does not account for `state.pending_command`; it only checks connection, unlock, enabled, identify, and fault states.
+- Found that command dispatch also lacks a pending-command gate, so repeated clicks can emit additional state-changing commands before ACK/N-frame convergence clears the previous pending command.
+
+### Prevention / Follow-up
+- Next lesson can demonstrate a small `pending_command` guard: disable state-changing buttons or reject new state-changing commands while pending, while still allowing emergency/safe-stop commands as a policy exception.
+
+### Verification
+- Read source snippets only; no tests or builds run.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-02] HostComputer ACK State Teaching Walkthrough
+
+### Problem / Task
+- Continued teaching the host-computer state-machine flow using the real HostComputer source code.
+
+### Resolution
+- Reviewed the enable-command path across `main_window.py` and `gui_logic.py`.
+- Mapped `pending_command`, `apply_command_effects()`, `apply_ack_effects()`, `apply_packet_effects()`, `_converge_pending_from_nframe()`, and `_check_ack_timeout()` to the conceptual flow: button request, command pending, ACK confirmation, telemetry fallback, and timeout warning.
+- Noted that the current timeout implementation warns and records `last_command_error` while continuing to wait for N-frame convergence instead of immediately clearing the pending command.
+
+### Prevention / Follow-up
+- Continue next lesson by comparing this implementation with a stricter command gate that blocks duplicate state-changing commands while pending.
+
+### Verification
+- Read source snippets only; no tests or builds run.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-02] Firmware APP_MODE / Product Mode Fixes (Round 2)
+
+### Problem / Task
+- Implement the firmware-side mode state machine fixes identified in the 2026-07-02 code review.
+- 7 items: SPRING:CFG parser cleanup, CMD:MODE no longer silently resets APP_MODE, SPRING_DAMPER unconditional position capture, SPRING/DETENT bypass normal PositionLoop, stall fallback resets APP_MODE, SYS:CMDS? completeness, DEBUG GPIO removal.
+
+### Resolution
+All 7 items implemented across 3 files:
+
+1. **SPRING:CFG parser** (`Core/Src/stm32h7xx_it.c`): Removed dead 2-param `UART_CommandParseFloat2` block; replaced with clean `sscanf` 3-param handler. Added range validation (`K>=0, D>=0, 0<=limit<=2.0A`) with `SPRING:CFG,FAIL,range` on invalid. Success response now echoes `SPRING:CFG,OK,K=...,D=...,limit=...`.
+
+2. **CMD:MODE → APP_MODE separation** (`MDK-ARM/code/foc_app.c`, `foc_app.h`): Removed `app_mode = APP_MODE_RAW` side-effect from `FOC_App_SetControlMode()`. Added new `FOC_App_SetRawControlMode()` that explicitly sets both `control_mode` and `app_mode = RAW`. `CMD:MODE,N` handler now calls `FOC_App_SetRawControlMode()`. `FOC_App_SetAppMode()` internal `control_mode` assignments are unaffected.
+
+3. **SPRING_DAMPER entry position capture** (`foc_app.c`): Removed `position_ref_user_set == 0U` guard. Entry now unconditionally captures current position as spring equilibrium and sets `position_ref_user_set = 1U`. Also clears `speed_ref` and `speed_ref_ramped`.
+
+4. **Haptic modes bypass PositionLoop** (`foc_app.c`): Added `FOC_App_IsHapticMode()` static helper. In `FOC_App_PositionLoop()`: haptic modes clear `speed_ref = 0` and return early. In `FOC_App_SpeedLoop()`: haptic modes skip speed PI + all feedforward via goto to `haptic_torque_injection:` label; `iq_ref_mech` starts from 0 and is filled purely by spring/detent torque physics.
+
+5. **Stall fallback** (`foc_app.c`): `FOC_App_Enable()` now sets `app_mode = APP_MODE_RAW` alongside `control_mode = FOC_MODE_SPEED` when stall fallback is triggered.
+
+6. **SYS:CMDS?** (`stm32h7xx_it.c`): APP_MODE line now lists `RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT`. Added `SPRING:CFG? SPRING:CFG,K,D,limit` and `DETENT:CFG? DETENT:CFG,count,strength,width,limit` line.
+
+7. **DEBUG GPIO removal** (`stm32h7xx_it.c`): Removed `HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0)` from TIM1_UP_IRQHandler.
+
+### Prevention / Follow-up
+- `SetControlMode` no longer has the side-effect of resetting app_mode; use `SetRawControlMode` for the explicit RAW-switch semantic.
+- Haptic modes (SPRING_DAMPER, DETENT) are now defined by `FOC_App_IsHapticMode()` — any future haptic-like mode should be added there.
+- Hardware validation of SPRING/DETENT hand-feel is still needed.
+
+### Verification
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: **OK** — 0 errors, 0 warnings. text=154204 (+488B), bss=38888 (unchanged).
+- `python -m unittest discover -s HostComputer -p "test*.py"`: **176 tests OK**.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63c`
+- Status: `working tree changes not committed yet`
+- Files modified:
+  - `MDK-ARM/code/foc_app.h` — added `FOC_App_SetRawControlMode` declaration
+  - `MDK-ARM/code/foc_app.c` — items 2-5: mode state machine, haptic bypass, stall fallback
+  - `Core/Src/stm32h7xx_it.c` — items 1,6,7: SPRING:CFG parser, SYS:CMDS?, DEBUG GPIO
+  - `PROGRESS.md`
+
+## [2026-07-02] Firmware APP_MODE / Product Mode Code Review
+
+### Problem / Task
+- User suspected the lower-machine product-mode control path was wrong after GUI mode switching, enable/arm, HOLD, JOINT, SPRING_DAMPER, and DETENT behavior looked inconsistent.
+
+### Resolution
+- Reviewed firmware-side APP_MODE, `CMD:MODE`, JOINT/GIMBAL/SPRING/DETENT command handlers, enable/stall fallback, position loop, and speed-loop haptic torque injection.
+- Identified several mode-layer risks: `SPRING:CFG` parser ordering rejects valid 3-parameter commands, `CMD:MODE` resets product mode to RAW, SPRING_DAMPER can inherit an old position reference, SPRING/DETENT still run the normal position loop while adding haptic torque, and stall fallback can leave APP_MODE displayed while forcing bottom control to SPEED.
+
+### Prevention / Follow-up
+- Recommended fixing the firmware mode contract before more GUI changes: make APP_MODE ownership explicit, parse SPRING config exactly, capture spring equilibrium on entry, and separate haptic-product modes from the normal position servo if the intended behavior is hand-feel rather than target tracking.
+
+### Verification
+- Static review only; no firmware edits, build, flash, or hardware test run.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63c`
+- Status: `working tree changes not committed yet`
+- Files reviewed:
+  - `MDK-ARM\code\foc_app.c`
+  - `MDK-ARM\code\foc_app.h`
+  - `Core\Src\stm32h7xx_it.c`
+  - `HostComputer\main_window.py` (for host-triggered `CMD:MODE` context only)
+
+## [2026-07-02] HostComputer Framework Orientation
+
+### Problem / Task
+- User wanted to understand the host-computer GUI framework and learn how to rebuild or improve the AI-generated upper-computer application.
+
+### Resolution
+- Inspected `HostComputer` architecture and identified it as a Python desktop app using PyQt6, pyserial, pyqtgraph, and numpy.
+- Mapped the current layering: `gui_app.py` starts the Qt app/thread, `serial_worker.py` owns serial polling and Qt signals, `serial_service.py` wraps command send/parser feed, `data_parser.py` parses telemetry/ACK/binary current frames and builds commands, `gui_logic.py` holds state/profile/validation helpers, and `main_window.py` contains most UI construction and interaction handling.
+- Noted key architectural issues for future rewrite: oversized `HostMainWindow`, protocol/UI coupling, mojibake Chinese text, and mixed plotting/control/product-mode responsibilities.
+
+### Prevention / Follow-up
+- Recommended learning or rewriting from the protocol/state/worker layers first, then rebuilding a smaller UI shell around them.
+
+### Verification
+- Read project files only; no tests or builds run.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\gui_app.py`
+  - `HostComputer\serial_worker.py`
+  - `HostComputer\serial_service.py`
+  - `HostComputer\data_parser.py`
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-01] UART RX Circular DMA + ACK Residual Fix
+
+### Problem / Task
+- At 1Mbaud, GUI commands such as `UNLOCK` / `ENABLE` could time out even when telemetry was still arriving.
+- The likely firmware-side failure mode was the normal `ReceiveToIdle_DMA` re-arm window: after IDLE IRQ latency, USART RX could overrun before DMA was re-enabled.
+- The host binary-current parser could also hold short ASCII ACK lines shorter than one binary frame, producing false ACK timeout symptoms.
+
+### Resolution
+- Switched USART1 RX DMA from normal mode to circular mode and increased the RX buffer from 128B to 256B.
+- Reworked `HAL_UARTEx_RxEventCallback()` to consume only the newly received circular-DMA span using `s_uartRxLastPos`; it no longer re-arms RX DMA on every IDLE event.
+- Removed the stale `#if 0` legacy normal-DMA parser block after the circular-DMA build passed, keeping only the active RX path.
+- Added UART RX error recovery and `CMD:UART_RX_STAT?` / `DIAG:UART_RX?` diagnostics for RX error count, restart failures, last DMA position, and buffer size.
+- Updated `BinaryCurrentParser.feed()` so short text ACKs such as `UNLOCK,OK,1\r\n` are released immediately unless they are a possible binary-frame prefix.
+- Removed temporary HostComputer ACK debug prints from the serial worker, parser, and log handler.
+- Added parser tests for short ACK residual release and split binary sync edge cases.
+
+### Prevention / Follow-up
+- With 256B at 1Mbaud, the RX circular buffer covers about 2.56ms of incoming bytes; this should be ample for short command lines while TIM/SPI ISRs preempt UART.
+- Hardware validation still needs to verify repeated `CMD:UNLOCK,1`, `CMD:ENABLE,1`, `CMD:IDENTIFY,1`, and `CMD:UART_RX_STAT?` at 1Mbaud with current stream enabled.
+
+### Verification
+- `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_main_window`: 165 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 176 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware build OK, `153716 text / 38888 bss`.
+- `rg -n "#if 0|Legacy normal-DMA|HAL_UARTEx_ReceiveToIdle_DMA\(&huart1" Core/Src/stm32h7xx_it.c Core/Src/usart.c`: no stale normal-DMA parser or active per-IDLE re-arm path remains.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: HostComputer package OK.
+- Package output: `dist\24V_FOC_Host\24V_FOC_Host.exe`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `Core\Src\stm32h7xx_it.c`
+  - `Core\Src\usart.c`
+  - `MDK-ARM\code\head.h`
+  - `HostComputer\data_parser.py`
+  - `HostComputer\main_window.py`
+  - `HostComputer\serial_worker.py`
+  - `HostComputer\test_data_parser.py`
+  - `dist\24V_FOC_Host\24V_FOC_Host.exe`
+  - `PROGRESS.md`
+
+## [2026-06-29] HostComputer Power State Visibility And Scroll Layout Fix
+
+### Problem / Task
+- The HostComputer control page could be clipped at full-screen/window-scale combinations, hiding lower diagnostics.
+- Manual testing made unlock look failed even though the serial log contained `UNLOCK,OK,1` / `ENABLE,OK,1` and the firmware reported `FOC 状态 4` (RUNNING).
+
+### Resolution
+- Wrapped the tall HostComputer tabs (`控制器参数`, `参数识别`, `高级控制`, `环路参数`) in `QScrollArea` while leaving the realtime waveform tab full-size.
+- Added a main control-page power status label (`未解锁 | 未使能`, `已解锁 | 未使能`, `已解锁 | 已使能`) and refreshed it from the same state as the V1.2 APP power status.
+- Added GUI tests covering scrollable tabs and `UNLOCK,OK,1` / `ENABLE,OK,1` ACK-driven button/status updates.
+
+### Prevention / Follow-up
+- Use the explicit power status text as the source of truth during manual tests; disabled buttons alone are ambiguous after a successful unlock/enable.
+
+### Verification
+- `python -m unittest HostComputer.test_main_window HostComputer.test_gui_logic HostComputer.test_data_parser`: 161 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 172 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: HostComputer package OK.
+- Zip output: `dist\24V_FOC_Host_20260629_2149.zip`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\main_window.py`
+  - `HostComputer\test_main_window.py`
+  - `dist\24V_FOC_Host_20260629_2149.zip`
+  - `PROGRESS.md`
+
+## [2026-06-29] DETENT Mode Entry Re-Capture Fix
+
+### Problem / Task
+- Selecting or configuring the HostComputer `卡点旋钮` product mode could show DETENT in the GUI while the motor still behaved like it was chasing an old position target.
+
+### Resolution
+- Changed firmware DETENT entry semantics so `FOC_App_SetAppMode(APP_MODE_DETENT)` always captures the nearest detent on entry when the motor is identified, even if a previous PREF/JOINT_POS command left `position_ref_user_set` latched.
+- Changed HostComputer DETENT preset/config actions to always re-send `CMD:APP_MODE,DETENT` before `DETENT:CFG,...`, forcing firmware to re-enter DETENT and re-capture the nearest detent.
+- Prevented HostComputer from treating generic N-frame telemetry as APP_MODE confirmation; APP_MODE is now confirmed only by ACK/query response.
+
+### Prevention / Follow-up
+- For manual validation, flash the rebuilt firmware before testing DETENT feel; updating only the GUI package is not enough for the re-capture behavior.
+
+### Verification
+- `python -m unittest HostComputer.test_main_window HostComputer.test_gui_logic HostComputer.test_data_parser`: 159 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 170 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware build OK, `build\gcc\24V_FOC_Controller.bin` updated.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: HostComputer package OK.
+- Zip output: `dist\24V_FOC_Host_20260629_2134.zip`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `MDK-ARM\code\foc_app.c`
+  - `HostComputer\main_window.py`
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\test_main_window.py`
+  - `HostComputer\test_gui_logic.py`
+  - `build\gcc\24V_FOC_Controller.bin`
+  - `dist\24V_FOC_Host_20260629_2134.zip`
+  - `PROGRESS.md`
+
+## [2026-06-29] HostComputer Power ACK Payload Fix
+
+### Problem / Task
+- The packaged HostComputer showed unlock failure even though the serial log contained firmware responses like `UNLOCK,OK,1`.
+
+### Resolution
+- Updated `AckParser` to accept both legacy ACK forms (`UNLOCK,OK`, `ENABLE,OK`) and firmware payload ACK forms (`UNLOCK,OK,1`, `ENABLE,OK,0`, plus IDENTIFY/STALL_MODE equivalents).
+- Added `AckResult.command_value` and made the host state machine use the ACK payload when a pending command value is unavailable.
+- Rebuilt the HostComputer package after stopping the stale running packaged GUI process that locked the previous `dist` folder.
+
+### Prevention / Follow-up
+- Keep tests for both ACK wire shapes because firmware responses may include the requested `0/1` payload while older assumptions did not.
+
+### Verification
+- `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic`: 101 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 167 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: packaging OK.
+- Package output: `dist\24V_FOC_Host\24V_FOC_Host.exe`.
+- Zip output: `dist\24V_FOC_Host_20260629_2116.zip`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer\data_parser.py`
+  - `HostComputer\gui_logic.py`
+  - `HostComputer\test_data_parser.py`
+  - `HostComputer\test_gui_logic.py`
+  - `dist\24V_FOC_Host\24V_FOC_Host.exe`
+  - `dist\24V_FOC_Host_20260629_2116.zip`
+  - `PROGRESS.md`
+
+## [2026-06-29] HostComputer Chinese Product Mode Review And Package
+
+### Problem / Task
+- Review the HostComputer V1.2 product-mode Chinese-first GUI changes and produce a packaged Windows app for local testing.
+
+### Resolution
+- Verified the product-mode combo uses Chinese display labels while preserving firmware protocol tokens through combo `userData`.
+- Found and fixed one ACK state-machine edge case: `UNLOCK,OK` / `ENABLE,OK` responses do not include the requested `0/1` value, so the host now stores the pending command payload and applies ACK effects according to the requested target.
+- Rebuilt the HostComputer one-folder app and created a zip package for easier manual testing.
+
+### Prevention / Follow-up
+- Keep firmware protocol tokens internal and raw serial logs untranslated; translate only user-facing GUI labels/status text.
+- When adding ACK parsing for set-style commands, track the requested payload because the firmware ACK may only echo the command name.
+
+### Verification
+- `python -m unittest HostComputer.test_main_window`: 55 tests OK.
+- `python -m unittest HostComputer.test_gui_logic`: 48 tests OK.
+- `python -m unittest HostComputer.test_data_parser`: 51 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 165 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: packaging OK.
+- Package output: `dist\24V_FOC_Host\24V_FOC_Host.exe`.
+- Zip output: `dist\24V_FOC_Host_20260629_2106.zip`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/test_gui_logic.py`
+  - `dist\24V_FOC_Host\24V_FOC_Host.exe`
+  - `dist\24V_FOC_Host_20260629_2106.zip`
+  - `PROGRESS.md`
+
+## [2026-06-29] Sanitized GitHub Release Repository Sync
+
+### Problem / Task
+- Sync the current project to `https://github.com/xianyuyijinban/24V-FOC-controller` without publishing private project notes, documentation, debug dumps, or secret-like files.
+
+### Resolution
+- Created a clean release snapshot in `C:\tmp\24v-foc-release-sync` instead of pushing the dirty local development branch/history.
+- Included firmware source, STM32 project files, required CMSIS/HAL subsets, HostComputer source/tests, build scripts, and executable test scripts.
+- Excluded `docs/`, `PROGRESS.md`, `PROCESS.md`, `Project_Architecture.md`, `.agents/`, `.codex/`, `.claude/`, build/dist outputs, debug logs/dumps, JSON/CSV captured results, and key/env-style files.
+- Pushed the sanitized snapshot to the release repository `main` branch with `--force-with-lease`.
+
+### Prevention / Follow-up
+- Continue using sanitized snapshot/export sync for the public release repository; do not push the local development branch directly because it contains documentation and work logs.
+
+### Verification
+- Export safety gate: forbidden docs/log/key paths count was 0.
+- Secret-like scan: no PAT/private-key/password/API-key style content found; only a parser variable named `token` was a false positive in the first broad scan.
+- `python -m unittest discover HostComputer`: 132 tests OK in the release snapshot.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware build OK in the release snapshot.
+- `git ls-remote https://github.com/xianyuyijinban/24V-FOC-controller.git refs/heads/main`: remote `main` points to `c9712234a35b90c813018766059941d93080a987`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `PROGRESS.md`
+
+## [2026-06-28] HostComputer HOLD Panel Runtime Telemetry Fix
+
+### Problem / Task
+- In the V1.2 advanced control page, `HOLD` mode showed current angle and current speed as `--`, making it look like the firmware was not reporting angle telemetry.
+- The mode status also showed `APP HOLD | CTRL speed` because it trusted the last raw telemetry control-mode field even though HOLD is a product-level position-hold mode.
+
+### Resolution
+- Wired the HOLD panel angle/speed labels to normal runtime telemetry in `apply_packet()`.
+- Added product-mode control semantics for the advanced status label: `HOLD`, `JOINT_POS`, `SPRING_DAMPER`, and `DETENT` display as position semantics, while `GIMBAL_SPEED` displays as speed.
+- Added a GUI regression test proving the HOLD panel updates from a received `FOCDataPacket`.
+
+### Prevention / Follow-up
+- If the HOLD panel still shows `--`, check whether the general runtime panel is receiving fresh `N` telemetry frames. If the general runtime panel has angle but HOLD does not, it is a HostComputer UI wiring bug.
+- Flash the firmware ACK/FAIL diagnostic build separately if text command responses like `UNLOCK,OK` / `ENABLE,OK` are still needed for command-chain debugging.
+
+### Verification
+- `python -m unittest discover HostComputer`: 132 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK, `dist/24V_FOC_Host/24V_FOC_Host.exe` updated at 2026-06-28 19:19:42.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-06-28] HostComputer JOINT_POS Mode Preservation Fix
+
+### Problem / Task
+- In the V1.2 advanced control page, selecting `JOINT_POS` with soft limits enabled could still show the underlying control mode as speed.
+- Sending a 20 degree joint target left firmware telemetry at `pos_ref=-0.00 deg`, indicating the position target did not enter the active position-mode path.
+
+### Resolution
+- Removed the explicit `CMD:MODE,1` from the HostComputer enable/quick-arm sequence. Firmware already switches to speed internally only when stall/open-loop enable is actually required; the explicit GUI mode command reset non-RAW `APP_MODE` back to RAW and broke JOINT_POS.
+- Updated APP_MODE response parsing to accept both `APP_MODE,OK,JOINT_POS` and `APP_MODE,OK,JOINT_POS (ctrl_mode=2)`.
+- Updated the advanced control status label to show both product mode and underlying control mode (`APP ... | CTRL ...`) instead of only the underlying control mode.
+- Changed the JOINT_POS target button to always send `CMD:APP_MODE,JOINT_POS` immediately before `CMD:PREF,...`, so stale host/firmware mode state cannot send PREF into RAW/SPEED mode.
+
+### Prevention / Follow-up
+- Re-test JOINT_POS by setting app mode, enabling, then sending a target. Expected log includes `APP_MODE,OK,JOINT_POS`, `PREF,OK,0.349`, and telemetry should show `pos_ref` near the requested target instead of 0.
+
+### Verification
+- `python -m unittest HostComputer.test_gui_logic HostComputer.test_main_window`: 91 tests OK.
+- `python -m unittest discover HostComputer`: 131 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK after stopping the stale running GUI process.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_gui_logic.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-06-28] Firmware Command ACK/FAIL Diagnostics
+
+### Problem / Task
+- After V1.2 GUI integration, enable and motor identify appeared to send commands from HostComputer but did not change firmware state.
+- Need to distinguish "Host did not send", "firmware did not receive", and "firmware received but silently rejected".
+
+### Resolution
+- Checked HostComputer command generation and firmware dispatch forms: legacy `CMD:UNLOCK,1`, `CMD:ENABLE,1`, and `CMD:IDENTIFY,1` still match firmware handlers.
+- Found that key control commands were mostly silent on success/reject, including `UNLOCK`, `STALL_MODE`, `ENABLE`, `IDENTIFY`, `MODE`, `IREF`, `SREF`, and `PREF`.
+- Added explicit UART ACK/FAIL responses for those commands in `Core/Src/stm32h7xx_it.c`, including reject reasons for enable/identify (`locked`, `fault`, or `rejected` with state/pwm/encoder/stall details).
+
+### Prevention / Follow-up
+- Flash this build before the next hardware check. The expected GUI log should now show `UNLOCK,OK`, `STALL_MODE,OK`, `ENABLE,OK/FAIL`, and `IDENTIFY,OK/FAIL` responses.
+- If `ENABLE,FAIL,rejected,...` appears, use the reported `state/pwm/identified/enc/stall` fields to target the real firmware precondition rather than guessing from TX logs.
+
+### Verification
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: GCC build OK, 0 compiler errors, generated `.elf/.hex/.bin`.
+- Artifacts exist: `build/gcc/24V_FOC_Controller.elf`, `.hex`, `.bin`.
+- Not flashed in this turn.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `Core/Src/stm32h7xx_it.c`
+  - `PROGRESS.md`
+
+## [2026-06-28] HostComputer Enable / Quick-Arm State Fix
+
+### Problem / Task
+- After V1.2 Joint Product Mode GUI integration, HostComputer could no longer enable the motor from either the original top-level controls or the new APP-mode controls.
+- The enable/arm button state chain needed to be restored without touching firmware.
+
+### Resolution
+- Added a separate `can_quick_arm` UI state for "connected, not enabled, not identifying, no fault" so quick-arm is available before unlock.
+- Removed the top-level quick-arm button from the motion-target enable group, which incorrectly required the motor to already be enabled.
+- Changed the V1.2 APP-mode "enable" button to reuse `_request_enable_motor()` instead of directly sending `CMD:ENABLE,1`, preserving stall-mode confirmation and mode setup.
+- Changed the V1.2 APP-mode "unlock and enable" button to use `can_quick_arm`.
+- Treat unknown encoder status (`encoder_detected=None`) as requiring stall-mode confirmation, matching firmware's enable precheck which re-validates `TLE5012_IsDataValid()` and silently rejects unarmed stall cases.
+- Hardened the shared enable sequence to conservatively send `CMD:STALL_MODE,1` before `CMD:ENABLE,1` when stall mode is not already armed. Normal identified/encoder-online enable paths still run normally in firmware, while invalid/unknown encoder cases no longer degrade into repeated bare `CMD:ENABLE,1`.
+- Added regression tests for top-level quick arm, APP-mode enable, APP-mode quick arm, and fault/identify disable rules.
+
+### Prevention / Follow-up
+- Hardware check: verify the serial log emits `CMD:STALL_MODE,1` before `CMD:ENABLE,1` instead of repeated bare `CMD:ENABLE,1`. If the stall-mode confirmation path is shown, the expected sequence is `CMD:STALL_MODE,1`, `CMD:MODE,1`, and `CMD:ENABLE,1`.
+
+### Verification
+- `python -m unittest HostComputer.test_main_window`: 48 tests OK.
+- `python -m unittest HostComputer.test_gui_logic`: 41 tests OK.
+- `python -m unittest HostComputer.test_data_parser`: 29 tests OK.
+- `python -m unittest discover HostComputer`: 129 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK after stopping the stale running `24V_FOC_Host.exe` that locked `dist/`.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_gui_logic.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-06-28] HostComputer Scope Time-Origin Fix
+
+### Problem / Task
+- Scope screenshot showed `Time (s)` axis expanded to thousands (`0..10000`), making the plot unusable.
+- User clarified `TELEM:CUR,OFF` was intentionally used to pause the stream and inspect the captured waveform.
+
+### Resolution
+- Ignore `timestamp=0` packets as scope time origin.
+- Telemetry plot series now falls back to its own first timestamp when the session origin is missing/invalid.
+- Starting scope immediately sets a bounded X range (`0..window_s`) so pyqtgraph does not auto-expand over all historical data.
+- Preserved OFF-as-pause behavior and current-stream ring contents.
+- Rebuilt Host GUI package.
+
+### Prevention / Follow-up
+- Continue treating waveform as secondary; use current diagnostic line for decisions.
+- If mixed telemetry/current plotting still feels noisy, split the tab into separate "runtime telemetry" and "current diagnostics" panes.
+
+### Verification
+- `python -m unittest discover -s HostComputer`: 124 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+  - `dist/24V_FOC_Host/`
+
+## [2026-06-28] HostComputer Current Stream Diagnostics
+
+### Problem / Task
+- Raw three-phase current waveform was visible but not very useful for FOC diagnosis.
+- Clarified that `TELEM:CUR,OFF` may be intentionally used as a pause/snapshot action, so OFF must not be treated as a display bug or clear old samples.
+
+### Resolution
+- Added a current diagnostic line under Current Stream controls.
+- Diagnostic window reports `sumABC` mean/RMS, `Id` mean/p-p, `Iq` mean/p-p, and phase-current p-p in mA over the latest 1000 samples.
+- Kept ring-buffer waveform data when stream is turned OFF, preserving pause-and-inspect behavior.
+- Fixed near-zero signed display so floating-point `-0.0mA` is shown as `+0.0mA`.
+- Rebuilt Host GUI package.
+
+### Prevention / Follow-up
+- Prefer these diagnostic metrics over raw phase-current waveform for bring-up decisions.
+- Next useful display mode would be envelope/RMS/current-error panels instead of denser raw waveform plotting.
+
+### Verification
+- `python -m unittest discover -s HostComputer`: 123 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+  - `dist/24V_FOC_Host/`
+
+## [2026-06-28] HostComputer Current Scope Readability Polish
+
+### Problem / Task
+- Current waveform was visible but still hard to read: legend listed every channel, Y axis used generic scaled value, and 5s current view was visually dense.
+
+### Resolution
+- Plot legend now rebuilds from selected channels only.
+- Current-stream samples are plotted in mA while parser/ring storage remains in A.
+- Current-only views set the Y axis to `Current (mA)` and disable confusing SI auto-prefix behavior.
+- Opening current stream now switches the scope window from default 5s to 1s for a clearer first view.
+- Current curves use thinner pens and pyqtgraph clip/downsample hints.
+- Rebuilt Host GUI package.
+
+### Prevention / Follow-up
+- If 1kHz still looks too dense, add an explicit display mode selector: raw / decimated / envelope / RMS, without changing the binary protocol.
+
+### Verification
+- `python -m unittest discover -s HostComputer`: 122 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+  - `dist/24V_FOC_Host/`
+
+## [2026-06-28] V1.1 Speed SREF Clamp And Current Stream UX Fix
+
+### Problem / Task
+- User observed `SREF=6` still running slowly, and HostComputer scope showed no phase-current waveform.
+- Check whether the issue was protocol/firmware behavior or GUI activation.
+
+### Resolution
+- Firmware: decoupled RAW `SREF` from conservative `MOTION_CFG.speed_limit`; RAW SPEED now clamps to `FOC_SPEED_REF_MAX_RAD_PER_S = +/-8.0`, while position/joint/gimbal trajectory limits still use 12V `MOTION_CFG`.
+- HostComputer: enabling the current-stream group now auto-starts scope and sends recommended `TELEM:CUR,BIN,1000`; mode changes also start scope when needed.
+- Docs: updated `UART_COMMANDS.md` and `PLATFORM_OVERVIEW.md` to describe RAW SREF clamp vs MOTION trajectory limits.
+- Rebuilt Host GUI package after closing the old running `24V_FOC_Host.exe` that locked `dist/`.
+
+### Prevention / Follow-up
+- `SREF=6` will no longer be silently clipped to 1.0/2.0, but the raw speed ramp remains `2 rad/s^2`, so reaching 6 rad/s still takes about 3 seconds by design.
+- Bench-test high SREF carefully on 12V; protections remain active, but the default 12V release envelope was validated mainly around +/-1 rad/s.
+
+### Verification
+- `python -m unittest discover -s HostComputer`: 121 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware GCC build OK, artifacts generated.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`: package OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63cd991fd9ea05e84f021c804e1343fbf7be`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/foc_app.c`
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `docs/UART_COMMANDS.md`
+  - `docs/PLATFORM_OVERVIEW.md`
+  - `PROGRESS.md`
+  - `dist/24V_FOC_Host/`
+
+## [2026-06-28] HostComputer Scope 优化体验包打包
+
+### Problem / Task
+收口上位机波形图体验优化，打包可直接体验的 Windows GUI。
+
+### Resolution
+- 修正 scope review 后的 5 个细节：BIN2000 时间轴按实测 fps、current stream 优先驱动跟随时间、开始波形重置 fps 统计、无 pyqtgraph guard、移除无用相对 import。
+- 使用 `build_host_gui_app.ps1` 打包 HostComputer one-folder app。
+- 启动体验包验证进程可运行。
+
+### Prevention / Follow-up
+- 手动体验 GUI：连接 `COM9 @ 1000000`，验证 OFF/BIN1000/BIN2000 切换、时间轴、缩放和自动 Y。
+
+### Verification
+- `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_serial_service HostComputer.test_main_window`：112 tests OK。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build_host_gui_app.ps1`：打包成功。
+- Executable: `E:\24V_FOC_Controller_sync_20260519\dist\24V_FOC_Host\24V_FOC_Host.exe`
+- Launch check: process running after 3s.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63c`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `PROGRESS.md`
+  - `dist/24V_FOC_Host/`
+
+## [2026-06-28] HostComputer Scope 波形优化 review
+
+### Problem / Task
+审查上位机波形图优化实现，确认默认关闭、相对时间轴、缩放逻辑和 current stream 显示风险。
+
+### Resolution
+- 确认 HostComputer 单测通过：112 tests OK。
+- 发现后续需修正的 review 点：BIN2000 时间轴固定按 1000fps 计算会失真；current stream elapsed 应优先使用最新 current sample 时间；scope start 应重置 fps 统计；无 pyqtgraph 时 scope toggle 需 guard；`_get_current_stream_plot_data()` 内部未使用的相对导入会影响 top-level import 场景。
+- 已修正上述 5 点：current stream 时间轴改为 seq + 实测 fps；scope elapsed 优先使用 current stream 最新 tick；开始波形清零 `_cur_stats_prev_total`；无 pyqtgraph 时跳过 `setXRange`；删除方法内无用相对 import。
+
+### Prevention / Follow-up
+- 修正上述 review 点后再做 GUI 手动 smoke。
+
+### Verification
+- `python -m unittest HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_serial_service HostComputer.test_main_window`：112 tests OK（修正前后均通过）。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `148b63c`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/main_window.py`
+  - `PROGRESS.md`
+
 ## [2026-06-28] Step 2C：上位机体验收口与 V1.1 发布前整理
 
 ### Problem / Task

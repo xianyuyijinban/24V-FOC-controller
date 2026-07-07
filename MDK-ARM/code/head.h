@@ -13,7 +13,7 @@
 
 	extern volatile uint16_t adc_data[8];
 	extern volatile uint16_t urT_data[8];
-	extern volatile uint8_t urR_data[128];
+	extern volatile uint8_t urR_data[256];
 		
 	extern DRV8350S_Handle_t drv8350s;
 	extern UART_HandleTypeDef huart1;

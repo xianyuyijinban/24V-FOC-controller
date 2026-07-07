@@ -774,6 +774,85 @@ class CommandBuilder:
         """清除机械零点偏移"""
         return "CMD:CLEAR_HOME\n"
 
+    # ── Joint Product Mode (V1.2) ──────────────────────────────────────────
+
+    _VALID_APP_MODES = {"RAW", "JOINT_POS", "GIMBAL_SPEED", "HOLD", "SPRING_DAMPER", "DETENT"}
+
+    @staticmethod
+    def app_mode_query() -> str:
+        """Query current APP_MODE. Response: APP_MODE,OK,<NAME> (ctrl_mode=<N>)"""
+        return "CMD:APP_MODE?\n"
+
+    @staticmethod
+    def app_mode_set(mode: str) -> str:
+        """Set APP_MODE. mode: RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT"""
+        upper = mode.upper()
+        if upper not in CommandBuilder._VALID_APP_MODES:
+            raise ValueError(f"Invalid APP_MODE '{mode}'. Must be one of {sorted(CommandBuilder._VALID_APP_MODES)}")
+        return f"CMD:APP_MODE,{upper}\n"
+
+    @staticmethod
+    def joint_limit_query() -> str:
+        """Query joint soft limits. Response: JOINT:LIMIT,OK,min=X.Xdeg,max=Y.Ydeg or JOINT:LIMIT,OK,OFF"""
+        return "JOINT:LIMIT?\n"
+
+    @staticmethod
+    def joint_limit_set(min_deg: float, max_deg: float) -> str:
+        """Set joint soft limits in degrees."""
+        return f"JOINT:LIMIT,{min_deg:.1f},{max_deg:.1f}\n"
+
+    @staticmethod
+    def joint_limit_off() -> str:
+        """Disable joint soft limits."""
+        return "JOINT:LIMIT,OFF\n"
+
+    @staticmethod
+    def gimbal_ramp_query() -> str:
+        """Query gimbal ramp acceleration. Response: GIMBAL:RAMP,OK,accel=X.Xradps2"""
+        return "GIMBAL:RAMP?\n"
+
+    @staticmethod
+    def gimbal_ramp_set(accel: float) -> str:
+        """Set gimbal ramp acceleration in rad/s^2. Range 0.1-20.0."""
+        return f"GIMBAL:RAMP,{accel:.1f}\n"
+
+    @staticmethod
+    def spring_cfg_query() -> str:
+        """Query spring-damper config. Response: SPRING:CFG,OK,K=X.XXX,D=Y.YYY,limit=Z.ZZZ"""
+        return "SPRING:CFG?\n"
+
+    @staticmethod
+    def spring_cfg_set(K: float, D: float, limit: float) -> str:
+        """Set spring-damper params: stiffness K, damping D, torque limit (3 params required)."""
+        return f"SPRING:CFG,{K:.3f},{D:.3f},{limit:.3f}\n"
+
+    @staticmethod
+    def detent_cfg_query() -> str:
+        """Query detent config. Response: DETENT:CFG,OK,count=X,strength=Y.YYY,width=Z.ZZZ,limit=W.WWW"""
+        return "DETENT:CFG?\n"
+
+    @staticmethod
+    def detent_cfg_set(count: int, strength: float, width: float, limit: float) -> str:
+        """Set detent params: count, strength, width, torque limit."""
+        return f"DETENT:CFG,{int(count)},{strength:.3f},{width:.3f},{limit:.3f}\n"
+
+    # ── Telemetry Stream Control ───────────────────────────────────────────
+
+    @staticmethod
+    def telem_cur_off() -> str:
+        """关闭电流遥测流"""
+        return "TELEM:CUR,OFF\n"
+
+    @staticmethod
+    def telem_cur_ascii(hz: int) -> str:
+        """ASCII文本电流流，hz ∈ {200}"""
+        return f"TELEM:CUR,ASCII,{int(hz)}\n"
+
+    @staticmethod
+    def telem_cur_bin(hz: int) -> str:
+        """二进制电流流，hz ∈ {1000, 2000}"""
+        return f"TELEM:CUR,BIN,{int(hz)}\n"
+
 
 # ── Binary Current Stream ────────────────────────────────────────────────────
 
@@ -908,6 +987,22 @@ class BinaryCurrentParser:
             samples.append(sample)
             del self._buf[:self.FRAME_LEN]
 
+        # Do not hold short ASCII ACK lines (for example UNLOCK,OK,1\r\n)
+        # waiting for a 25-byte binary frame. Only keep bytes that could still
+        # become the beginning of a binary frame on the next serial read.
+        if self._buf:
+            sync_idx = self._buf.find(self.SYNC)
+            if sync_idx == -1:
+                if self._buf[-1:] == self.SYNC[:1]:
+                    residual.extend(self._buf[:-1])
+                    del self._buf[:-1]
+                else:
+                    residual.extend(self._buf)
+                    self._buf.clear()
+            elif sync_idx > 0:
+                residual.extend(self._buf[:sync_idx])
+                del self._buf[:sync_idx]
+
         return samples, bytes(residual)
 
     def _compute_crc8(self, data: bytes) -> int:
@@ -941,3 +1036,119 @@ class BinaryCurrentParser:
             vbus=vbus_mV * 0.001,
             flags=flags,
         )
+
+
+# ── ACK Parser ────────────────────────────────────────────────────────────────
+
+ACK_PATTERNS = [
+    # (regex, command_name, needs_ok_handler)
+    # OK with optional requested state payload: UNLOCK, ENABLE, IDENTIFY, STALL_MODE
+    (re.compile(r'^(UNLOCK),OK(?:,([01]))?$'),                              True),
+    (re.compile(r'^(UNLOCK),FAIL,(.+)$'),                                   False),
+    (re.compile(r'^(ENABLE),OK(?:,([01]))?$'),                              True),
+    (re.compile(r'^(ENABLE),FAIL,(.+)$'),                                   False),
+    (re.compile(r'^(IDENTIFY),OK(?:,([01]))?$'),                            True),
+    (re.compile(r'^(IDENTIFY),FAIL,(.+)$'),                                 False),
+    (re.compile(r'^(STALL_MODE),OK(?:,([01]))?$'),                          True),
+    (re.compile(r'^(STALL_MODE),FAIL,(.+)$'),                               False),
+    (re.compile(r'^(CLEAR_FAULT),OK$'),                                     True),
+    # MODE: payload is the mode integer
+    (re.compile(r'^(MODE),OK,(\d+)$'),                                      True),
+    (re.compile(r'^(MODE),FAIL,(.+)$'),                                     False),
+    # IREF/SREF/PREF: OK with optional payload
+    (re.compile(r'^(IREF),OK'),                                             True),
+    (re.compile(r'^(IREF),FAIL,(.+)$'),                                     False),
+    (re.compile(r'^(SREF),OK'),                                             True),
+    (re.compile(r'^(SREF),FAIL,(.+)$'),                                     False),
+    (re.compile(r'^(PREF),OK'),                                             True),
+    (re.compile(r'^(PREF),FAIL,(.+)$'),                                     False),
+    # APP_MODE: payload is mode name, optional (ctrl_mode=N)
+    (re.compile(r'^(APP_MODE),OK,(\w+)(?:\s*\(ctrl_mode=(\d+)\))?$'),      True),
+    (re.compile(r'^(APP_MODE),FAIL,(.+)$'),                                 False),
+    # ID params
+    (re.compile(r'^(MOTOR_PN),OK$'),                                        True),
+    (re.compile(r'^(MOTOR_PN),FAIL,(.+)$'),                                 False),
+    (re.compile(r'^(ENCODER_DIR),OK$'),                                     True),
+    (re.compile(r'^(ENCODER_DIR),FAIL,(.+)$'),                              False),
+    # HOME / CLEAR_HOME
+    (re.compile(r'^(HOME),OK$'),                                            True),
+    (re.compile(r'^(HOME),FAIL,(.+)$'),                                     False),
+    (re.compile(r'^(CLEAR_HOME),OK$'),                                      True),
+    (re.compile(r'^(CLEAR_HOME),FAIL,(.+)$'),                               False),
+]
+
+
+@dataclass
+class AckResult:
+    """Parsed firmware ACK/FAIL response."""
+    command: str                # e.g. "UNLOCK", "ENABLE", "MODE"
+    ok: bool
+    reason: Optional[str] = None  # failure reason text, None on OK
+    raw: str = ""               # original line
+    # Extra payload for command,OK,<0|1>, MODE,OK,<N> and APP_MODE,OK,<NAME>
+    command_value: Optional[str] = None
+    mode_value: Optional[int] = None
+    app_mode_name: Optional[str] = None
+    app_mode_ctrl: Optional[int] = None
+
+
+class AckParser:
+    """Parse firmware ACK/FAIL text lines into structured AckResult objects.
+
+    The firmware sends responses like::
+
+        UNLOCK,OK
+        UNLOCK,OK,1
+        UNLOCK,FAIL,already unlocked
+        ENABLE,OK
+        ENABLE,OK,0
+        MODE,OK,2
+        APP_MODE,OK,JOINT_POS (ctrl_mode=2)
+
+    Only command ACKs are parsed here. Query responses (JOINT:LIMIT,OK,…,
+    GIMBAL:RAMP,OK,…) are handled elsewhere.
+    """
+
+    def parse_line(self, line: str) -> Optional[AckResult]:
+        """Try to parse *line* as a command ACK/FAIL.
+
+        Returns AckResult on match, None otherwise.
+        """
+        line = line.strip()
+        if not line:
+            return None
+
+        for regex, is_ok in ACK_PATTERNS:
+            m = regex.fullmatch(line)
+            if not m:
+                continue
+
+            groups = m.groups()
+            command = groups[0]
+
+            if is_ok:
+                result = AckResult(command=command, ok=True, raw=line)
+                # Extract payload fields (groups[0]=command, groups[1:]=payload)
+                if command in {"UNLOCK", "ENABLE", "IDENTIFY", "STALL_MODE"}:
+                    if len(groups) >= 2 and groups[1] is not None:
+                        result.command_value = groups[1]
+                elif command == "MODE" and len(groups) >= 2 and groups[1] is not None:
+                    try:
+                        result.mode_value = int(groups[1])
+                    except (ValueError, TypeError):
+                        pass
+                elif command == "APP_MODE":
+                    if len(groups) >= 2:
+                        result.app_mode_name = groups[1]
+                    if len(groups) >= 3 and groups[2] is not None:
+                        try:
+                            result.app_mode_ctrl = int(groups[2])
+                        except (ValueError, TypeError):
+                            pass
+                return result
+            else:
+                # FAIL pattern — groups[1] is the reason
+                reason = groups[1] if len(groups) >= 2 else "unknown"
+                return AckResult(command=command, ok=False, reason=reason, raw=line)
+
+        return None

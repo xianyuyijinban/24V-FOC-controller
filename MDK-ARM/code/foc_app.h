@@ -54,6 +54,7 @@ extern "C" {
 #define FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
 #define FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A 2.00f /* V6: 24V台架增流，克服堵转 */
 #define FOC_SPEED_REF_RAMP_RATE_RAD_PER_S2 2.0f /* V4 装配基线 */
+#define FOC_SPEED_REF_MAX_RAD_PER_S        8.0f /* RAW SPEED SREF safety clamp */
 #define FOC_CURRENT_LOOP_KP_12V_BENCH       0.50f /* ARR=11999 post-resolution baseline: clean bidirectional tracking. */
 #define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* P-only baseline; Ki to be reintroduced in small steps later. */
 #define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.05f /* 位置末端小误差静摩擦补偿，帮助闭合最后几度 */
@@ -413,6 +414,7 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
+void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
 void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);

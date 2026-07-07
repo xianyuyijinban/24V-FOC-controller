@@ -38,7 +38,7 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 | `CTRL:ENABLE,N` | `0` or `1` | Enable/disable PWM output |
 | `CTRL:MODE,N` | `0`=TORQUE, `1`=SPEED, `2`=POSITION | Set control mode |
 | `CTRL:IREF,Id,Iq` | `float,float` A | Set current reference (torque mode) |
-| `CTRL:SREF,speed` | `float` rad/s | Set speed reference (clamped to MOTION speed_limit) |
+| `CTRL:SREF,speed` | `float` rad/s | Set RAW speed reference (clamped to +/-8 rad/s firmware safety range) |
 | `CTRL:PREF,pos` | `float` rad | Set position reference (position mode) |
 | `CTRL:STOP` | — | Zero speed ref + disable PWM |
 
@@ -66,7 +66,7 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 | `MOTION:MOTION_CFG,s,a,c` | `float,float,float` | Set speed_limit(rad/s), accel(rad/s²), cruise(rad/s) |
 | `MOTION:MOTION_CFG,RESET` | — | Reset to 12V defaults (1.0 / 2.0 / 0.3) |
 
-**12V defaults**: speed_limit=1.0, accel=2.0, cruise=0.3
+**12V defaults**: speed_limit=1.0, accel=2.0, cruise=0.3. `MOTION_CFG` limits position/joint/gimbal trajectories; RAW `SREF` uses its own +/-8 rad/s safety clamp.
 
 **Legacy**: `CMD:MOTION_CFG?`, `CMD:MOTION_CFG,s,a,c`, `CMD:MOTION_CFG_RESET`
 

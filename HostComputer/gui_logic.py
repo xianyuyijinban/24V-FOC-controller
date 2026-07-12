@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Optional, List
 
 try:
-    from .data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle
+    from .data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle, AckResult
 except ImportError:
-    from data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle
+    from data_parser import CommandBuilder, FOCDataPacket, CurrentSample, control_to_user_angle, AckResult
 
 
 MODE_LABELS = {
@@ -28,6 +28,25 @@ MODE_NAMES = {
     1: "速度",
     2: "位置",
 }
+
+# V1.2: Chinese display mapping for product modes (protocol token → Chinese label)
+APP_MODE_CN = {
+    "RAW": "原始控制",
+    "JOINT_POS": "关节位置",
+    "GIMBAL_SPEED": "云台速度",
+    "HOLD": "位置保持",
+    "SPRING_DAMPER": "弹簧阻尼",
+    "DETENT": "卡点旋钮",
+    "SCROLL_WHEEL": "滚轮鼠标",
+}
+
+APP_MODE_TOKENS = list(APP_MODE_CN.keys())  # canonical display order
+
+def app_mode_cn(token: str) -> str:
+    """Return Chinese label for a protocol token, falling back to the token itself."""
+    return APP_MODE_CN.get(token, token)
+
+ACK_TIMEOUT_MS = 500  # ACK response timeout in milliseconds
 
 FOC_STATE_IDLE = 0
 FOC_STATE_INIT = 1
@@ -253,7 +272,7 @@ class GuiProfile:
 @dataclass
 class HostAppState:
     is_connected: bool = False
-    selected_mode: int = 0
+    control_mode: int = 0          # underlying FOC control mode (0=torque,1=speed,2=position)
     power_unlocked: bool = False
     motor_enabled: bool = False
     identify_active: bool = False
@@ -268,8 +287,18 @@ class HostAppState:
     last_packet: Optional[FOCDataPacket] = None
     last_packet_received_at_ms: Optional[int] = None
 
+    # ── ACK / Command tracking (V1.2) ──────────────────────────────────────
+    pending_command: Optional[str] = None           # command awaiting ACK, e.g. "UNLOCK", "ENABLE"
+    pending_command_value: Optional[str] = None     # pending target payload, e.g. "0", "1", "HOLD"
+    pending_command_sent_at_ms: Optional[int] = None
+    last_ack: Optional[str] = None                  # raw ACK text, e.g. "UNLOCK,OK"
+    last_ack_at_ms: Optional[int] = None
+    last_command_error: Optional[str] = None        # e.g. "ENABLE,FAIL,not unlocked"
+    firmware_ack_supported: bool = True             # set False after first ACK timeout
+
     # ── Joint Product Mode state (V1.2) ───────────────────────────────────
-    app_mode: Optional[str] = None           # RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT
+    app_mode: Optional[str] = None           # RAW|...|DETENT -- firmware confirmed
+    app_mode_selected: str = "RAW"           # GUI selected mode (may differ from confirmed)
     app_mode_ctrl: Optional[int] = None      # underlying ctrl_mode (0=torque,1=speed,2=position)
     joint_limit_enabled: bool = False
     joint_limit_min: Optional[float] = None  # degrees
@@ -282,6 +311,10 @@ class HostAppState:
     detent_strength: Optional[float] = None
     detent_width: Optional[float] = None
     detent_limit: Optional[float] = None
+
+    # -- Command Sequence Queue (V1.2+) --
+    pending_sequence: Optional[list[str]] = None
+    pending_seq_index: int = 0
 
 
 class RollingPlotBuffer:
@@ -545,24 +578,29 @@ def button_enable_state(state: HostAppState) -> dict[str, bool]:
     enabled = bool(state.motor_enabled)
     identify_active = bool(state.identify_active)
     fault_active = bool(state.fault_active or state.foc_state == FOC_STATE_FAULT)
-    can_quick_arm = connected and not enabled and not identify_active and not fault_active
+    pending = bool(state.pending_command)
+    bridge_managed_wheel = (state.app_mode_selected or "RAW") == "SCROLL_WHEEL"
+    can_quick_arm = connected and not enabled and not identify_active and not fault_active and not pending
     return {
-        "can_unlock": connected and not unlocked,
+        "can_unlock": connected and not unlocked and not pending,
         "can_lock": connected and unlocked,
-        "can_enable": connected and unlocked and not enabled and not identify_active and not fault_active,
+        "can_enable": connected and unlocked and not enabled and not identify_active and not fault_active and not pending,
         "can_quick_arm": can_quick_arm,
         "can_disable": connected and enabled and not fault_active,
         "can_clear_fault": connected,
-        "can_identify_start": connected and unlocked and not identify_active and not enabled and not fault_active,
+        "can_identify_start": connected and unlocked and not identify_active and not enabled and not fault_active and not pending,
         "can_identify_stop": connected and identify_active,
-        "can_send_target": connected and not identify_active and not fault_active,
+        "can_send_target": connected and not identify_active and not fault_active and not pending,
         # V1.2 — Joint Product Mode
-        "app_mode_selector": connected and not identify_active and not fault_active,
-        "joint_limit_config": connected and not identify_active and not fault_active,
-        "gimbal_ramp_config": connected and not identify_active and not fault_active,
-        "spring_detent_config": connected and not identify_active and not fault_active,
-        "motion_target": connected and unlocked and enabled and not identify_active and not fault_active,
-        "hold_button": connected and unlocked and enabled and not identify_active and not fault_active,
+        "app_mode_selector": connected and not identify_active and not fault_active and not pending,
+        "joint_limit_config": connected and not identify_active and not fault_active and not pending,
+        "gimbal_ramp_config": connected and not identify_active and not fault_active and not pending,
+        "spring_detent_config": connected and not identify_active and not fault_active and not pending,
+        "motion_target": connected and unlocked and enabled and not identify_active and not fault_active and not pending,
+        "hold_button": connected and unlocked and enabled and not identify_active and not fault_active and not pending,
+        # V1.2+ -- Product-mode-aware enable/arm
+        "app_enable": connected and unlocked and not enabled and not identify_active and not fault_active and not pending and not bridge_managed_wheel,
+        "app_arm": can_quick_arm and not bridge_managed_wheel,
     }
 
 
@@ -570,6 +608,66 @@ def connection_command_state(is_connected: bool) -> dict[str, bool]:
     state = button_enable_state(HostAppState(is_connected=is_connected))
     state["can_identify"] = state["can_identify_start"] or state["can_identify_stop"]
     return state
+
+
+def is_safe_fallback_command(command: str) -> bool:
+    """Commands that move the controller toward a safer or diagnostic state."""
+    text = str(command).strip()
+    return (
+        text in {
+            "CMD:ENABLE,0",
+            "CMD:UNLOCK,0",
+            "CMD:CLEAR_FAULT",
+            "CMD:STOP",
+            "CMD:FAULT_DETAIL",
+        }
+        or text.endswith("?")
+    )
+
+
+def is_motion_target_command(command: str) -> bool:
+    text = str(command).strip()
+    return text.startswith(("CMD:IREF,", "CMD:SREF,", "CMD:PREF,"))
+
+
+def can_dispatch_command(state: HostAppState, command: str) -> tuple[bool, str]:
+    """Host-side command gate used by both buttons and dispatch paths."""
+    text = str(command).strip()
+    safe_fallback = is_safe_fallback_command(text)
+    fault_active = bool(state.fault_active or state.foc_state == FOC_STATE_FAULT)
+
+    if not state.is_connected:
+        return False, "当前未连接，命令已拦截。"
+
+    if state.pending_command and not safe_fallback:
+        return False, f"正在等待 {state.pending_command} 确认，命令已拦截。"
+
+    if fault_active and not safe_fallback:
+        return False, "当前处于故障状态，只允许停机、上锁、清故障或诊断命令。"
+
+    if text == "CMD:ENABLE,1":
+        if not state.power_unlocked:
+            return False, "请先解锁功率级。"
+        if state.motor_enabled:
+            return False, "电机已经使能。"
+        if state.identify_active:
+            return False, "参数识别中，不能使能电机。"
+
+    if text == "CMD:IDENTIFY,1":
+        if not state.power_unlocked:
+            return False, "请先解锁功率级。"
+        if state.motor_enabled:
+            return False, "电机已使能，不能开始参数识别。"
+        if state.identify_active:
+            return False, "参数识别已经在进行中。"
+
+    if is_motion_target_command(text):
+        if not state.power_unlocked or not state.motor_enabled:
+            return False, "电机未解锁或未使能，不能发送目标值。"
+        if state.identify_active:
+            return False, "参数识别中，不能发送运动目标。"
+
+    return True, ""
 
 
 def should_confirm_stall_mode_enable(state: HostAppState) -> bool:
@@ -597,51 +695,256 @@ def stall_mode_confirmation_text(state: HostAppState) -> str:
     return "当前电机尚未完成识别。是否进入堵转模式（开环试转）？使能后建议先给小 Iq，再给小 speed。"
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# V1.2+ — APP_MODE sync helpers
+# ══════════════════════════════════════════════════════════════════════════
+
+def is_app_mode_synced(state: HostAppState) -> bool:
+    """Return True if the GUI selected mode matches the firmware-confirmed mode."""
+    return state.app_mode_selected == (state.app_mode or "RAW")
+
+
+HAPTIC_MODES = frozenset({"SPRING_DAMPER", "DETENT", "SCROLL_WHEEL"})
+POSITION_MODES = frozenset({"JOINT_POS", "HOLD"})
+
+def get_app_mode_prerequisites(state: HostAppState, app_mode: str) -> tuple[bool, str]:
+    """Check whether the given app mode can be enabled given current state.
+
+    Returns (ok: bool, reason: str).
+    """
+    encoder_ok = bool(state.encoder_detected)
+    identified_ok = bool(state.motor_identified)
+    mode_upper = app_mode.upper() if app_mode else "RAW"
+
+    if mode_upper in HAPTIC_MODES:
+        if not encoder_ok and not identified_ok:
+            return False, "弹簧阻尼/卡点模式需要编码器在线且电机已完成识别。不能使用堵转开环。"
+        if not encoder_ok:
+            return False, "弹簧阻尼/卡点模式需要编码器在线（TLE5012）。"
+        if not identified_ok:
+            return False, "弹簧阻尼/卡点模式需要电机已完成参数识别。不能使用堵转开环。"
+        return True, ""
+
+    if mode_upper in POSITION_MODES:
+        if not encoder_ok:
+            return False, "位置类模式（关节位置/位置保持）需要编码器在线。"
+        return True, ""
+
+    # RAW, GIMBAL_SPEED — no special prereqs
+    return True, ""
+
+
+def build_app_mode_command(app_mode: str) -> str:
+    """Build CMD:APP_MODE,<token> from a mode token."""
+    return CommandBuilder.app_mode_set(app_mode)
+
+
+def build_app_enable_sequence(app_mode: str, state: HostAppState) -> list[str]:
+    """Build the full command sequence for enabling in a product mode.
+
+    Sequence: APP_MODE -> (STALL_MODE if needed) -> (UNLOCK if needed) -> ENABLE,1
+    """
+    commands: list[str] = []
+    commands.append(build_app_mode_command(app_mode))
+    requires_stall = (not bool(state.motor_identified)) or (state.encoder_detected is not True)
+    if requires_stall and not state.stall_mode_armed and not state.power_unlocked:
+        commands.append("CMD:STALL_MODE,1")
+    if not state.power_unlocked:
+        commands.append("CMD:UNLOCK,1")
+    commands.append("CMD:ENABLE,1")
+    return commands
+
+
+def build_app_arm_sequence(app_mode: str, state: HostAppState) -> list[str]:
+    """Build the unlock+enable sequence for product mode quick-arm."""
+    commands: list[str] = []
+    commands.append(build_app_mode_command(app_mode))
+    if not state.power_unlocked:
+        requires_stall = (not bool(state.motor_identified)) or (state.encoder_detected is not True)
+        if requires_stall and not state.stall_mode_armed:
+            commands.append("CMD:STALL_MODE,1")
+        commands.append("CMD:UNLOCK,1")
+    commands.append("CMD:ENABLE,1")
+    return commands
+
+
+def build_app_target_sequence(app_mode: str, target_command: str) -> list[str]:
+    """Build sequence: APP_MODE,<mode> -> target_command.
+
+    Use for PREF / SREF in JOINT_POS / GIMBAL_SPEED modes.
+    """
+    return [build_app_mode_command(app_mode), target_command]
+
+
+def build_app_config_sequence(app_mode: str, config_command: str) -> list[str]:
+    """Build sequence: APP_MODE,<mode> -> config_command.
+
+    Use for SPRING:CFG / DETENT:CFG in haptic modes.
+    """
+    return [build_app_mode_command(app_mode), config_command]
+
+
+def start_command_sequence(state: HostAppState, commands: list[str]) -> str | None:
+    """Store a sequence and return the first command to emit.
+
+    Returns None if the sequence is empty.
+    """
+    if not commands:
+        state.pending_sequence = None
+        state.pending_seq_index = 0
+        return None
+    state.pending_sequence = list(commands)
+    state.pending_seq_index = 0
+    return state.pending_sequence[0]
+
+
+def advance_command_sequence(state: HostAppState) -> str | None:
+    """Advance to the next command in a pending sequence.
+
+    Call after a successful ACK for the current sequence step.
+    Returns the next command to emit, or None if the sequence is complete.
+    """
+    if state.pending_sequence is None:
+        return None
+    state.pending_seq_index += 1
+    if state.pending_seq_index >= len(state.pending_sequence):
+        state.pending_sequence = None
+        state.pending_seq_index = 0
+        return None
+    return state.pending_sequence[state.pending_seq_index]
+
+
+def abort_command_sequence(state: HostAppState, reason: str = "序列已中止"):
+    """Cancel any pending command sequence."""
+    state.pending_sequence = None
+    state.pending_seq_index = 0
+    state.last_command_error = reason
+
+
 def apply_command_effects(state: HostAppState, command: str):
+    """Set pending_command on key state-changing commands.
+
+    V1.2: no longer optimistically sets power_unlocked / motor_enabled etc.
+    Those booleans are only updated by apply_ack_effects() on confirmed ACK,
+    or by apply_packet_effects() on N-frame convergence.
+
+    Destructive actions (lock, disable) still take immediate effect because
+    they cannot fail in a meaningful way — the firmware always accepts them.
+    """
     text = command.strip()
+
     if text == "CMD:UNLOCK,1":
-        state.power_unlocked = True
+        state.pending_command = "UNLOCK"
+        state.pending_command_value = "1"
     elif text == "CMD:UNLOCK,0":
+        state.pending_command = "UNLOCK"
+        state.pending_command_value = "0"
+        # Destructive: lock cascades immediately
         state.power_unlocked = False
         state.motor_enabled = False
         state.identify_active = False
         state.stall_mode_armed = False
         state.stall_open_loop_active = False
     elif text == "CMD:ENABLE,1":
-        state.motor_enabled = True
+        state.pending_command = "ENABLE"
+        state.pending_command_value = "1"
     elif text == "CMD:ENABLE,0":
-        state.motor_enabled = False
+        state.pending_command = "ENABLE"
+        state.pending_command_value = "0"
         state.stall_open_loop_active = False
     elif text == "CMD:IDENTIFY,1":
-        state.identify_active = True
+        state.pending_command = "IDENTIFY"
+        state.pending_command_value = "1"
     elif text == "CMD:IDENTIFY,0":
-        state.identify_active = False
+        state.pending_command = "IDENTIFY"
+        state.pending_command_value = "0"
     elif text == "CMD:STALL_MODE,1":
-        state.stall_mode_armed = True
+        state.pending_command = "STALL_MODE"
+        state.pending_command_value = "1"
     elif text == "CMD:STALL_MODE,0":
-        state.stall_mode_armed = False
+        state.pending_command = "STALL_MODE"
+        state.pending_command_value = "0"
         state.stall_open_loop_active = False
     elif text.startswith("CMD:MODE,"):
-        try:
-            state.selected_mode = int(text.split(",", 1)[1])
-        except (IndexError, ValueError):
-            pass
+        state.pending_command = "MODE"
+        state.pending_command_value = text.split(",", 1)[1]
     # V1.2 — Joint Product Mode
     elif text.startswith("CMD:APP_MODE,"):
-        parts = text.split(",", 1)
-        if len(parts) >= 2:
-            state.app_mode = parts[1].strip()
+        state.pending_command = "APP_MODE"
+        state.pending_command_value = text.split(",", 1)[1]
     elif text == "JOINT:LIMIT,OFF":
+        # Product-mode local state — immediate is fine
         state.joint_limit_enabled = False
         state.joint_limit_min = None
         state.joint_limit_max = None
+    elif text.startswith("DETENT:CFG,") or text.startswith("CMD:DETENT_CFG,"):
+        state.pending_command = "DETENT:CFG"
+        state.pending_command_value = text
+    elif text.startswith("SPRING:CFG,") or text.startswith("CMD:CFG,"):
+        state.pending_command = "SPRING:CFG"
+        state.pending_command_value = text
+
+
+def apply_ack_effects(state: HostAppState, ack: AckResult, now_ms: int = 0):
+    """Update HostAppState from a parsed ACK/FAIL response.
+
+    Called when the firmware sends a command acknowledgement.
+    On OK → set the corresponding state boolean.
+    On FAIL → record error, do NOT change state.
+    """
+    pending_value = state.pending_command_value
+    if pending_value is None:
+        pending_value = ack.command_value
+    state.pending_command = None
+    state.pending_command_value = None
+    state.pending_command_sent_at_ms = None
+    state.last_ack = ack.raw
+    state.last_ack_at_ms = now_ms
+
+    if ack.ok:
+        state.last_command_error = None
+        if ack.command == "UNLOCK":
+            state.power_unlocked = pending_value != "0"
+            if not state.power_unlocked:
+                state.motor_enabled = False
+                state.identify_active = False
+                state.stall_mode_armed = False
+                state.stall_open_loop_active = False
+        elif ack.command == "ENABLE":
+            state.motor_enabled = pending_value != "0"
+            if not state.motor_enabled:
+                state.stall_open_loop_active = False
+        elif ack.command == "IDENTIFY":
+            state.identify_active = pending_value != "0"
+        elif ack.command == "STALL_MODE":
+            state.stall_mode_armed = pending_value != "0"
+            if not state.stall_mode_armed:
+                state.stall_open_loop_active = False
+        elif ack.command == "MODE" and ack.mode_value is not None:
+            state.control_mode = ack.mode_value
+        elif ack.command == "APP_MODE" and ack.app_mode_name is not None:
+            state.app_mode = ack.app_mode_name
+            if ack.app_mode_ctrl is not None:
+                state.app_mode_ctrl = ack.app_mode_ctrl
+    else:
+        state.last_command_error = ack.reason or "未知原因"
 
 
 def apply_packet_effects(state: HostAppState, packet: FOCDataPacket):
+    """Sync HostAppState from incoming N-frame telemetry (authoritative).
+
+    N-frame ONLY updates the underlying FOC control_mode — never app_mode.
+    APP_MODE is set exclusively via ACK (apply_ack_effects) or
+    APP_MODE response parsing.
+
+    Also performs N-frame convergence: if a pending_command matches the
+    runtime state the N-frame reports, the pending is cleared. This
+    provides a fallback for firmware that does not send ACKs.
+    """
     state.last_packet = packet
     state.foc_state = int(packet.foc_state)
     if packet.control_mode is not None:
-        state.selected_mode = int(packet.control_mode)
+        state.control_mode = int(packet.control_mode)
     state.fault_active = packet_has_active_fault(packet)
     state.motor_identified = bool(packet.motor_identified)
     state.stall_mode_armed = bool(packet.stall_mode_armed)
@@ -659,6 +962,51 @@ def apply_packet_effects(state: HostAppState, packet: FOCDataPacket):
         state.identify_active = False
         state.motor_enabled = False
 
+    # V1.2: N-frame convergence — if pending command matches runtime state, clear pending
+    _converge_pending_from_nframe(state)
+
+
+def _converge_pending_from_nframe(state: HostAppState):
+    """Clear pending_command when N-frame confirms the expected state.
+
+    This provides backward compatibility with firmware that does not send
+    per-command ACKs — the N-frame telemetry serves as implicit confirmation.
+    """
+    cmd = state.pending_command
+    if cmd is None:
+        return
+    value = state.pending_command_value
+
+    converged = False
+    if cmd == "UNLOCK" and value == "1" and state.power_unlocked:
+        converged = True
+    elif cmd == "UNLOCK" and value == "0" and not state.power_unlocked:
+        converged = True
+    elif cmd == "ENABLE" and value == "1" and state.motor_enabled:
+        converged = True
+    elif cmd == "ENABLE" and value == "0" and not state.motor_enabled:
+        converged = True
+    elif cmd == "IDENTIFY" and value == "1" and state.identify_active:
+        converged = True
+    elif cmd == "IDENTIFY" and value == "0" and not state.identify_active:
+        converged = True
+    elif cmd == "STALL_MODE" and value == "1" and state.stall_mode_armed:
+        converged = True
+    elif cmd == "STALL_MODE" and value == "0" and not state.stall_mode_armed:
+        converged = True
+    elif cmd == "MODE":
+        converged = True  # N-frame already updated control_mode above
+    elif cmd == "APP_MODE":
+        # N-frame does not carry APP_MODE, so only APP_MODE ACK/query responses
+        # may confirm this command.  Do not let raw control-mode telemetry make
+        # the GUI claim DETENT/SPRING/HOLD succeeded when firmware did not ACK.
+        converged = False
+
+    if converged:
+        state.pending_command = None
+        state.pending_command_value = None
+        state.pending_command_sent_at_ms = None
+
 
 # ── Joint Product Mode Presets (V1.2) ────────────────────────────────────────
 
@@ -669,9 +1017,9 @@ SPRING_PRESETS = {
 }
 
 DETENT_PRESETS = {
-    "light":    (12, 0.50, 0.18, 0.15),   # 轻卡点
-    "standard": (12, 1.00, 0.13, 0.25),   # 标准
-    "dense":    (24, 1.20, 0.10, 0.30),   # 密集
+    "light":    (12, 3.00, 0.24, 0.08, 0.40),   # 轻卡点
+    "standard": (12, 6.00, 0.24, 0.10, 0.60),   # 标准
+    "dense":    (24, 7.00, 0.16, 0.10, 0.70),   # 密集
 }
 
 
@@ -719,9 +1067,9 @@ def parse_spring_cfg_response(line: str) -> Optional[dict]:
 
 
 def parse_detent_cfg_response(line: str) -> Optional[dict]:
-    """Parse 'DETENT:CFG,OK,count=12,strength=1.000,width=0.130,limit=0.250'."""
+    """Parse 'DETENT:CFG,OK,count=12,strength=3.000,width=0.220,damping=0.080,limit=0.300'."""
     m = re.search(
-        r'^DETENT:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),limit=([\d.]+)',
+        r'^DETENT:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),damping=([\d.]+),limit=([\d.]+)',
         line.strip(),
     )
     if m:
@@ -729,9 +1077,32 @@ def parse_detent_cfg_response(line: str) -> Optional[dict]:
             "count": int(m.group(1)),
             "strength": float(m.group(2)),
             "width": float(m.group(3)),
-            "limit": float(m.group(4)),
+            "damping": float(m.group(4)),
+            "limit": float(m.group(5)),
         }
     return None
+
+
+def parse_wheel_cfg_response(line: str) -> Optional[dict]:
+    """Parse 'WHEEL:CFG,OK,count=24,strength=6.000,width=0.160,damping=0.100,limit=0.300'."""
+    m = re.search(
+        r'^WHEEL:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),damping=([\d.]+),limit=([\d.]+)',
+        line.strip(),
+    )
+    if m:
+        return {
+            "count": int(m.group(1)),
+            "strength": float(m.group(2)),
+            "width": float(m.group(3)),
+            "damping": float(m.group(4)),
+            "limit": float(m.group(5)),
+        }
+    return None
+
+
+def build_wheel_cfg_command(count: int, strength: float, width: float, damping: float, limit: float) -> str:
+    """Build WHEEL:CFG,<count>,<strength>,<width>,<damping>,<limit> command."""
+    return f"WHEEL:CFG,{int(count)},{strength:.3f},{width:.3f},{damping:.3f},{limit:.3f}\n"
 
 
 def packet_snapshot(packet: FOCDataPacket) -> dict[str, str]:
@@ -758,7 +1129,12 @@ def packet_snapshot(packet: FOCDataPacket) -> dict[str, str]:
 
 
 def can_edit_vbus_limits(state: HostAppState) -> bool:
-    return bool(state.is_connected) and not bool(state.motor_enabled) and not bool(state.identify_active)
+    return (
+        bool(state.is_connected)
+        and not bool(state.motor_enabled)
+        and not bool(state.identify_active)
+        and not bool(state.pending_command)
+    )
 
 
 def application_fault_text(app_fault_code: int) -> str:

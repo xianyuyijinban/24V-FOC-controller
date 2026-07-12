@@ -304,6 +304,12 @@ void DrvUart_SendTextP1(const char *text);
 bool DrvUart_SendBytesP1(const uint8_t *data, uint16_t len);
 
 /**
+ * @brief Send raw bytes with P0 priority (wheel events, STOP, ACK — never dropped,
+ *        but will fail with false when TX ring has no space; caller must retry/coalesce)
+ */
+bool DrvUart_SendBytesP0(const uint8_t *data, uint16_t len);
+
+/**
  * @brief Enable/disable legacy ASCII C-frame phase current telemetry
  * @note  When binary current stream is active, legacy C-frame should be
  *        suppressed to avoid wasted bandwidth and command-channel contention.

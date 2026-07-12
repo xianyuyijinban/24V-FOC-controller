@@ -4,8 +4,8 @@ import math
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -55,17 +56,41 @@ PLOT_CHANNEL_LABELS = {
 }
 
 try:
-    from .data_parser import CommandBuilder, FOCDataPacket
+    from .data_parser import CommandBuilder, FOCDataPacket, AckResult, AckParser
     from .gui_logic import (
+        APP_MODE_CN,
+        APP_MODE_TOKENS,
         DEFAULT_PROFILE_PATH,
         LOG_LEVELS,
         PLOT_CHANNELS,
+        ACK_TIMEOUT_MS,
+        FOC_STATE_FAULT,
         GuiProfile,
         HostAppState,
         LoopTuning,
         PositionLoopTuning,
         RollingPlotBuffer,
+                is_app_mode_synced,
+                get_app_mode_prerequisites,
+                build_app_enable_sequence,
+                build_app_arm_sequence,
+                build_app_target_sequence,
+                build_app_config_sequence,
+                start_command_sequence,
+                advance_command_sequence,
+                abort_command_sequence,
+        is_app_mode_synced,
+        get_app_mode_prerequisites,
+        build_app_enable_sequence,
+        build_app_arm_sequence,
+        build_app_target_sequence,
+        build_app_config_sequence,
+        start_command_sequence,
+        advance_command_sequence,
+        abort_command_sequence,
+        app_mode_cn,
         apply_command_effects,
+        apply_ack_effects,
         apply_packet_effects,
         build_adc_noise_command,
         build_current_ref_command,
@@ -76,7 +101,9 @@ try:
         build_speed_ref_command,
         build_vbus_limit_command,
         button_enable_state,
+        can_dispatch_command,
         can_edit_vbus_limits,
+        is_safe_fallback_command,
         fault_summary_text,
         fault_error_log_entry,
         fault_packet_log_entry,
@@ -94,17 +121,32 @@ try:
         should_confirm_stall_mode_enable,
     )
 except ImportError:
-    from data_parser import CommandBuilder, FOCDataPacket
+    from data_parser import CommandBuilder, FOCDataPacket, AckResult, AckParser
     from gui_logic import (
+        APP_MODE_CN,
+        APP_MODE_TOKENS,
         DEFAULT_PROFILE_PATH,
         LOG_LEVELS,
         PLOT_CHANNELS,
+        ACK_TIMEOUT_MS,
+        FOC_STATE_FAULT,
         GuiProfile,
         HostAppState,
         LoopTuning,
         PositionLoopTuning,
         RollingPlotBuffer,
+        is_app_mode_synced,
+        get_app_mode_prerequisites,
+        build_app_enable_sequence,
+        build_app_arm_sequence,
+        build_app_target_sequence,
+        build_app_config_sequence,
+        start_command_sequence,
+        advance_command_sequence,
+        abort_command_sequence,
+        app_mode_cn,
         apply_command_effects,
+        apply_ack_effects,
         apply_packet_effects,
         build_adc_noise_command,
         build_current_ref_command,
@@ -115,7 +157,9 @@ except ImportError:
         build_speed_ref_command,
         build_vbus_limit_command,
         button_enable_state,
+        can_dispatch_command,
         can_edit_vbus_limits,
+        is_safe_fallback_command,
         fault_summary_text,
         fault_error_log_entry,
         fault_packet_log_entry,
@@ -135,10 +179,11 @@ except ImportError:
 
 
 class HostMainWindow(QMainWindow):
-    command_requested = pyqtSignal(str)
-    refresh_ports_requested = pyqtSignal()
-    connect_requested = pyqtSignal(str, int)
-    disconnect_requested = pyqtSignal()
+    command_requested = Signal(str)
+    refresh_ports_requested = Signal()
+    connect_requested = Signal(str, int)
+    disconnect_requested = Signal()
+    bridge_wheel_enable_requested = Signal(bool)
 
     LOG_LIMIT = 400
     IDENTIFY_LOG_LIMIT = 200
@@ -146,6 +191,7 @@ class HostMainWindow(QMainWindow):
     VBUS_LIMIT_CONFIRM_TIMEOUT_MS = 600
     VBUS_LIMIT_CONFIRM_EPSILON_V = 0.01
     PLOT_REFRESH_INTERVAL_MS = 50
+    CURRENT_STREAM_PLOT_MAX_POINTS = 3000
     LOG_REFRESH_INTERVAL_MS = 150
     KNOWN_MOTOR_RS_OHM = 8.8
     KNOWN_MOTOR_LD_H = 0.0005
@@ -159,8 +205,9 @@ class HostMainWindow(QMainWindow):
         super().__init__()
         self._profile_path = Path(profile_path) if profile_path else DEFAULT_PROFILE_PATH
         self._profile = load_gui_profile(self._profile_path)
-        self._state = HostAppState(selected_mode=self._profile.selected_mode)
+        self._state = HostAppState(control_mode=self._profile.selected_mode)
         self._serial_worker = None
+        self._ack_parser = AckParser()
         self._loading_profile = False
         self._log_entries: list[tuple[str, str]] = []
         self._fault_log_entries: list[str] = []
@@ -169,37 +216,42 @@ class HostMainWindow(QMainWindow):
         self._plot_buffer = RollingPlotBuffer()
         self._plot_curves: dict[str, object] = {}
         self._plot_legend = None
+        self._plot_legend_channels: frozenset[str] = frozenset()
         self._mode_button_map: dict[int, list[QRadioButton]] = {0: [], 1: [], 2: []}
         self._last_encoder_warning_state: bool | None = None
         self._last_rx_activity_at_ms: int | None = None
+        self._last_cmd_sent: str | None = None   # V1.2: last TX command for diagnostics
         self._pending_vbus_limit_request: tuple[float, float] | None = None
         self._pending_vbus_limit_requested_at_ms: int | None = None
         self._plot_refresh_pending = False
         self._log_refresh_pending = False
+        self._cur_stats_prev_at_s: float | None = None
 
         self.setWindowTitle("FOC 上位机调试工具")
         self.resize(1500, 920)
 
         # ── Scope session state ──
         self._scope_enabled: bool = False
-        self._scope_start_timestamp: float | None = None  # first packet.timestamp in session
-        self._scope_start_seq: int | None = None          # first CurrentSample.seq in session
-        self._scope_start_tick_ms: int | None = None      # first CurrentSample.tick_ms in session
-        self._scope_window_s: float = 5.0                 # default time window
+        self._scope_paused: bool = False          # V1.2: freeze display without stopping acquisition
+        self._scope_start_timestamp: float | None = None
+        self._scope_start_seq: int | None = None
+        self._scope_start_tick_ms: int | None = None
+        self._scope_window_s: float = 5.0
         self._scope_follow_latest: bool = True
         self._scope_auto_y: bool = True
-        self._scope_suppress_range_change: bool = False   # prevent feedback loop
+        self._scope_suppress_range_change: bool = False
+        self._scope_ignore_manual_range_until_ms: float = 0.0
 
         self._build_toolbar()
         self._build_status_bar()
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.tabs.addTab(self._build_debug_panel(), "控制器参数")
+        self.tabs.addTab(self._scrollable_tab(self._build_debug_panel()), "控制器参数")
         self.tabs.addTab(self._build_chart_tab(), "实时波形")
-        self.tabs.addTab(self._build_identify_tab(), "参数识别")
-        self.tabs.addTab(self._build_advanced_control_tab(), "高级控制")
-        self.tabs.addTab(self._build_pi_tab(), "环路参数")
+        self.tabs.addTab(self._scrollable_tab(self._build_identify_tab()), "参数识别")
+        self.tabs.addTab(self._scrollable_tab(self._build_advanced_control_tab()), "高级控制")
+        self.tabs.addTab(self._scrollable_tab(self._build_pi_tab()), "环路参数")
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._heartbeat_timer = QTimer(self)
@@ -223,7 +275,7 @@ class HostMainWindow(QMainWindow):
         # Not started until stream is active
 
         self._load_profile_into_widgets()
-        self.apply_mode_selection(self._state.selected_mode, emit_command=False)
+        self.apply_mode_selection(self._state.control_mode, emit_command=False)
         self.update_connection_state(False)
         self._render_logs()
         self._render_fault_log()
@@ -270,6 +322,14 @@ class HostMainWindow(QMainWindow):
         self.notification_label.setStyleSheet("padding: 0 8px; color: #0f172a;")
         self.statusBar().addPermanentWidget(self.notification_label, 1)
 
+    def _scrollable_tab(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(widget)
+        return scroll
+
     def _build_debug_panel(self) -> QWidget:
         panel = QWidget()
         layout = QHBoxLayout(panel)
@@ -299,6 +359,8 @@ class HostMainWindow(QMainWindow):
         self.enable_button = QPushButton("使能")
         self.disable_button = QPushButton("禁用")
         self.clear_fault_button = QPushButton("清除故障")
+        self.power_status_label = QLabel("未解锁 | 未使能")
+        self.power_status_label.setStyleSheet("color: #64748b; font-weight: 600;")
         self.unlock_button.clicked.connect(lambda: self._dispatch_command(CommandBuilder.unlock_power(True)))
         self.lock_button.clicked.connect(lambda: self._dispatch_command(CommandBuilder.unlock_power(False)))
         self.enable_button.clicked.connect(self._request_enable_motor)
@@ -312,6 +374,7 @@ class HostMainWindow(QMainWindow):
             self.clear_fault_button,
         ):
             power_layout.addWidget(button)
+        power_layout.addWidget(self.power_status_label)
         layout.addWidget(power_group)
 
         quick_group = QGroupBox("快捷操作")
@@ -378,12 +441,27 @@ class HostMainWindow(QMainWindow):
         self.packet_timestamp_value = QLabel("--")
         self.connection_state_detail_value = QLabel("未连接")
         self.data_status_value = QLabel("空闲")
-        self.session_mode_value = QLabel(mode_name(self._state.selected_mode))
+        self.session_mode_value = QLabel(mode_name(self._state.control_mode))
         session_layout.addRow("连接状态", self.connection_state_detail_value)
         session_layout.addRow("数据新鲜度", self.data_status_value)
         session_layout.addRow("当前模式", self.session_mode_value)
         session_layout.addRow("最近数据包", self.packet_timestamp_value)
         layout.addWidget(session_group)
+
+        # V1.2: Link diagnostics
+        link_group = QGroupBox("链路诊断")
+        link_layout = QFormLayout(link_group)
+        self.last_cmd_sent_value = QLabel("--")
+        self.last_ack_value = QLabel("--")
+        self.last_nframe_value = QLabel("--")
+        self.current_pending_value = QLabel("--")
+        self.cur_link_diag_value = QLabel("--")
+        link_layout.addRow("上次命令", self.last_cmd_sent_value)
+        link_layout.addRow("上次ACK", self.last_ack_value)
+        link_layout.addRow("上次N帧", self.last_nframe_value)
+        link_layout.addRow("待确认", self.current_pending_value)
+        link_layout.addRow("电流流状态", self.cur_link_diag_value)
+        layout.addWidget(link_group)
         return widget
 
     def _build_chart_tab(self) -> QWidget:
@@ -421,7 +499,22 @@ class HostMainWindow(QMainWindow):
         self.scope_auto_y_check.toggled.connect(self._on_scope_auto_y_toggled)
         scope_bar.addWidget(self.scope_auto_y_check)
 
+        # (V1.2 controls added below)
+
+        # V1.2: plot pause — freeze display without stopping acquisition
+        self.scope_pause_check = QCheckBox("绘图暂停")
+        self.scope_pause_check.setChecked(False)
+        self.scope_pause_check.toggled.connect(self._on_scope_pause_toggled)
+        scope_bar.addWidget(self.scope_pause_check)
+
         scope_bar.addStretch()
+
+        # V1.2: mixed display indicator
+        self.scope_mixed_label = QLabel("")
+        self.scope_mixed_label.setStyleSheet(
+            "color: #b45309; font-weight: 700; font-size: 13px;"
+        )
+        scope_bar.addWidget(self.scope_mixed_label)
         layout.addLayout(scope_bar)
 
         # ── Channel toggles ──
@@ -429,14 +522,14 @@ class HostMainWindow(QMainWindow):
         self.plot_channel_checks: dict[str, QCheckBox] = {}
         for index, channel in enumerate(PLOT_CHANNELS):
             checkbox = QCheckBox(PLOT_CHANNEL_LABELS.get(channel, channel))
-            checkbox.setChecked(channel in {"angle", "speed_ref", "pos_ref_deg", "Vbus", "Ia", "Ib", "Ic", "Id", "Iq", "Iq_ref"})
+            checkbox.setChecked(channel in {"Ia", "Ib", "Ic"})
             checkbox.toggled.connect(self._refresh_plot)
             self.plot_channel_checks[channel] = checkbox
             toggles_layout.addWidget(checkbox, index // 4, index % 4)
         layout.addLayout(toggles_layout)
 
         # ── Current Stream Controls ──
-        cur_stream_group = QGroupBox("相电流流 (Current Stream)")
+        cur_stream_group = QGroupBox("采集开关 (Current Stream)")
         cur_stream_group.setCheckable(True)
         cur_stream_group.setChecked(False)
         cur_stream_group.toggled.connect(self._on_cur_stream_toggled)
@@ -688,13 +781,14 @@ class HostMainWindow(QMainWindow):
         selector_row = QHBoxLayout()
         selector_row.addWidget(QLabel("产品模式:"))
         self.app_mode_combo = QComboBox()
-        self.app_mode_combo.addItems(["RAW", "JOINT_POS", "GIMBAL_SPEED", "HOLD", "SPRING_DAMPER", "DETENT"])
+        for token in APP_MODE_TOKENS:
+            self.app_mode_combo.addItem(APP_MODE_CN[token], token)
         self.app_mode_set_button = QPushButton("设置模式")
         self.app_mode_set_button.clicked.connect(self._on_app_mode_set)
         selector_row.addWidget(self.app_mode_combo)
         selector_row.addWidget(self.app_mode_set_button)
 
-        self.advanced_mode_value = QLabel(mode_name(self._state.selected_mode))
+        self.advanced_mode_value = QLabel(mode_name(self._state.control_mode))
         self.advanced_mode_value.setStyleSheet("font-size: 15px; font-weight: 700; color: #0f766e;")
         selector_row.addWidget(self.advanced_mode_value)
         selector_row.addStretch()
@@ -711,13 +805,13 @@ class HostMainWindow(QMainWindow):
             lambda: self._dispatch_command(CommandBuilder.unlock_power(False))
         )
         self.app_enable_button = QPushButton("使能")
-        self.app_enable_button.clicked.connect(self._request_enable_motor)
+        self.app_enable_button.clicked.connect(self._on_app_enable)
         self.app_disable_button = QPushButton("禁用")
         self.app_disable_button.clicked.connect(
             lambda: self._dispatch_command(CommandBuilder.enable_motor(False))
         )
         self.app_arm_button = QPushButton("解锁并使能")
-        self.app_arm_button.clicked.connect(self._request_quick_arm)
+        self.app_arm_button.clicked.connect(self._on_app_arm)
         self.app_power_status = QLabel("未解锁 | 未使能")
         self.app_power_status.setStyleSheet("color: #64748b; font-weight: 600;")
 
@@ -739,7 +833,8 @@ class HostMainWindow(QMainWindow):
         self.mode_panel_stack.addWidget(self._build_hold_panel())          # 3: HOLD
         self.mode_panel_stack.addWidget(self._build_spring_damper_panel()) # 4: SPRING_DAMPER
         self.mode_panel_stack.addWidget(self._build_detent_panel())        # 5: DETENT
-        self.app_mode_combo.currentIndexChanged.connect(self.mode_panel_stack.setCurrentIndex)
+        self.mode_panel_stack.addWidget(self._build_scroll_wheel_panel())  # 6: SCROLL_WHEEL
+        self.app_mode_combo.currentIndexChanged.connect(self._on_app_mode_combo_changed)
         layout.addWidget(self.mode_panel_stack, stretch=1)
 
         # ── STOP Button (always visible on this tab) ──
@@ -820,7 +915,7 @@ class HostMainWindow(QMainWindow):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
 
-        group = QGroupBox("传统控制模式 (RAW)")
+        group = QGroupBox("原始控制")
         group.setCheckable(True)
         group.setChecked(False)
         inner = QVBoxLayout(group)
@@ -891,7 +986,7 @@ class HostMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Soft Limits ──
-        limits_group = QGroupBox("软限位 (Joint Soft Limits)")
+        limits_group = QGroupBox("软限位")
         limits_fl = QFormLayout(limits_group)
 
         self.joint_limit_enable_cb = QCheckBox("启用软限位")
@@ -924,7 +1019,7 @@ class HostMainWindow(QMainWindow):
         layout.addWidget(limits_group)
 
         # ── Position Target ──
-        target_group = QGroupBox("位置目标 (Position Target)")
+        target_group = QGroupBox("位置目标")
         target_fl = QFormLayout(target_group)
 
         self.joint_pos_target_spin = QDoubleSpinBox()
@@ -948,7 +1043,7 @@ class HostMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Speed Reference ──
-        speed_group = QGroupBox("速度参考 (Speed Reference)")
+        speed_group = QGroupBox("速度参考")
         speed_outer = QVBoxLayout(speed_group)
 
         slider_row = QHBoxLayout()
@@ -978,7 +1073,7 @@ class HostMainWindow(QMainWindow):
         layout.addWidget(speed_group)
 
         # ── Ramp Acceleration ──
-        ramp_group = QGroupBox("斜坡加速度 (Ramp Acceleration)")
+        ramp_group = QGroupBox("斜坡加速度")
         ramp_fl = QFormLayout(ramp_group)
 
         self.gimbal_ramp_spin = QDoubleSpinBox()
@@ -986,7 +1081,7 @@ class HostMainWindow(QMainWindow):
         self.gimbal_ramp_spin.setValue(2.0)
         self.gimbal_ramp_spin.setSuffix(" rad/s²")
         self.gimbal_ramp_spin.setDecimals(1)
-        self.gimbal_ramp_set_btn = QPushButton("设置斜坡")
+        self.gimbal_ramp_set_btn = QPushButton("设置加速度")
         self.gimbal_ramp_set_btn.clicked.connect(self._on_gimbal_ramp_set)
 
         ramp_fl.addRow("加速度:", self.gimbal_ramp_spin)
@@ -1001,7 +1096,7 @@ class HostMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Status ──
-        status_group = QGroupBox("HOLD 状态")
+        status_group = QGroupBox("位置保持状态")
         status_fl = QFormLayout(status_group)
         self.hold_angle_label = QLabel("--")
         self.hold_angle_label.setStyleSheet("font-size: 14px; font-weight: 600;")
@@ -1012,7 +1107,7 @@ class HostMainWindow(QMainWindow):
         layout.addWidget(status_group)
 
         # ── Lock Button ──
-        self.hold_lock_btn = QPushButton("🔒 锁定当前位置 (Hold Current Position)")
+        self.hold_lock_btn = QPushButton("🔒 锁定当前位置")
         self.hold_lock_btn.setMinimumHeight(48)
         self.hold_lock_btn.setStyleSheet(
             "QPushButton { background-color: #0f766e; color: white; font-weight: 700; font-size: 14px; }"
@@ -1035,7 +1130,7 @@ class HostMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Presets ──
-        preset_group = QGroupBox("预设 (Presets)")
+        preset_group = QGroupBox("预设")
         preset_row = QHBoxLayout(preset_group)
         self.spring_preset_soft_btn = QPushButton("柔和\nK=0.25 D=0.03")
         self.spring_preset_soft_btn.clicked.connect(lambda: self._on_spring_preset("soft"))
@@ -1067,10 +1162,10 @@ class HostMainWindow(QMainWindow):
         self.spring_D_spin.setValue(0.05)
 
         self.spring_limit_spin = QDoubleSpinBox()
-        self.spring_limit_spin.setRange(0.01, 1.0)
+        self.spring_limit_spin.setRange(0.01, 2.0)
         self.spring_limit_spin.setDecimals(3)
         self.spring_limit_spin.setSingleStep(0.05)
-        self.spring_limit_spin.setValue(0.30)
+        self.spring_limit_spin.setValue(0.60)
 
         self.spring_cfg_set_btn = QPushButton("应用参数")
         self.spring_cfg_set_btn.clicked.connect(self._on_spring_cfg_set)
@@ -1094,13 +1189,13 @@ class HostMainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # ── Presets ──
-        preset_group = QGroupBox("预设 (Presets)")
+        preset_group = QGroupBox("预设")
         preset_row = QHBoxLayout(preset_group)
-        self.detent_preset_light_btn = QPushButton("轻卡点\n12格 强度0.50")
+        self.detent_preset_light_btn = QPushButton("轻卡点\n12格 强度3.00")
         self.detent_preset_light_btn.clicked.connect(lambda: self._on_detent_preset("light"))
-        self.detent_preset_std_btn = QPushButton("标准\n12格 强度1.00")
+        self.detent_preset_std_btn = QPushButton("标准\n12格 强度6.00")
         self.detent_preset_std_btn.clicked.connect(lambda: self._on_detent_preset("standard"))
-        self.detent_preset_dense_btn = QPushButton("密集\n24格 强度1.20")
+        self.detent_preset_dense_btn = QPushButton("密集\n24格 强度7.00")
         self.detent_preset_dense_btn.clicked.connect(lambda: self._on_detent_preset("dense"))
         for btn in (self.detent_preset_light_btn, self.detent_preset_std_btn, self.detent_preset_dense_btn):
             btn.setMinimumHeight(44)
@@ -1118,22 +1213,28 @@ class HostMainWindow(QMainWindow):
         self.detent_count_spin.setValue(12)
 
         self.detent_strength_spin = QDoubleSpinBox()
-        self.detent_strength_spin.setRange(0.0, 5.0)
+        self.detent_strength_spin.setRange(0.0, 20.0)
         self.detent_strength_spin.setDecimals(3)
-        self.detent_strength_spin.setSingleStep(0.1)
-        self.detent_strength_spin.setValue(1.0)
+        self.detent_strength_spin.setSingleStep(0.5)
+        self.detent_strength_spin.setValue(6.0)
 
         self.detent_width_spin = QDoubleSpinBox()
         self.detent_width_spin.setRange(0.01, 1.0)
         self.detent_width_spin.setDecimals(3)
         self.detent_width_spin.setSingleStep(0.01)
-        self.detent_width_spin.setValue(0.13)
+        self.detent_width_spin.setValue(0.24)
+
+        self.detent_damping_spin = QDoubleSpinBox()
+        self.detent_damping_spin.setRange(0.0, 0.5)
+        self.detent_damping_spin.setDecimals(3)
+        self.detent_damping_spin.setSingleStep(0.01)
+        self.detent_damping_spin.setValue(0.10)
 
         self.detent_limit_spin = QDoubleSpinBox()
-        self.detent_limit_spin.setRange(0.01, 1.0)
+        self.detent_limit_spin.setRange(0.01, 2.0)
         self.detent_limit_spin.setDecimals(3)
         self.detent_limit_spin.setSingleStep(0.05)
-        self.detent_limit_spin.setValue(0.25)
+        self.detent_limit_spin.setValue(0.60)
 
         self.detent_cfg_set_btn = QPushButton("应用参数")
         self.detent_cfg_set_btn.clicked.connect(self._on_detent_cfg_set)
@@ -1141,9 +1242,55 @@ class HostMainWindow(QMainWindow):
         cfg_fl.addRow("Count (每圈卡点数):", self.detent_count_spin)
         cfg_fl.addRow("Strength (强度 A/rad):", self.detent_strength_spin)
         cfg_fl.addRow("Width (宽度 rad):", self.detent_width_spin)
+        cfg_fl.addRow("Damping (阻尼 A/(rad/s)):", self.detent_damping_spin)
         cfg_fl.addRow("Limit (限幅 A):", self.detent_limit_spin)
         cfg_fl.addRow(self.detent_cfg_set_btn)
         layout.addWidget(cfg_group)
+        layout.addStretch()
+        return panel
+
+    def _build_scroll_wheel_panel(self) -> QWidget:
+        """SCROLL_WHEEL mode panel - managed by FOC_Device_Bridge tray application."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        info_group = QGroupBox("Scroll Wheel Mode / 滚轮鼠标")
+        info_fl = QFormLayout(info_group)
+        note = QLabel(
+            "滚轮模式由 FOC Device Bridge 独占串口并注入系统滚轮事件。\n"
+            "请先启动 Bridge，再在上位机顶部选择控制板串口并连接。\n"
+            "会话超过 1 秒未收到保活时，固件会自动停止电机。"
+        )
+        note.setWordWrap(True)
+        info_fl.addRow(note)
+        layout.addWidget(info_group)
+
+        status_group = QGroupBox("Wheel Status / 滚轮状态")
+        status_fl = QFormLayout(status_group)
+        self.wheel_session_label = QLabel("--")
+        self.wheel_position_label = QLabel("--")
+        self.wheel_delta_label = QLabel("--")
+        status_fl.addRow("Session / 会话:", self.wheel_session_label)
+        status_fl.addRow("Position (steps):", self.wheel_position_label)
+        status_fl.addRow("Total Delta:", self.wheel_delta_label)
+        layout.addWidget(status_group)
+
+        control_row = QHBoxLayout()
+        self.wheel_bridge_enable_btn = QPushButton("启用滚轮")
+        self.wheel_bridge_disable_btn = QPushButton("停用滚轮")
+        self.wheel_bridge_enable_btn.setEnabled(False)
+        self.wheel_bridge_disable_btn.setEnabled(False)
+        self.wheel_bridge_enable_btn.clicked.connect(
+            lambda: self.bridge_wheel_enable_requested.emit(True)
+        )
+        self.wheel_bridge_disable_btn.clicked.connect(
+            lambda: self.bridge_wheel_enable_requested.emit(False)
+        )
+        control_row.addWidget(self.wheel_bridge_enable_btn)
+        control_row.addWidget(self.wheel_bridge_disable_btn)
+        layout.addLayout(control_row)
+
         layout.addStretch()
         return panel
 
@@ -1242,11 +1389,37 @@ class HostMainWindow(QMainWindow):
         self.connect_requested.connect(worker.connect_port)
         self.disconnect_requested.connect(worker.disconnect_port)
         self.command_requested.connect(worker.send_command)
+        self.bridge_wheel_enable_requested.connect(worker.request_bridge_wheel_enable)
         worker.ports_updated.connect(self.update_ports)
         worker.connection_changed.connect(self.update_connection_state)
         worker.log_line.connect(self.handle_log_line)
         worker.packet_received.connect(self.apply_packet)
         worker.current_samples_batch.connect(self._on_current_samples_batch)
+        if hasattr(worker, "bridge_state_changed"):
+            worker.bridge_state_changed.connect(self.update_bridge_state)
+        if hasattr(worker, "wheel_status_changed"):
+            worker.wheel_status_changed.connect(self.update_wheel_status)
+
+    def update_bridge_state(self, state: dict):
+        state_name = str(state.get("state", "DISCONNECTED"))
+        port = str(state.get("port", ""))
+        if state_name == "DISCONNECTED":
+            self.wheel_session_label.setText("未连接")
+            self.wheel_position_label.setText("--")
+            self.wheel_delta_label.setText("--")
+            self.wheel_bridge_enable_btn.setEnabled(False)
+            self.wheel_bridge_disable_btn.setEnabled(False)
+            return
+        suffix = f" | {port}" if port else ""
+        self.wheel_session_label.setText(f"{state_name}{suffix}")
+        self.wheel_bridge_enable_btn.setEnabled(state_name == "CONNECTED_IDLE")
+        self.wheel_bridge_disable_btn.setEnabled(
+            state_name in ("WHEEL_ENABLING", "WHEEL_ACTIVE", "WHEEL_DISABLING")
+        )
+
+    def update_wheel_status(self, status: dict):
+        self.wheel_position_label.setText(str(status.get("position_steps", "--")))
+        self.wheel_delta_label.setText(str(status.get("total_delta", "--")))
 
     def update_ports(self, ports: list[str]):
         self._state.available_ports = list(ports)
@@ -1296,7 +1469,7 @@ class HostMainWindow(QMainWindow):
             self._state.gimbal_ramp_accel = None
             self._state.spring_K = self._state.spring_D = self._state.spring_limit = None
             self._state.detent_count = None
-            self._state.detent_strength = self._state.detent_width = self._state.detent_limit = None
+            self._state.detent_strength = self._state.detent_width = self._state.detent_damping = self._state.detent_limit = None
 
         self._apply_control_enable_state()
         self._refresh_identify_state_panel()
@@ -1343,18 +1516,21 @@ class HostMainWindow(QMainWindow):
         # ── V1.2 App-tab power controls ──
         self.app_unlock_button.setEnabled(state["can_unlock"])
         self.app_lock_button.setEnabled(state["can_lock"])
-        self.app_enable_button.setEnabled(state["can_enable"])
+        self.app_enable_button.setEnabled(state["app_enable"])
         self.app_disable_button.setEnabled(state["can_disable"])
-        self.app_arm_button.setEnabled(state["can_quick_arm"])
+        self.app_arm_button.setEnabled(state["app_arm"])
         if self._state.power_unlocked and self._state.motor_enabled:
-            self.app_power_status.setText("已解锁 | 已使能")
-            self.app_power_status.setStyleSheet("color: #0f766e; font-weight: 600;")
+            power_text = "已解锁 | 已使能"
+            power_style = "color: #0f766e; font-weight: 600;"
         elif self._state.power_unlocked:
-            self.app_power_status.setText("已解锁 | 未使能")
-            self.app_power_status.setStyleSheet("color: #b45309; font-weight: 600;")
+            power_text = "已解锁 | 未使能"
+            power_style = "color: #b45309; font-weight: 600;"
         else:
-            self.app_power_status.setText("未解锁 | 未使能")
-            self.app_power_status.setStyleSheet("color: #64748b; font-weight: 600;")
+            power_text = "未解锁 | 未使能"
+            power_style = "color: #64748b; font-weight: 600;"
+        for label in (self.power_status_label, self.app_power_status):
+            label.setText(power_text)
+            label.setStyleSheet(power_style)
 
         # ── V1.2 Joint Product Mode controls ──
         app_mode_ok = state["app_mode_selector"]
@@ -1363,9 +1539,10 @@ class HostMainWindow(QMainWindow):
         sd_ok = state["spring_detent_config"]
         motion_ok = state["motion_target"]
         hold_ok = state["hold_button"]
+        bridge_managed_wheel = (self._state.app_mode_selected or "RAW") == "SCROLL_WHEEL"
 
         self.app_mode_combo.setEnabled(app_mode_ok)
-        self.app_mode_set_button.setEnabled(app_mode_ok)
+        self.app_mode_set_button.setEnabled(app_mode_ok and not bridge_managed_wheel)
         self.app_stop_button.setEnabled(self._state.is_connected)
 
         # JOINT_POS
@@ -1401,6 +1578,7 @@ class HostMainWindow(QMainWindow):
         self.detent_count_spin.setEnabled(sd_ok)
         self.detent_strength_spin.setEnabled(sd_ok)
         self.detent_width_spin.setEnabled(sd_ok)
+        self.detent_damping_spin.setEnabled(sd_ok)
         self.detent_limit_spin.setEnabled(sd_ok)
         self.detent_cfg_set_btn.setEnabled(sd_ok)
         self.detent_preset_light_btn.setEnabled(sd_ok)
@@ -1408,15 +1586,15 @@ class HostMainWindow(QMainWindow):
         self.detent_preset_dense_btn.setEnabled(sd_ok)
 
     def apply_mode_selection(self, mode: int, emit_command: bool = True):
-        self._state.selected_mode = int(mode)
-        self.target_label.setText(mode_target_label(self._state.selected_mode))
-        self.session_mode_value.setText(mode_name(self._state.selected_mode))
+        self._state.control_mode = int(mode)
+        self.target_label.setText(mode_target_label(self._state.control_mode))
+        self.session_mode_value.setText(mode_name(self._state.control_mode))
         self.advanced_mode_value.setText(self._app_control_status_text())
-        self._sync_mode_buttons(self._state.selected_mode)
+        self._sync_mode_buttons(self._state.control_mode)
         self._refresh_mode_highlight()
         self._persist_profile_from_widgets()
         if emit_command and self._state.is_connected:
-            self._dispatch_command(CommandBuilder.set_mode(self._state.selected_mode))
+            self._dispatch_command(CommandBuilder.set_mode(self._state.control_mode))
 
     def apply_packet(self, packet: FOCDataPacket):
         if getattr(packet, "phase_current_only", False):
@@ -1504,12 +1682,39 @@ class HostMainWindow(QMainWindow):
 
         if level == "TX":
             apply_command_effects(self._state, message)
+            # V1.2: record timestamp for ACK timeout tracking
+            now_ms = int(time.monotonic() * 1000)
+            if self._state.pending_command:
+                self._state.pending_command_sent_at_ms = now_ms
+            self._last_cmd_sent = message.strip()
             if message.startswith("CMD:IDENTIFY"):
                 self._record_identify_event(f"命令：{message}")
             elif message.startswith("CMD:CLEAR_FAULT"):
                 self._record_identify_event("已发送清故障命令。")
             self._show_notification("INFO", f"已发送 {message}")
         elif level == "RX":
+            # V1.2: Check for ACK responses first
+            ack = self._ack_parser.parse_line(message)
+            if ack is not None:
+                now_ms = int(time.monotonic() * 1000)
+                apply_ack_effects(self._state, ack, now_ms)
+                # Advance command sequence if pending
+                if ack.ok:
+                    next_cmd = advance_command_sequence(self._state)
+                    if next_cmd:
+                        self.command_requested.emit(next_cmd)
+                elif ack.command:
+                    abort_command_sequence(self._state, "序列中止：" + ack.command + " 失败")
+                if ack.ok:
+                    self._show_notification("INFO", f"固件确认: {ack.raw}")
+                else:
+                    reason_text = ack.reason or "未知原因"
+                    self._show_notification("ERROR", f"{ack.command} 失败: {reason_text}")
+                    self._record_identify_event(f"命令失败: {ack.raw}")
+            elif self._state.pending_sequence is not None:
+                # Diagnostic: log RX lines that ACK parser missed while sequence is pending
+                self.handle_log_line("INFO", f"[SEQ-DBG] ACK missed, seq_idx={self._state.pending_seq_index}: {message[:120]}")
+            # Existing ADC_NOISE parsing
             adc_noise_result = parse_adc_noise_response(message)
             if adc_noise_result is not None:
                 self.adc_noise_result_value.setText(adc_noise_result.display_text)
@@ -1551,7 +1756,7 @@ class HostMainWindow(QMainWindow):
             self._profile.baud_rate = int(self.baud_combo.currentText())
         except ValueError:
             self._profile.baud_rate = 230400
-        self._profile.selected_mode = self._state.selected_mode
+        self._profile.selected_mode = self._state.control_mode
         self._profile.log_filters = [
             level for level, checkbox in self.log_filter_checks.items() if checkbox.isChecked()
         ] or list(LOG_LEVELS)
@@ -1585,6 +1790,10 @@ class HostMainWindow(QMainWindow):
             return default
 
     def _dispatch_command(self, command: str, identify_note: str | None = None):
+        allowed, reason = can_dispatch_command(self._state, command)
+        if not allowed:
+            self.handle_log_line("ERROR", reason)
+            return
         if not self._state.is_connected:
             self.handle_log_line("ERROR", "当前未连接，命令已拦截。")
             return
@@ -1607,6 +1816,19 @@ class HostMainWindow(QMainWindow):
         return True
 
     def _dispatch_sequence(self, commands: list[str]):
+        has_advancing_command = any(not is_safe_fallback_command(command) for command in commands)
+        if self._state.pending_command and has_advancing_command:
+            self.handle_log_line("ERROR", f"正在等待 {self._state.pending_command} 确认，命令序列已拦截。")
+            return
+        fault_active = bool(self._state.fault_active or self._state.foc_state == FOC_STATE_FAULT)
+        if fault_active and has_advancing_command:
+            self.handle_log_line("ERROR", "当前处于故障状态，只允许停机、上锁、清故障或诊断命令。")
+            return
+        if len(commands) == 1:
+            allowed, reason = can_dispatch_command(self._state, commands[0])
+            if not allowed:
+                self.handle_log_line("ERROR", reason)
+                return
         if not self._state.is_connected:
             self.handle_log_line("ERROR", "当前未连接，命令已拦截。")
             return
@@ -1674,7 +1896,7 @@ class HostMainWindow(QMainWindow):
             return
         self.current_id_input.setText(f"{self._float_or_default(self.current_id_input.text()):.3f}")
         self.current_iq_input.setText(f"{self._float_or_default(self.current_iq_input.text()):.3f}")
-        if self._state.selected_mode != 0:
+        if self._state.control_mode != 0:
             self.apply_mode_selection(0)
         self._dispatch_command(command)
 
@@ -1687,7 +1909,7 @@ class HostMainWindow(QMainWindow):
         if not self._ensure_motion_target_ready():
             return
         self.speed_ref_input.setText(f"{self._float_or_default(self.speed_ref_input.text()):.3f}")
-        if self._state.selected_mode != 1:
+        if self._state.control_mode != 1:
             self.apply_mode_selection(1)
         self._dispatch_command(command)
 
@@ -1700,7 +1922,7 @@ class HostMainWindow(QMainWindow):
         if not self._ensure_motion_target_ready():
             return
         self.position_ref_input.setText(f"{self._float_or_default(self.position_ref_input.text()):.3f}")
-        if self._state.selected_mode != 2:
+        if self._state.control_mode != 2:
             self.apply_mode_selection(2)
         self._dispatch_command(command)
 
@@ -1793,12 +2015,55 @@ class HostMainWindow(QMainWindow):
 
     # ── Joint Product Mode Slots (V1.2) ─────────────────────────────────────
 
+    def _on_app_mode_combo_changed(self, idx: int):
+        self.mode_panel_stack.setCurrentIndex(idx)
+        token = self.app_mode_combo.itemData(idx)
+        if token:
+            self._state.app_mode_selected = token
+        self._apply_control_enable_state()
+        self._refresh_mode_views()
+
+    def _on_app_enable(self):
+        state = button_enable_state(self._state)
+        if not state["app_enable"]:
+            self._show_notification("ERROR", "\u65e0\u6cd5\u4f7f\u80fd\uff1a\u672a\u8fde\u63a5/\u672a\u89e3\u9501/\u5df2\u4f7f\u80fd/\u8bc6\u522b\u4e2d/\u6545\u969c")
+            return
+        selected = self._state.app_mode_selected or "RAW"
+        ok, reason = get_app_mode_prerequisites(self._state, selected)
+        if not ok:
+            self._show_notification("ERROR", reason)
+            return
+        seq = build_app_enable_sequence(selected, self._state)
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
+
+    def _on_app_arm(self):
+        state = button_enable_state(self._state)
+        if not state["app_arm"]:
+            self._show_notification("ERROR", "\u65e0\u6cd5\u89e3\u9501\u5e76\u4f7f\u80fd\uff1a\u672a\u8fde\u63a5/\u5df2\u4f7f\u80fd/\u8bc6\u522b\u4e2d/\u6545\u969c")
+            return
+        selected = self._state.app_mode_selected or "RAW"
+        ok, reason = get_app_mode_prerequisites(self._state, selected)
+        if not ok:
+            self._show_notification("ERROR", reason)
+            return
+        seq = build_app_arm_sequence(selected, self._state)
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
+
     def _on_app_mode_set(self):
         state = button_enable_state(self._state)
         if not state["app_mode_selector"]:
             self._show_notification("ERROR", "无法切换APP_MODE：未连接或识别中/故障")
             return
-        mode = self.app_mode_combo.currentText()
+        mode = self.app_mode_combo.currentData()
+        if mode == "SCROLL_WHEEL":
+            self._show_notification("ERROR", "滚轮鼠标模式由 FOC Device Bridge 管理，请从系统托盘启用。")
+            return
         try:
             cmd = CommandBuilder.app_mode_set(mode)
         except ValueError as e:
@@ -1830,18 +2095,24 @@ class HostMainWindow(QMainWindow):
         self.joint_limit_max_spin.setEnabled(checked)
         self.joint_limit_set_btn.setEnabled(checked)
 
+    def _on_gimbal_speed_slider_changed(self, value: int):
+        speed = value / 100.0
+        self.gimbal_speed_value_label.setText(f"{speed:.2f} rad/s")
+        self.gimbal_speed_spin.blockSignals(True)
+        self.gimbal_speed_spin.setValue(speed)
+        self.gimbal_speed_spin.blockSignals(False)
+
     def _on_gimbal_speed_set(self):
         state = button_enable_state(self._state)
         if not state["motion_target"]:
             self._show_notification("ERROR", "无法发送速度：未连接/未解锁/未使能/识别中/故障")
             return
         speed = self.gimbal_speed_spin.value()
-        if self._state.app_mode != "GIMBAL_SPEED":
-            self._dispatch_command(CommandBuilder.app_mode_set("GIMBAL_SPEED"))
-        self._dispatch_command(CommandBuilder.set_speed_ref(speed))
-
-    def _on_gimbal_speed_slider_changed(self, value: int):
-        speed = value / 100.0
+        seq = build_app_target_sequence("GIMBAL_SPEED", CommandBuilder.set_speed_ref(speed))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
         self.gimbal_speed_value_label.setText(f"{speed:.2f} rad/s")
         self.gimbal_speed_spin.blockSignals(True)
         self.gimbal_speed_spin.setValue(speed)
@@ -1861,7 +2132,11 @@ class HostMainWindow(QMainWindow):
         if not state["hold_button"]:
             self._show_notification("ERROR", "无法锁定：未连接/未解锁/未使能/识别中/故障")
             return
-        self._dispatch_command(CommandBuilder.app_mode_set("HOLD"))
+        seq = [CommandBuilder.app_mode_set("HOLD")]
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
 
     def _on_joint_pos_start(self):
         state = button_enable_state(self._state)
@@ -1869,9 +2144,12 @@ class HostMainWindow(QMainWindow):
             self._show_notification("ERROR", "无法发送位置目标：未连接/未解锁/未使能/识别中/故障")
             return
         deg = self.joint_pos_target_spin.value()
-        self._dispatch_command(CommandBuilder.app_mode_set("JOINT_POS"))
         rad = math.radians(deg)
-        self._dispatch_command(CommandBuilder.set_position_ref(rad))
+        seq = build_app_target_sequence("JOINT_POS", CommandBuilder.set_position_ref(rad))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
 
     def _on_spring_preset(self, preset: str):
         try:
@@ -1886,8 +2164,11 @@ class HostMainWindow(QMainWindow):
         self.spring_K_spin.setValue(K)
         self.spring_D_spin.setValue(D)
         self.spring_limit_spin.setValue(limit)
-        self._dispatch_command(CommandBuilder.spring_cfg_set(K, D, limit))
-
+        seq = build_app_config_sequence("SPRING_DAMPER", CommandBuilder.spring_cfg_set(K, D, limit))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
     def _on_spring_cfg_set(self):
         state = button_enable_state(self._state)
         if not state["spring_detent_config"]:
@@ -1896,7 +2177,11 @@ class HostMainWindow(QMainWindow):
         K = self.spring_K_spin.value()
         D = self.spring_D_spin.value()
         limit = self.spring_limit_spin.value()
-        self._dispatch_command(CommandBuilder.spring_cfg_set(K, D, limit))
+        seq = build_app_config_sequence("SPRING_DAMPER", CommandBuilder.spring_cfg_set(K, D, limit))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
 
     def _on_detent_preset(self, preset: str):
         try:
@@ -1907,12 +2192,16 @@ class HostMainWindow(QMainWindow):
         if not state["spring_detent_config"]:
             self._show_notification("ERROR", "无法设置卡点参数：未连接或识别中/故障")
             return
-        count, strength, width, limit = DETENT_PRESETS[preset]
+        count, strength, width, damping, limit = DETENT_PRESETS[preset]
         self.detent_count_spin.setValue(count)
         self.detent_strength_spin.setValue(strength)
         self.detent_width_spin.setValue(width)
-        self.detent_limit_spin.setValue(limit)
-        self._dispatch_command(CommandBuilder.detent_cfg_set(count, strength, width, limit))
+        self.detent_damping_spin.setValue(damping)
+        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, damping, limit))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
 
     def _on_detent_cfg_set(self):
         state = button_enable_state(self._state)
@@ -1922,11 +2211,13 @@ class HostMainWindow(QMainWindow):
         count = self.detent_count_spin.value()
         strength = self.detent_strength_spin.value()
         width = self.detent_width_spin.value()
+        damping = self.detent_damping_spin.value()
         limit = self.detent_limit_spin.value()
-        self._dispatch_command(CommandBuilder.detent_cfg_set(count, strength, width, limit))
-
-    # ── Joint Product Mode RX Handler & Auto-Query (V1.2) ────────────────────
-
+        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, damping, limit))
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
     def _handle_joint_product_rx(self, line: str):
         """Parse Joint Product Mode query responses from RX and update UI."""
         try:
@@ -1947,7 +2238,6 @@ class HostMainWindow(QMainWindow):
             self._state.app_mode = result["mode"]
             if result["ctrl"] is not None:
                 self._state.app_mode_ctrl = result["ctrl"]
-                self._state.selected_mode = result["ctrl"]
             else:
                 inferred_ctrl = {
                     "JOINT_POS": 2,
@@ -1955,15 +2245,10 @@ class HostMainWindow(QMainWindow):
                     "HOLD": 2,
                     "SPRING_DAMPER": 2,
                     "DETENT": 2,
+                    "SCROLL_WHEEL": 2,
                 }.get(result["mode"])
                 if inferred_ctrl is not None:
                     self._state.app_mode_ctrl = inferred_ctrl
-                    self._state.selected_mode = inferred_ctrl
-            self.app_mode_combo.blockSignals(True)
-            idx = self.app_mode_combo.findText(result["mode"])
-            if idx >= 0:
-                self.app_mode_combo.setCurrentIndex(idx)
-            self.app_mode_combo.blockSignals(False)
             self._refresh_mode_views()
             return
 
@@ -1999,10 +2284,12 @@ class HostMainWindow(QMainWindow):
             self._state.detent_count = result["count"]
             self._state.detent_strength = result["strength"]
             self._state.detent_width = result["width"]
+            self._state.detent_damping = result["damping"]
             self._state.detent_limit = result["limit"]
             self.detent_count_spin.setValue(result["count"])
             self.detent_strength_spin.setValue(result["strength"])
             self.detent_width_spin.setValue(result["width"])
+            self.detent_damping_spin.setValue(result["damping"])
             self.detent_limit_spin.setValue(result["limit"])
             return
 
@@ -2144,25 +2431,37 @@ class HostMainWindow(QMainWindow):
                 button.blockSignals(False)
 
     def _refresh_mode_views(self):
-        self._sync_mode_buttons(self._state.selected_mode)
-        self.session_mode_value.setText(mode_name(self._state.selected_mode))
-        self.target_label.setText(mode_target_label(self._state.selected_mode))
+        self._sync_mode_buttons(self._state.control_mode)
+        self.session_mode_value.setText(mode_name(self._state.control_mode))
+        self.target_label.setText(mode_target_label(self._state.control_mode))
         self.advanced_mode_value.setText(self._app_control_status_text())
         self._refresh_mode_highlight()
 
     def _app_control_status_text(self) -> str:
-        app_mode = self._state.app_mode or "RAW"
-        if app_mode == "RAW":
+        app_token = self._state.app_mode or "RAW"
+        app_label = app_mode_cn(app_token)
+        selected = self._state.app_mode_selected or "RAW"
+        if selected == app_token:
+            sync_mark = ""
+        else:
+            sync_mark = f" [待同步：{app_mode_cn(selected)}]"
+        if app_token == "RAW":
             ctrl_mode = self._state.app_mode_ctrl
             if ctrl_mode is None:
-                ctrl_mode = self._state.selected_mode
+                ctrl_mode = self._state.control_mode
         else:
-            ctrl_mode = self._inferred_app_control_mode(app_mode)
-        return f"APP {app_mode} | CTRL {mode_name(ctrl_mode)}"
+            ctrl_mode = self._inferred_app_control_mode(app_token)
+        return f"产品：{app_label}{sync_mark} | 底层：{mode_name(ctrl_mode)}"
 
     @staticmethod
     def _inferred_app_control_mode(app_mode: str) -> int:
-        if app_mode in {"JOINT_POS", "HOLD", "SPRING_DAMPER", "DETENT"}:
+        if app_mode in {
+            "JOINT_POS",
+            "HOLD",
+            "SPRING_DAMPER",
+            "DETENT",
+            "SCROLL_WHEEL",
+        }:
             return 2
         if app_mode == "GIMBAL_SPEED":
             return 1
@@ -2179,7 +2478,7 @@ class HostMainWindow(QMainWindow):
             2: (self.position_group, "位置模式"),
         }
         for mode, (group, title) in groups.items():
-            active = mode == self._state.selected_mode
+            active = mode == self._state.control_mode
             group.setTitle(f"{title}（当前）" if active else title)
             group.setStyleSheet(
                 "QGroupBox { border: 2px solid #0f766e; margin-top: 8px; }"
@@ -2348,12 +2647,58 @@ class HostMainWindow(QMainWindow):
             self.data_status_value.setText("正常")
             self.data_status_value.setStyleSheet("color: #0f766e; font-weight: 700;")
 
+        # V1.2: Update link diagnostics labels
+        self._update_link_diag_labels(now_ms)
+
+        # V1.2: ACK timeout warning
+        self._check_ack_timeout(now_ms)
+
+    def _update_link_diag_labels(self, now_ms: int):
+        """Refresh the link diagnostics group box."""
+        state = self._state
+        # Last command
+        self.last_cmd_sent_value.setText(self._last_cmd_sent or "--")
+        # Last ACK
+        self.last_ack_value.setText(state.last_ack or "--")
+        # Last N-frame
+        if state.last_packet_received_at_ms:
+            dt = now_ms - state.last_packet_received_at_ms
+            self.last_nframe_value.setText(f"{dt}ms 前")
+        else:
+            self.last_nframe_value.setText("--")
+        # Pending
+        if state.pending_command:
+            self.current_pending_value.setText(state.pending_command)
+            self.current_pending_value.setStyleSheet("color: #b45309; font-weight: 600;")
+        else:
+            self.current_pending_value.setText("无")
+            self.current_pending_value.setStyleSheet("")
+        # Current stream diag is updated by _refresh_cur_stream_stats
+
+    def _check_ack_timeout(self, now_ms: int):
+        """Warn if a pending command hasn't received an ACK within timeout."""
+        state = self._state
+        if state.pending_command and state.pending_command_sent_at_ms:
+            elapsed = now_ms - state.pending_command_sent_at_ms
+            if elapsed > ACK_TIMEOUT_MS:
+                cmd = state.pending_command
+                self._show_notification(
+                    "ERROR",
+                    f"ACK 超时 ({cmd})，将等待 N 帧收敛。",
+                )
+                state.last_command_error = f"{cmd}: ACK 超时 >{ACK_TIMEOUT_MS}ms"
+
     def _refresh_plot(self, *_):
         if pg is None:
             return
         if not self._scope_enabled:
             for curve in self._plot_curves.values():
                 curve.setData([], [])
+            self.scope_mixed_label.setText("")
+            return
+
+        # V1.2: plot pause — freeze curves but keep data flowing
+        if self._scope_paused:
             return
 
         channels = {
@@ -2365,6 +2710,12 @@ class HostMainWindow(QMainWindow):
         cur_channels = {"Ia", "Ib", "Ic", "Id", "Iq"}
         telemetry_channels = channels - cur_channels
         cur_active = bool(channels & cur_channels) and self._has_current_stream_data()
+
+        # V1.2: mixed display indicator
+        if channels & cur_channels and channels & telemetry_channels:
+            self.scope_mixed_label.setText(" [Mixed: 相电流 + 遥测] ")
+        else:
+            self.scope_mixed_label.setText("")
 
         # ── Current stream channels (decimated) ──
         cur_times: list[float] = []
@@ -2405,9 +2756,7 @@ class HostMainWindow(QMainWindow):
             if elapsed is not None:
                 lo = max(0.0, elapsed - self._scope_window_s)
                 hi = lo + self._scope_window_s
-                self._scope_suppress_range_change = True
-                self.plot_widget.setXRange(lo, hi, padding=0.0)
-                self._scope_suppress_range_change = False
+                self._set_plot_x_range(lo, hi)
 
         # ── Auto Y ──
         self._update_plot_axis_label(channels)
@@ -2418,6 +2767,9 @@ class HostMainWindow(QMainWindow):
         legend = getattr(self, "_plot_legend", None)
         if legend is None:
             return
+        legend_channels = frozenset(channels)
+        if legend_channels == self._plot_legend_channels:
+            return
         try:
             legend.clear()
             for channel in PLOT_CHANNELS:
@@ -2426,6 +2778,7 @@ class HostMainWindow(QMainWindow):
                         self._plot_curves[channel],
                         PLOT_CHANNEL_LABELS.get(channel, channel),
                     )
+            self._plot_legend_channels = legend_channels
         except Exception:
             return
 
@@ -2462,7 +2815,7 @@ class HostMainWindow(QMainWindow):
         return None
 
     def _current_stream_elapsed_s(self) -> float | None:
-        if self._scope_start_tick_ms is None:
+        if self._scope_start_seq is None:
             return None
         worker = getattr(self, "_serial_worker", None)
         if worker is None:
@@ -2470,7 +2823,7 @@ class HostMainWindow(QMainWindow):
         samples = worker.current_ring().get_recent(1)
         if not samples:
             return None
-        return max(0.0, (samples[0].tick_ms - self._scope_start_tick_ms) / 1000.0)
+        return self._seq_delta(samples[0].seq, self._scope_start_seq) / self._current_stream_nominal_fps()
 
     @staticmethod
     def _seq_delta(seq: int, origin: int) -> int:
@@ -2494,55 +2847,141 @@ class HostMainWindow(QMainWindow):
         if not samples:
             return [], {ch: [] for ch in channels}
 
+        if self._scope_start_seq is None:
+            self._scope_start_seq = samples[0].seq
+        if self._scope_start_tick_ms is None:
+            self._scope_start_tick_ms = samples[0].tick_ms
+
+        fps = self._current_stream_nominal_fps()
+        max_points = self.CURRENT_STREAM_PLOT_MAX_POINTS
+
+        if self._scope_follow_latest:
+            visible_count = int(max(1.0, self._scope_window_s) * max(1.0, fps)) + max_points
+            samples = samples[-min(len(samples), visible_count):]
+
+        if len(samples) > max_points:
+            stride = max(1, math.ceil(len(samples) / max_points))
+            decimated = samples[::stride]
+            if decimated[-1] is not samples[-1]:
+                decimated.append(samples[-1])
+            samples = decimated
+
+        times = [self._sample_time_s(s, fps) for s in samples]
+        series = {
+            ch: [self._sample_value(s, ch) for s in samples]
+            for ch in channels
+        }
+        return times, series
+
         n = len(samples)
         if n <= MAX_PLOT_POINTS:
             picked = samples
         else:
-            step = max(1, n // MAX_PLOT_POINTS)
-            picked = samples[::step]
+            # V1.2: min/max envelope downsampling — preserve peak info
+            bin_count = MAX_PLOT_POINTS // 2  # each bin emits 2 points (min, max)
+            bin_size = max(1, n // bin_count)
+            picked = []
+            for i in range(0, n, bin_size):
+                bin_s = samples[i:i + bin_size]
+                if not bin_s:
+                    continue
+                # Collect all samples in this bin (retain both min and max per channel)
+                picked.extend(bin_s)
 
-        # Relative time: use seq with measured stream rate. This keeps sub-ms
-        # spacing visible without assuming BIN1000 for BIN2000 experimental mode.
-        times: list[float] = []
-        if self._scope_start_seq is not None and self._scope_start_tick_ms is not None:
-            latest = samples[-1]
-            seq_span = self._seq_delta(latest.seq, self._scope_start_seq)
-            tick_span_s = (latest.tick_ms - self._scope_start_tick_ms) / 1000.0
-            if seq_span > 0 and tick_span_s > 0.0:
-                measured_fps = seq_span / tick_span_s
-                times = [
-                    self._seq_delta(s.seq, self._scope_start_seq) / measured_fps
-                    for s in picked
-                ]
-            else:
-                times = [(s.tick_ms - self._scope_start_tick_ms) / 1000.0 for s in picked]
-        elif self._scope_start_tick_ms is not None:
-            times = [(s.tick_ms - self._scope_start_tick_ms) / 1000.0 for s in picked]
-        else:
-            # No origin yet — use first sample as origin
-            if picked:
-                t0 = picked[0].tick_ms
-                times = [(s.tick_ms - t0) / 1000.0 for s in picked]
-
-        series: dict[str, list[float]] = {ch: [] for ch in channels}
+        # ── Build envelope series ──
+        # After picking, build per-channel min/max envelope by bucketing
+        # picked into bins and emitting (time, min_val) then (time, max_val)
+        raw_times: list[float] = []
+        raw_series: dict[str, list[float]] = {ch: [] for ch in channels}
         for s in picked:
+            raw_times.append(self._sample_time_s(s))
             for ch in channels:
-                val: float
-                if ch == "Ia":
-                    val = s.ia * 1000.0
-                elif ch == "Ib":
-                    val = s.ib * 1000.0
-                elif ch == "Ic":
-                    val = s.ic * 1000.0
-                elif ch == "Id":
-                    val = s.id * 1000.0
-                elif ch == "Iq":
-                    val = s.iq * 1000.0
-                else:
-                    val = 0.0
-                series[ch].append(val)
+                raw_series[ch].append(self._sample_value(s, ch))
+
+        # Apply envelope if downsampled
+        if n > MAX_PLOT_POINTS:
+            env_times: list[float] = []
+            env_series: dict[str, list[float]] = {ch: [] for ch in channels}
+            bin_size_env = max(1, len(picked) // (MAX_PLOT_POINTS // 2))
+            for i in range(0, len(picked), bin_size_env):
+                idx_end = min(i + bin_size_env, len(picked))
+                if i >= idx_end:
+                    continue
+                for ch in channels:
+                    vals = raw_series[ch][i:idx_end]
+                    if not vals:
+                        continue
+                    min_idx = min(range(len(vals)), key=lambda j: vals[j])
+                    max_idx = max(range(len(vals)), key=lambda j: vals[j])
+                    abs_min_i = i + min_idx
+                    abs_max_i = i + max_idx
+                    t_min = raw_times[abs_min_i]
+                    t_max = raw_times[abs_max_i]
+                    env_times.append(t_min)
+                    env_times.append(t_max)
+                    env_series[ch].append(vals[min_idx])
+                    env_series[ch].append(vals[max_idx])
+            # Sort by time to keep plot in order
+            sort_idx = sorted(range(len(env_times)), key=lambda j: env_times[j])
+            times = [env_times[j] for j in sort_idx]
+            series = {ch: [env_series[ch][j] for j in sort_idx] for ch in channels}
+        else:
+            times = raw_times
+            series = raw_series
 
         return times, series
+
+    def _sample_time_s(self, s, fps: float | None = None) -> float:
+        """Compute relative time (seconds) for a CurrentSample."""
+        if self._scope_start_seq is not None:
+            if fps is None:
+                fps = self._current_stream_nominal_fps()
+            return self._seq_delta(s.seq, self._scope_start_seq) / max(1.0, fps)
+        if self._scope_start_tick_ms is not None:
+            return (s.tick_ms - self._scope_start_tick_ms) / 1000.0
+        return 0.0
+
+    def _current_stream_nominal_fps(self) -> float:
+        index = self.cur_mode_combo.currentIndex() if hasattr(self, "cur_mode_combo") else 0
+        if index == 1:
+            return 200.0
+        if index == 3:
+            return 2000.0
+        return 1000.0
+
+    def _estimate_current_stream_fps(self, samples: list) -> float:
+        if len(samples) < 2:
+            return 1000.0
+        first = samples[0]
+        latest = samples[-1]
+        seq_span = self._seq_delta(latest.seq, first.seq)
+        tick_span_s = (latest.tick_ms - first.tick_ms) / 1000.0
+        if seq_span > 0 and tick_span_s > 0.0:
+            return seq_span / tick_span_s
+        return 1000.0
+
+    def _measured_fps(self) -> float:
+        """Estimate current stream frames per second from seq and tick deltas."""
+        worker = getattr(self, "_serial_worker", None)
+        if worker is None:
+            return 1000.0
+        samples = worker.current_ring().get_all()
+        return self._estimate_current_stream_fps(samples)
+
+    @staticmethod
+    def _sample_value(s, ch: str) -> float:
+        """Extract a channel value from a CurrentSample in display units."""
+        if ch == "Ia":
+            return s.ia * 1000.0
+        elif ch == "Ib":
+            return s.ib * 1000.0
+        elif ch == "Ic":
+            return s.ic * 1000.0
+        elif ch == "Id":
+            return s.id * 1000.0
+        elif ch == "Iq":
+            return s.iq * 1000.0
+        return 0.0
 
     def _apply_auto_y_range(self, channels, cur_times, cur_series, telem_series):
         """Compute Y range from visible data and apply with 12% padding."""
@@ -2586,10 +3025,13 @@ class HostMainWindow(QMainWindow):
         self._scope_enabled = bool(checked)
         self.scope_toggle_button.setText("停止波形" if checked else "开始波形")
         if checked:
+            self._scope_paused = False
+            self.scope_pause_check.setChecked(False)
             self._scope_start_timestamp = None
             self._scope_start_seq = None
             self._scope_start_tick_ms = None
             self._cur_stats_prev_total = 0
+            self._cur_stats_prev_at_s = None
             self._scope_follow_latest = True
             self._scope_auto_y = True
             self.scope_follow_check.setChecked(True)
@@ -2603,16 +3045,26 @@ class HostMainWindow(QMainWindow):
                 parser = worker.current_parser()
                 parser.reset_stats()
             if pg is not None:
-                self._scope_suppress_range_change = True
-                self.plot_widget.setXRange(0.0, self._scope_window_s, padding=0.0)
-                self._scope_suppress_range_change = False
+                self._set_plot_x_range(0.0, self._scope_window_s)
             # Set origin from first arriving data
         else:
             for curve in self._plot_curves.values():
                 curve.setData([], [])
             self._plot_buffer = RollingPlotBuffer()
             if pg is not None:
-                self.plot_widget.setXRange(0, self._scope_window_s, padding=0.0)
+                self._set_plot_x_range(0.0, self._scope_window_s)
+
+    def _on_scope_pause_toggled(self, checked: bool):
+        """V1.2: freeze plot display without stopping firmware data flow."""
+        self._scope_paused = bool(checked)
+
+    def _set_plot_x_range(self, lo: float, hi: float):
+        if pg is None:
+            return
+        self._scope_suppress_range_change = True
+        self._scope_ignore_manual_range_until_ms = time.monotonic() * 1000.0 + 250.0
+        self.plot_widget.setXRange(lo, hi, padding=0.0)
+        self._scope_suppress_range_change = False
 
     def _on_scope_wake(self):
         """Back to latest: re-enable follow-latest and jump to current window."""
@@ -2624,7 +3076,7 @@ class HostMainWindow(QMainWindow):
         if elapsed is not None:
             lo = max(0.0, elapsed - self._scope_window_s)
             hi = lo + self._scope_window_s
-            self.plot_widget.setXRange(lo, hi, padding=0.0)
+            self._set_plot_x_range(lo, hi)
 
     def _on_scope_window_changed(self, text: str):
         try:
@@ -2643,6 +3095,8 @@ class HostMainWindow(QMainWindow):
         """User manually zoomed/panned → disable follow-latest."""
         if self._scope_suppress_range_change:
             return
+        if time.monotonic() * 1000.0 < self._scope_ignore_manual_range_until_ms:
+            return
         if self._scope_follow_latest:
             self._scope_follow_latest = False
             self.scope_follow_check.blockSignals(True)
@@ -2653,6 +3107,10 @@ class HostMainWindow(QMainWindow):
         self._plot_refresh_pending = True
 
     def _flush_pending_plot_refresh(self):
+        if self._scope_enabled and getattr(self, "cur_stream_group", None) is not None and self.cur_stream_group.isChecked():
+            self._plot_refresh_pending = False
+            self._refresh_plot()
+            return
         if not self._plot_refresh_pending:
             return
         self._plot_refresh_pending = False
@@ -2662,6 +3120,8 @@ class HostMainWindow(QMainWindow):
 
     def _on_cur_stream_toggled(self, checked: bool):
         if checked:
+            self._select_current_stream_plot_channels()
+            self._reset_current_stream_scope_origin()
             self._cur_stream_stats_timer.start()
             if self.scope_window_combo.currentText() == "5s":
                 self.scope_window_combo.setCurrentText("1s")
@@ -2674,9 +3134,34 @@ class HostMainWindow(QMainWindow):
             self._show_notification("INFO", "Current stream BIN 1kHz enabled")
         else:
             self._cur_stream_stats_timer.stop()
-            # Send OFF command
-            self.command_requested.emit("TELEM:CUR,OFF\n")
+            # Send OFF command via CommandBuilder
+            self.command_requested.emit(CommandBuilder.telem_cur_off())
             self.cur_mode_combo.setCurrentIndex(0)
+
+    def _select_current_stream_plot_channels(self):
+        for channel, checkbox in self.plot_channel_checks.items():
+            should_enable = channel in {"Ia", "Ib", "Ic"}
+            if checkbox.isChecked() == should_enable:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(should_enable)
+            checkbox.blockSignals(False)
+
+    def _reset_current_stream_scope_origin(self):
+        self._scope_start_timestamp = None
+        self._scope_start_seq = None
+        self._scope_start_tick_ms = None
+        self._cur_stats_prev_total = 0
+        self._cur_stats_prev_at_s = None
+        self._plot_buffer = RollingPlotBuffer()
+        worker = getattr(self, "_serial_worker", None)
+        if worker is not None:
+            ring = worker.current_ring()
+            ring.clear()
+            parser = worker.current_parser()
+            parser.reset_stats()
+        if pg is not None:
+            self._set_plot_x_range(0.0, self._scope_window_s)
 
     def _on_cur_mode_changed(self, index: int):
         if not self.cur_stream_group.isChecked():
@@ -2684,17 +3169,17 @@ class HostMainWindow(QMainWindow):
         if index > 0 and not self._scope_enabled:
             self.scope_toggle_button.setChecked(True)
         commands = [
-            "TELEM:CUR,OFF\n",           # 0: OFF
-            "TELEM:CUR,ASCII,200\n",     # 1: ASCII 200Hz
-            "TELEM:CUR,BIN,1000\n",      # 2: BIN 1kHz
-            "TELEM:CUR,BIN,2000\n",      # 3: BIN 2kHz
+            CommandBuilder.telem_cur_off(),          # 0: OFF
+            CommandBuilder.telem_cur_ascii(200),     # 1: ASCII 200Hz
+            CommandBuilder.telem_cur_bin(1000),      # 2: BIN 1kHz
+            CommandBuilder.telem_cur_bin(2000),      # 3: BIN 2kHz
         ]
         if index < len(commands):
             self.command_requested.emit(commands[index])
 
     def _on_current_samples_batch(self, samples: list):
         """Receive batch of CurrentSample from serial worker.
-        Set scope origin on first sample; trigger deferred plot refresh."""
+        Set scope origin on first sample. Plot refresh is timer-driven."""
         if not self._scope_enabled or not samples:
             return
         # Set origin from first sample if not yet set
@@ -2702,8 +3187,6 @@ class HostMainWindow(QMainWindow):
             self._scope_start_seq = samples[0].seq
         if self._scope_start_tick_ms is None:
             self._scope_start_tick_ms = samples[0].tick_ms
-        # Request plot refresh for current stream channels
-        self._request_plot_refresh()
 
     def _refresh_cur_stream_stats(self):
         """Update current stream stats label (called at 20Hz)."""
@@ -2721,15 +3204,27 @@ class HostMainWindow(QMainWindow):
         pct = (fill / cap * 100) if cap > 0 else 0
 
         # Approximate fps: delta since last tick
+        now_s = time.monotonic()
         prev = getattr(self, "_cur_stats_prev_total", 0)
+        prev_s = getattr(self, "_cur_stats_prev_at_s", None)
         self._cur_stats_prev_total = total
+        self._cur_stats_prev_at_s = now_s
         fps = (total - prev) * 20  # 20Hz timer → multiply by 20 for fps
+
+        if prev_s is None or now_s <= prev_s:
+            fps = 0
+        else:
+            fps = int((total - prev) / (now_s - prev_s))
 
         self.cur_stats_label.setText(
             f"rx: {fps} fps | gap: {stats['seq_gaps']} | CRC: {stats['crc_errors']} | "
             f"填充: {fill}/{cap} ({pct:.0f}%) | baud: 1M"
         )
         self.cur_diag_label.setText(self._format_current_diagnostics(ring.get_recent(1000)))
+        # V1.2: also update link diagnostics
+        self.cur_link_diag_value.setText(
+            f"{fps}fps | CRC:{stats['crc_errors']} | gap:{stats['seq_gaps']} | {fill}/{cap}"
+        )
 
     @staticmethod
     def _format_current_diagnostics(samples: list) -> str:

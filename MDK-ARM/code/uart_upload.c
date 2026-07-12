@@ -1128,7 +1128,13 @@ static bool UartTx_Enqueue(const uint8_t *data, uint16_t len, UartTxPrio prio)
         __enable_irq();
         return false;  /* drop DIAG only when nearly full */
     }
-    /* P0 always accepted — if ring full, we spin briefly (should never happen) */
+    /* P0: admit only when space is available, never overwrite unsent data.
+     * Caller (wheel_input, STOP, ACK) must retry or coalesce on failure. */
+    if (prio == UART_PRIO_P0 && free_space < len) {
+        s_txDropCount[0]++;
+        __enable_irq();
+        return false;
+    }
 
     for (i = 0U; i < len; i++) {
         s_txRing[s_txRingHead] = data[i];
@@ -1716,6 +1722,17 @@ bool DrvUart_SendBytesP1(const uint8_t *data, uint16_t len)
     if (data == NULL || s_huart == NULL || len == 0U || len > DRV_UART_BUF_SIZE) return false;
     memcpy(s_txBuf, data, len);
     return DrvUart_StartSendPrio(len, UART_PRIO_P1);
+}
+
+/**
+ * @brief Send raw bytes with P0 priority (wheel events, STOP, ACK)
+ * @note  P0 admission fails when TX ring lacks free space, caller must retry/coalesce.
+ */
+bool DrvUart_SendBytesP0(const uint8_t *data, uint16_t len)
+{
+    if (data == NULL || s_huart == NULL || len == 0U || len > DRV_UART_BUF_SIZE) return false;
+    memcpy(s_txBuf, data, len);
+    return DrvUart_StartSendPrio(len, UART_PRIO_P0);
 }
 
 /**

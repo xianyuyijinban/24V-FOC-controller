@@ -57,7 +57,7 @@ FOC_AppHandle_t g_foc_app;
 
 /* UART DMA buffers */
 volatile uint16_t urT_data[8];
-volatile uint8_t urR_data[128];
+volatile uint8_t urR_data[256];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -85,6 +85,8 @@ static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
 static volatile uint8_t s_uartCmdDropUntilEol = 0U;
 static volatile uint32_t s_uartRxRestartFailCount = 0U;
+static volatile uint16_t s_uartRxLastPos = 0U;
+static volatile uint32_t s_uartRxErrorCount = 0U;
 volatile uint32_t g_trigger[2];  /* dummy: 8 bytes BSS, referenced from ProcessPending */
 
 typedef struct {
@@ -307,6 +309,54 @@ static void UART_CommandSendText(const char *text)
         return;
     }
     DrvUart_SendTextP0(text);
+}
+
+static void UART_CommandConsumeByte(uint8_t ch)
+{
+    if (s_uartCmdDropUntilEol) {
+        if (ch == '\n') {
+            s_uartCmdDropUntilEol = 0U;
+            s_uartCmdLen = 0U;
+        }
+        return;
+    }
+
+    if (ch == '\r') {
+        return;
+    }
+
+    if (ch == '\n') {
+        if (s_uartCmdLen > 0U) {
+            s_uartCmdLine[s_uartCmdLen] = '\0';
+            UART_CommandQueuePush(s_uartCmdLine);
+            s_uartCmdLen = 0U;
+        }
+        return;
+    }
+
+    if (s_uartCmdLen < (UART_CMD_LINE_MAX - 1U)) {
+        s_uartCmdLine[s_uartCmdLen++] = (char)ch;
+    } else {
+        /* Drop an overlong line and resync at the next newline. */
+        s_uartCmdLen = 0U;
+        s_uartCmdDropUntilEol = 1U;
+    }
+}
+
+static void UART_CommandConsumeSpan(uint16_t start, uint16_t end)
+{
+    uint16_t i;
+    uint16_t rxLen = (uint16_t)sizeof(urR_data);
+
+    if (start >= rxLen) {
+        start = rxLen;
+    }
+    if (end > rxLen) {
+        end = rxLen;
+    }
+    for (i = start; i < end; i++) {
+        UART_CommandConsumeByte(urR_data[i]);
+    }
 }
 
 static uint16_t UART_AdcNoiseIntegerSqrt(uint32_t value)
@@ -918,13 +968,28 @@ static void UART_CommandExecute(const char *cmd)
         cmd = mapped;
     }
 
+    if (strcmp(cmd, "CMD:UART_RX_STAT?") == 0 || strcmp(cmd, "DIAG:UART_RX?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp),
+            "UART_RX,OK,err=%lu,restart_fail=%lu,last_pos=%u,buf=%u\r\n",
+            (unsigned long)s_uartRxErrorCount,
+            (unsigned long)s_uartRxRestartFailCount,
+            (unsigned)s_uartRxLastPos,
+            (unsigned)sizeof(urR_data));
+        UART_CommandSendText(resp);
+        return;
+    }
+
     /* ── SYS:CMDS? command index ── */
     if (strncmp(cmd, "SYS:CMDS?", 9) == 0) {
         UART_CommandSendText(
             "SYS:CMDS,OK,groups=SYS|CTRL|GAIN|MOTION|FF|CAL|DIAG\r\n"
             " SYS: FW_INFO? CLEAR_FAULT\r\n"
             " CTRL: UNLOCK,N ENABLE,N MODE,N IREF,Id,Iq SREF,speed PREF,pos STOP\r\n"
-            "  APP_MODE? APP_MODE,RAW|JOINT_POS|GIMBAL_SPEED|HOLD\r\n"
+            "  APP_MODE? APP_MODE,RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT|SCROLL_WHEEL\r\n"
+            "  SPRING:CFG? SPRING:CFG,K,D,limit  DETENT:CFG? DETENT:CFG,count,strength,width,limit\r\n"
+            "  WHEEL:CFG? WHEEL:CFG,count,strength,width,damping,limit\r\n"
+            "  WHEEL:SESSION,<id>,<to_ms>  WHEEL:KEEPALIVE,<id>  WHEEL:STATUS?\r\n"
             " GAIN: PI_CURRENT,Kp,Ki PI_SPEED,Kp,Ki PD_POS,Kp,Kd\r\n"
             " MOTION: MOTION_CFG? MOTION_CFG,s,a,c MOTION_CFG,RESET\r\n"
             " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
@@ -957,6 +1022,7 @@ static void UART_CommandExecute(const char *cmd)
         else if (g_foc_app.app_mode == APP_MODE_HOLD)       name = "HOLD";
         else if (g_foc_app.app_mode == APP_MODE_SPRING_DAMPER) name = "SPRING_DAMPER";
         else if (g_foc_app.app_mode == APP_MODE_DETENT)     name = "DETENT";
+        else if (g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) name = "SCROLL_WHEEL";
         (void)snprintf(resp, sizeof(resp),
                  "APP_MODE,OK,%s (ctrl_mode=%u)\r\n", name, g_foc_app.control_mode);
         UART_CommandSendText(resp);
@@ -985,6 +1051,13 @@ static void UART_CommandExecute(const char *cmd)
     if (strcmp(cmd, "CMD:APP_MODE,DETENT") == 0) {
         FOC_App_SetAppMode(&g_foc_app, APP_MODE_DETENT);
         UART_CommandSendText("APP_MODE,OK,DETENT\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,SCROLL_WHEEL") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_SCROLL_WHEEL);
+        if (g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) {
+            UART_CommandSendText("APP_MODE,OK,SCROLL_WHEEL\r\n");
+        }
+        return;
     }
 
     /* ── Phase 3: JOINT soft limit commands ── */
@@ -1046,40 +1119,152 @@ static void UART_CommandExecute(const char *cmd)
             (double)g_foc_app.spring_limit_A);
         UART_CommandSendText(resp); return;
     }
-    if (UART_CommandParseFloat2(cmd, "CMD:CFG,", &f1, &f2) ||
-        UART_CommandParseFloat2(cmd, "SPRING:CFG,", &f1, &f2)) {
-        float K = f1, D = f2, limit = FOC_SPRING_LIMIT_DEFAULT;
-        if (UART_CommandParseFloat2(cmd, "SPRING:CFG,", &f1, &f2)) {
-            /* 3-param form: re-parse; use helper */;
-        }
-        (void)K; (void)D;  /* suppress unused warning */
-        UART_CommandSendText("SPRING:CFG,FAIL,parse (use SPRING:CFG?,K,D,limit)\r\n"); return;
-    }
     {
         float sK, sD, sL;
         if (sscanf(cmd, "CMD:CFG,%f,%f,%f", &sK, &sD, &sL) == 3 ||
             sscanf(cmd, "SPRING:CFG,%f,%f,%f", &sK, &sD, &sL) == 3) {
+            if (sK < 0.0f || sD < 0.0f || sL < 0.0f
+                || sL > FOC_SPEED_POSITIVE_IQ_LIMIT_A) {
+                UART_CommandSendText("SPRING:CFG,FAIL,range\r\n"); return;
+            }
             FOC_App_SetSpringCfg(&g_foc_app, sK, sD, sL);
-            UART_CommandSendText("SPRING:CFG,OK\r\n"); return;
+            {
+                char resp[80];
+                (void)snprintf(resp, sizeof(resp),
+                    "SPRING:CFG,OK,K=%.3f,D=%.3f,limit=%.3f\r\n",
+                    (double)g_foc_app.spring_K,
+                    (double)g_foc_app.spring_D,
+                    (double)g_foc_app.spring_limit_A);
+                UART_CommandSendText(resp);
+            }
+            return;
         }
     }
 
     /* ── Phase 3B: DETENT:CFG commands ── */
     if (strcmp(cmd, "CMD:DETENT_CFG?") == 0 || strcmp(cmd, "DETENT:CFG?") == 0) {
-        char resp[120];
+        char resp[140];
         (void)snprintf(resp, sizeof(resp),
-            "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,limit=%.3f\r\n",
+            "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
             (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
-            (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_limit_A);
+            (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_damping,
+            (double)g_foc_app.detent_limit_A);
         UART_CommandSendText(resp); return;
     }
     {
-        float dc, ds, dw, dl;
-        if (sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4 ||
-            sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4) {
-            FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dl);
-            UART_CommandSendText("DETENT:CFG,OK\r\n"); return;
+        float dc, ds, dw, dd, dl;
+        int n, matched = 0;
+        /* Accept 5-param (with damping) or 4-param (backward compat, damping=0) */
+        n = sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f,%f", &dc, &ds, &dw, &dd, &dl);
+        if (n != 5) {
+            n = sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f,%f", &dc, &ds, &dw, &dd, &dl);
         }
+        if (n == 5) {
+            FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dd, dl);
+            matched = 1;
+        } else {
+            /* Fallback: old 4-param format without damping */
+            n = sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl);
+            if (n != 4) {
+                n = sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl);
+            }
+            if (n == 4) {
+                FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, 0.0f, dl);
+                matched = 1;
+            }
+        }
+        if (matched) {
+            char resp[140];
+            (void)snprintf(resp, sizeof(resp),
+                "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+                (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
+                (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_damping,
+                (double)g_foc_app.detent_limit_A);
+            UART_CommandSendText(resp);
+            return;
+        }
+        /* Not a DETENT command — fall through to next handler */
+    }
+
+    /* ── Phase V1.3: SCROLL_WHEEL / WHEEL commands ── */
+    if (strcmp(cmd, "WHEEL:CFG?") == 0 || strcmp(cmd, "CMD:WHEEL_CFG?") == 0) {
+        char resp[140];
+        (void)snprintf(resp, sizeof(resp),
+            "WHEEL:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+            (double)g_foc_app.wheel_count, (double)g_foc_app.wheel_strength,
+            (double)g_foc_app.wheel_width_rad, (double)g_foc_app.wheel_damping,
+            (double)g_foc_app.wheel_limit_A);
+        UART_CommandSendText(resp); return;
+    }
+    {
+        float wc, ws, ww, wd, wl;
+        int n, matched = 0;
+        n = sscanf(cmd, "WHEEL:CFG,%f,%f,%f,%f,%f", &wc, &ws, &ww, &wd, &wl);
+        if (n == 5) {
+            FOC_App_SetWheelCfg(&g_foc_app, wc, ws, ww, wd, wl);
+            matched = 1;
+        } else {
+            n = sscanf(cmd, "CMD:WHEEL_CFG,%f,%f,%f,%f,%f", &wc, &ws, &ww, &wd, &wl);
+            if (n == 5) {
+                FOC_App_SetWheelCfg(&g_foc_app, wc, ws, ww, wd, wl);
+                matched = 1;
+            }
+        }
+        if (matched) {
+            char resp[140];
+            (void)snprintf(resp, sizeof(resp),
+                "WHEEL:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+                (double)g_foc_app.wheel_count, (double)g_foc_app.wheel_strength,
+                (double)g_foc_app.wheel_width_rad, (double)g_foc_app.wheel_damping,
+                (double)g_foc_app.wheel_limit_A);
+            UART_CommandSendText(resp);
+            return;
+        }
+    }
+
+    /* WHEEL:SESSION,<id>,<timeout_ms> */
+    {
+        uint32_t sid, tmo;
+        int n = sscanf(cmd, "WHEEL:SESSION,%lu,%lu", &sid, &tmo);
+        if (n >= 1) {
+            if (n < 2) tmo = 1000UL;
+            if (tmo < 100UL) tmo = 100UL;
+            if (tmo > 10000UL) tmo = 10000UL;
+            WheelInput_SessionStart(sid);
+            {
+                char r[64];
+                (void)snprintf(r, sizeof(r),
+                    "WHEEL:SESSION,OK,id=%lu,timeout=%lu\r\n",
+                    (unsigned long)sid, (unsigned long)tmo);
+                UART_CommandSendText(r);
+            }
+            return;
+        }
+    }
+
+    /* WHEEL:KEEPALIVE,<id> */
+    {
+        uint32_t kid;
+        if (sscanf(cmd, "WHEEL:KEEPALIVE,%lu", &kid) == 1) {
+            WheelInput_SessionKeepalive(kid);
+            return;  /* silent ACK — no response to avoid flooding */
+        }
+    }
+
+    /* WHEEL:STATUS? */
+    if (strcmp(cmd, "WHEEL:STATUS?") == 0) {
+        uint32_t sent, dropped, coalesced, total;
+        char r[128];
+        WheelInput_GetStats(&sent, &dropped, &coalesced, &total);
+        (void)snprintf(r, sizeof(r),
+            "WHEEL:STATUS,OK,session=%u,pos=%ld,pending=%d,sent=%lu,dropped=%lu,coalesced=%lu,total=%lu\r\n",
+            (unsigned)g_wheel.session_active,
+            (long)g_wheel.position_steps,
+            (int)g_wheel.pending_delta,
+            (unsigned long)sent, (unsigned long)dropped,
+            (unsigned long)coalesced, (unsigned long)total);
+        UART_CommandSendText(r);
+        return;
     }
 
     /* ── Phase 6: CAN commands ── */
@@ -1546,6 +1731,11 @@ static void UART_CommandExecute(const char *cmd)
                 UART_CommandSendText("ENABLE,FAIL,locked\r\n");
                 return;
             }
+            if ((g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) &&
+                !WheelInput_IsSessionActive()) {
+                UART_CommandSendText("ENABLE,FAIL,no_wheel_session\r\n");
+                return;
+            }
             FOC_App_Enable(&g_foc_app);
             if ((g_foc_app.state == FOC_STATE_RUNNING) && (g_foc_app.enable_pwm != 0U)) {
                 UART_CommandSendText("ENABLE,OK,1\r\n");
@@ -1574,7 +1764,7 @@ static void UART_CommandExecute(const char *cmd)
         if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_POSITION) {
             char resp[32];
             __disable_irq();
-            FOC_App_SetControlMode(&g_foc_app, (FOC_ControlMode_t)int_arg);
+            FOC_App_SetRawControlMode(&g_foc_app, (FOC_ControlMode_t)int_arg);
             __enable_irq();
             (void)snprintf(resp, sizeof(resp), "MODE,OK,%ld\r\n", int_arg);
             UART_CommandSendText(resp);
@@ -2325,7 +2515,6 @@ void DMA1_Stream4_IRQHandler(void)
 void TIM1_UP_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_UP_IRQn 0 */
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);  /* DEBUG: scope on PB0 to measure actual ISR freq */
   /* USER CODE END TIM1_UP_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_IRQn 1 */
@@ -2516,60 +2705,57 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    uint16_t i;
-
     if (huart != &huart1) {
         return;
     }
 
-    for (i = 0U; i < Size; i++) {
-        uint8_t ch = urR_data[i];
+    s_uartRxErrorCount++;
+    s_uartRxLastPos = 0U;
+    s_uartCmdLen = 0U;
+    s_uartCmdDropUntilEol = 1U;
 
-        if (s_uartCmdDropUntilEol) {
-            if (ch == '\n') {
-                s_uartCmdDropUntilEol = 0U;
-                s_uartCmdLen = 0U;
-            }
-            continue;
-        }
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_IDLEFLAG(huart);
 
-        if (ch == '\r') {
-            continue;
+    (void)HAL_UART_AbortReceive(huart);
+    if (HAL_UARTEx_ReceiveToIdle_DMA(huart, (uint8_t *)urR_data, sizeof(urR_data)) == HAL_OK) {
+        if (huart->hdmarx != NULL) {
+            __HAL_DMA_DISABLE_IT(huart->hdmarx, DMA_IT_HT);
         }
+    } else {
+        s_uartRxRestartFailCount++;
+    }
+}
 
-        if (ch == '\n') {
-            if (s_uartCmdLen > 0U) {
-                s_uartCmdLine[s_uartCmdLen] = '\0';
-                UART_CommandQueuePush(s_uartCmdLine);
-                s_uartCmdLen = 0U;
-            }
-            continue;
-        }
-
-        if (s_uartCmdLen < (UART_CMD_LINE_MAX - 1U)) {
-            s_uartCmdLine[s_uartCmdLen++] = (char)ch;
-        } else {
-            /* 超长命令：丢弃本行，等待下一次换行重新同步 */
-            s_uartCmdLen = 0U;
-            s_uartCmdDropUntilEol = 1U;
-        }
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart != &huart1) {
+        return;
     }
 
-    if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t *)urR_data, sizeof(urR_data)) == HAL_OK) {
-        __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
-    } else {
-        /* 记录重启失败并做一次快速重试，避免接收链路静默失效 */
-        s_uartRxRestartFailCount++;
-        if (HAL_UARTEx_ReceiveToIdle_DMA(&huart1, (uint8_t *)urR_data, sizeof(urR_data)) == HAL_OK) {
-            __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
+    uint16_t pos = Size;
+    uint16_t rxLen = (uint16_t)sizeof(urR_data);
+
+    if (pos > rxLen) {
+        pos = rxLen;
+    }
+    if (pos != s_uartRxLastPos) {
+        if (pos > s_uartRxLastPos) {
+            UART_CommandConsumeSpan(s_uartRxLastPos, pos);
         } else {
-            s_uartRxRestartFailCount++;
+            UART_CommandConsumeSpan(s_uartRxLastPos, rxLen);
+            UART_CommandConsumeSpan(0U, pos);
         }
+        s_uartRxLastPos = pos;
     }
     if (huart1.hdmarx != NULL) {
         __HAL_DMA_DISABLE_IT(huart1.hdmarx, DMA_IT_HT);
     }
 }
+
 /* USER CODE END 1 */

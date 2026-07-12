@@ -1,4 +1,4 @@
-# Build the local HostComputer PyQt GUI into a Windows one-folder app.
+# Build the local HostComputer PySide6 GUI into a Windows one-folder app.
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -100,7 +100,7 @@ try {
     }
 
     Write-Host "`n=== Checking packaging dependencies ===" -ForegroundColor Cyan
-    $moduleCheck = Test-PythonModulesAvailable @("PyInstaller", "PyQt6", "pyqtgraph", "serial", "numpy")
+    $moduleCheck = Test-PythonModulesAvailable @("PyInstaller", "PySide6", "pyqtgraph", "serial", "numpy")
     if ($moduleCheck.Ok) {
         Write-Host "Dependencies already installed; skipping pip install."
     } else {
@@ -142,6 +142,9 @@ try {
     if (!(Test-Path $ExePath)) {
         throw "Build completed without expected executable: $ExePath"
     }
+
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $AppDir "LICENSE.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "THIRD_PARTY_NOTICES.md") -Destination $AppDir -Force
 
     if (Test-Path $LegacyAppDir) {
         Write-Host "`n=== Removing obsolete legacy package output ===" -ForegroundColor Cyan

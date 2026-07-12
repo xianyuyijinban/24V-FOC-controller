@@ -6,6 +6,8 @@
 
 #include "foc_app.h"
 #include "current_stream.h"
+#include "wheel_input.h"
+#include "tle5012.h"
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
@@ -107,7 +109,15 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->detent_count    = FOC_DETENT_COUNT_DEFAULT;
     handle->detent_strength = FOC_DETENT_STRENGTH_DEFAULT;
     handle->detent_width_rad= FOC_DETENT_WIDTH_DEFAULT;
+    handle->detent_damping  = FOC_DETENT_DAMPING_DEFAULT;
     handle->detent_limit_A  = FOC_DETENT_LIMIT_DEFAULT;
+    /* SCROLL_WHEEL independent config */
+    handle->wheel_count     = FOC_WHEEL_COUNT_DEFAULT;
+    handle->wheel_strength  = FOC_WHEEL_STRENGTH_DEFAULT;
+    handle->wheel_width_rad = FOC_WHEEL_WIDTH_DEFAULT;
+    handle->wheel_damping   = FOC_WHEEL_DAMPING_DEFAULT;
+    handle->wheel_limit_A   = FOC_WHEEL_LIMIT_DEFAULT;
+    handle->wheel_cfg_active = 0U;
     BlackBox_Init();                           /* Phase 5A */
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
@@ -725,6 +735,9 @@ static uint8_t FOC_App_ShouldBootstrapNeutralPwm(const FOC_AppHandle_t *handle, 
     return 1U;
 }
 
+/* Forward declaration: used in SpeedLoop before its full definition below */
+static uint8_t FOC_App_IsHapticMode(const FOC_AppHandle_t *handle);
+
 /**
  * @brief 转速计算和速度环控制（2kHz）
  * @param handle FOC应用层句柄指针
@@ -901,6 +914,12 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         } else if (handle->control_mode == FOC_MODE_POSITION) {
             iq_limit_pos = FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A;
             iq_limit_neg = -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A;
+        }
+        /* Haptic modes (SPRING_DAMPER / DETENT): bypass speed PI + all feedforward;
+         * torque is computed purely from spring/detent physics below. */
+        if (FOC_App_IsHapticMode(handle)) {
+            iq_ref_mech = 0.0f;
+            goto haptic_torque_injection;
         }
         /* ── Speed PI with conditional integration ── */
         {
@@ -1170,6 +1189,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         }
         FOC_App_ClampSpeedPiIntegral(&handle->pi_speed, iq_limit_pos, iq_limit_neg);
 
+haptic_torque_injection:
         /* ── Phase 3B: Spring-Damper / Detent torque injection ── */
         if (handle->app_mode == APP_MODE_SPRING_DAMPER && handle->motor_identified) {
             float theta_mech_zeroed = FOC_AngleNormalize(
@@ -1204,7 +1224,40 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             detent_torque = FOC_Saturate(detent_torque,
                                          handle->detent_limit_A,
                                         -handle->detent_limit_A);
+            /* Detent damping: oppose motion to prevent overshoot oscillation */
+            detent_torque -= handle->detent_damping * speed_feedback;
             iq_ref_mech += detent_torque;
+        } else if (handle->app_mode == APP_MODE_SCROLL_WHEEL && handle->motor_identified) {
+            /* SCROLL_WHEEL: same detent algorithm as DETENT, independent config.
+             * Additionally feeds wheel_input for event generation. */
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            float wheel_spacing = (2.0f * FOC_PI) / handle->wheel_count;
+            float nearest = roundf(pos_rad / wheel_spacing) * wheel_spacing;
+            float wheel_error = FOC_AngleNormalize(nearest - pos_rad);
+            float wheel_torque = handle->wheel_strength * wheel_error;
+            /* Width: ramp down outside wheel_width */
+            {
+                float half_w = handle->wheel_width_rad * 0.5f;
+                float abs_e = fabsf(wheel_error);
+                if (abs_e > handle->wheel_width_rad) {
+                    wheel_torque = 0.0f;
+                } else if (abs_e > half_w) {
+                    float ramp = 1.0f - (abs_e - half_w) / half_w;
+                    wheel_torque *= (ramp > 0.0f) ? ramp : 0.0f;
+                }
+            }
+            wheel_torque = FOC_Saturate(wheel_torque,
+                                        handle->wheel_limit_A,
+                                       -handle->wheel_limit_A);
+            wheel_torque -= handle->wheel_damping * speed_feedback;
+            iq_ref_mech += wheel_torque;
+
+            /* Feed wheel_input for detent quantization & event generation */
+            WheelInput_Update(pos_rad, speed_feedback,
+                              (uint8_t)(handle->enable_pwm != 0U),
+                              (uint8_t)(1U /* encoder_valid checked on entry */));
         }
         iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
 
@@ -1257,9 +1310,26 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
  * - 输出速度给定到handle->speed_ref
  * - 速度环在FOC_App_SpeedLoop中单独执行（2kHz）
  */
+
+/* ── Haptic mode helper ── */
+static uint8_t FOC_App_IsHapticMode(const FOC_AppHandle_t *handle)
+{
+    return (handle->app_mode == APP_MODE_SPRING_DAMPER ||
+            handle->app_mode == APP_MODE_DETENT ||
+            handle->app_mode == APP_MODE_SCROLL_WHEEL) ? 1U : 0U;
+}
+
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
 {
     if ((handle == NULL) || handle->stall_open_loop_active) {
+        return;
+    }
+
+    /* Haptic modes (SPRING_DAMPER, DETENT) bypass normal PositionLoop —
+     * they compute torque directly in SpeedLoop, not via position PD. */
+    if (FOC_App_IsHapticMode(handle)) {
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
         return;
     }
 
@@ -1360,6 +1430,12 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
         return;
     }
 
+    if ((handle->app_mode == APP_MODE_SCROLL_WHEEL) &&
+        !WheelInput_IsSessionActive()) {
+        handle->enable_pwm = 0U;
+        return;
+    }
+
     if ((handle->state != FOC_STATE_READY) && (handle->state != FOC_STATE_IDLE)) {
         return;
     }
@@ -1380,6 +1456,7 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
 
         stall_enable = 1U;
         handle->control_mode = FOC_MODE_SPEED;
+        handle->app_mode = APP_MODE_RAW;
     }
 
     /* Normal precheck contract remains: FOC_App_PrecheckPowerStage(handle, &fault) */
@@ -1773,11 +1850,42 @@ void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 
     handle->control_mode = mode;
 
-    /* Phase 3A: explicit CTRL:MODE in non-RAW app mode resets to RAW
-     * to prevent semantic conflict (e.g. JOINT_POS + speed mode). */
-    if (handle->app_mode != APP_MODE_RAW) {
-        handle->app_mode = APP_MODE_RAW;
+    if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
+        FOC_App_RefreshEncoderFeedback(handle);
+        float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
+        float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        handle->pos_ref = FOC_AngleNormalize(theta_mech_zeroed * encoder_dir_f);
+        handle->speed_ref = 0.0f;
+        handle->position_ref_user_set = 0U;
     }
+
+    /* 切换模式时清零积分，防止跳变 */
+    handle->pi_speed.integral = 0.0f;
+    handle->position_friction_active = 0U;
+}
+
+/**
+ * @brief 设置底层控制模式并显式切回 RAW 产品模式
+ * @param handle FOC应用层句柄指针
+ * @param mode 控制模式（力矩/速度/位置）
+ *
+ * 与 FOC_App_SetControlMode() 的区别：
+ * - 本函数同时设置 app_mode = APP_MODE_RAW
+ * - 用于用户显式选择底层 RAW 控制模式（如 CMD:MODE,N）
+ * - 不应在 APP_MODE 内部切换时调用
+ */
+void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    if (handle->stall_open_loop_active && (mode == FOC_MODE_POSITION)) {
+        mode = FOC_MODE_SPEED;
+    }
+
+    handle->control_mode = mode;
+    handle->app_mode = APP_MODE_RAW;
 
     if ((mode == FOC_MODE_POSITION) && (handle->enable_pwm == 0U)) {
         FOC_App_RefreshEncoderFeedback(handle);
@@ -1798,7 +1906,6 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
 {
     if (handle == NULL) return;
 
-    handle->app_mode = mode;
     handle->pi_speed.integral = 0.0f;
     handle->position_friction_active = 0U;
 
@@ -1840,22 +1947,28 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
         break;
 
     case APP_MODE_SPRING_DAMPER:
-        /* SPRING_DAMPER: position loop drives virtual spring torque */
+        /* SPRING_DAMPER: always capture current position as equilibrium.
+         * Must not inherit a stale PREF target from a previous mode. */
         handle->control_mode = FOC_MODE_POSITION;
-        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+        if (handle->motor_identified) {
             FOC_App_RefreshEncoderFeedback(handle);
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(
                     handle->theta_mech - handle->motor_param.mech_zero_offset);
                 handle->pos_ref = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+                handle->position_ref_user_set = 1U;
             }
         }
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
         break;
 
     case APP_MODE_DETENT:
-        /* DETENT: position loop holds at nearest detent */
+        /* DETENT: always capture the nearest detent on entry.  A previous
+         * PREF/JOINT_POS command may leave position_ref_user_set latched,
+         * but detent mode must not keep chasing that old position target. */
         handle->control_mode = FOC_MODE_POSITION;
-        if (handle->position_ref_user_set == 0U && handle->motor_identified) {
+        if (handle->motor_identified) {
             FOC_App_RefreshEncoderFeedback(handle);
             {
                 float theta_mech_zeroed = FOC_AngleNormalize(
@@ -1871,7 +1984,54 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
             }
         }
         break;
+
+    case APP_MODE_SCROLL_WHEEL:
+        /* SCROLL_WHEEL: requires identified motor + encoder online.
+         * Capture nearest detent as starting position, zero the wheel
+         * input state, and turn off current stream. */
+        if (!handle->motor_identified) {
+            DrvUart_SendTextP0("APP_MODE,FAIL,not_identified\r\n");
+            return;
+        }
+        if (!TLE5012_IsDataValid()) {
+            DrvUart_SendTextP0("APP_MODE,FAIL,no_encoder\r\n");
+            return;
+        }
+        /* Disable high-frequency current stream to avoid latency */
+        CurStream_SetMode(CUR_STREAM_OFF, 0);
+        handle->control_mode = FOC_MODE_POSITION;
+        FOC_App_RefreshEncoderFeedback(handle);
+        {
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            if (handle->wheel_count > 0.5f) {
+                float spacing = (2.0f * FOC_PI) / handle->wheel_count;
+                pos_rad = roundf(pos_rad / spacing) * spacing;
+            }
+            handle->pos_ref = FOC_AngleNormalize(pos_rad);
+            handle->position_ref_user_set = 1U;
+        }
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
+        handle->wheel_cfg_active = 1U;
+        /* Sync wheel_input config from handle defaults */
+        {
+            WheelConfig_t wcfg;
+            wcfg.count     = handle->wheel_count;
+            wcfg.strength  = handle->wheel_strength;
+            wcfg.width_rad = handle->wheel_width_rad;
+            wcfg.damping   = handle->wheel_damping;
+            wcfg.limit_A   = handle->wheel_limit_A;
+            WheelInput_ApplyConfig(&wcfg);
+        }
+        WheelInput_ResetState();
+        break;
     }
+
+    /* Only commit app_mode after validation passes (SCROLL_WHEEL may
+     * have returned early on prereq failure — see P1-5 fix). */
+    handle->app_mode = mode;
 }
 
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad)
@@ -1901,18 +2061,44 @@ void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit
     handle->spring_limit_A = limit;
 }
 
-void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit)
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit)
 {
     if (handle == NULL) return;
     if (count < 1.0f) count = 1.0f;
     if (strength < 0.0f) strength = 0.0f;
     if (width < 0.01f) width = 0.01f;
+    if (damping < 0.0f) damping = 0.0f;
     if (limit < 0.01f) limit = 0.01f;
     if (limit > 1.0f) limit = 1.0f;
     handle->detent_count = count;
     handle->detent_strength = strength;
     handle->detent_width_rad = width;
+    handle->detent_damping = damping;
     handle->detent_limit_A = limit;
+}
+
+void FOC_App_SetWheelCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit)
+{
+    WheelConfig_t wcfg;
+    if (handle == NULL) return;
+    if (count < 1.0f) count = 1.0f;
+    if (strength < 0.0f) strength = 0.0f;
+    if (width < 0.01f) width = 0.01f;
+    if (damping < 0.0f) damping = 0.0f;
+    if (limit < 0.01f) limit = 0.01f;
+    if (limit > 1.0f) limit = 1.0f;
+    handle->wheel_count     = count;
+    handle->wheel_strength  = strength;
+    handle->wheel_width_rad = width;
+    handle->wheel_damping   = damping;
+    handle->wheel_limit_A   = limit;
+    /* Sync to wheel_input module */
+    wcfg.count     = count;
+    wcfg.strength  = strength;
+    wcfg.width_rad = width;
+    wcfg.damping   = damping;
+    wcfg.limit_A   = limit;
+    WheelInput_ApplyConfig(&wcfg);
 }
 
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)

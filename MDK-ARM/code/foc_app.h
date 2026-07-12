@@ -116,9 +116,17 @@ extern "C" {
 #define FOC_SPRING_D_DEFAULT       0.05f  /* 阻尼系数 A/(rad/s) */
 #define FOC_SPRING_LIMIT_DEFAULT   0.30f  /* 弹簧力限幅 A */
 #define FOC_DETENT_COUNT_DEFAULT   12.0f  /* 卡点数量 (12/圈 = 每30°) */
-#define FOC_DETENT_STRENGTH_DEFAULT 1.0f  /* 吸附强度 A/rad */
-#define FOC_DETENT_WIDTH_DEFAULT   0.13f  /* 卡点宽度 ~7.5° */
-#define FOC_DETENT_LIMIT_DEFAULT   0.25f  /* 卡点力限幅 A */
+#define FOC_DETENT_STRENGTH_DEFAULT 6.0f  /* 吸附强度 A/rad */
+#define FOC_DETENT_WIDTH_DEFAULT   0.24f  /* 卡点宽度 ~13.75°, 覆盖~92%间距 */
+#define FOC_DETENT_DAMPING_DEFAULT 0.10f  /* 阻尼系数 A/(rad/s)，防止振荡 */
+#define FOC_DETENT_LIMIT_DEFAULT   0.60f  /* 卡点力限幅 A */
+
+/* SCROLL_WHEEL defaults — independent config, shared detent algorithm */
+#define FOC_WHEEL_COUNT_DEFAULT     24.0f  /* 卡点数量 (24/圈 = 每15°) */
+#define FOC_WHEEL_STRENGTH_DEFAULT   6.0f  /* 吸附强度 A/rad */
+#define FOC_WHEEL_WIDTH_DEFAULT      0.16f /* 卡点宽度 ~9.2° */
+#define FOC_WHEEL_DAMPING_DEFAULT    0.10f /* 阻尼系数 A/(rad/s) */
+#define FOC_WHEEL_LIMIT_DEFAULT      0.30f /* 卡点力限幅 A */
 
 /* 固件版本信息 */
 #define FOC_FW_VERSION          "1.0.0"
@@ -171,6 +179,7 @@ typedef enum {
     APP_MODE_HOLD,              /* 当前位置保持：底层POSITION + 锁定当前角度 */
     APP_MODE_SPRING_DAMPER,     /* 虚拟弹簧阻尼：Iq = K*(theta_ref - theta) - D*speed */
     APP_MODE_DETENT,            /* 虚拟卡点：吸附到最近 detent 位置 */
+    APP_MODE_SCROLL_WHEEL,      /* 鼠标滚轮：复用detent力反馈+独立wheel事件 */
 } AppMode_t;
 
 /* 保护参数 */
@@ -257,7 +266,16 @@ typedef struct {
     float    detent_count;           /* 卡点数量 (每圈) */
     float    detent_strength;        /* 卡点吸附强度 A/rad */
     float    detent_width_rad;       /* 卡点宽度 rad */
+    float    detent_damping;         /* 卡点阻尼系数 A/(rad/s) */
     float    detent_limit_A;         /* 卡点力限幅 A */
+
+    /* SCROLL_WHEEL config (independent of DETENT) */
+    float    wheel_count;            /* 卡点数量 (每圈) */
+    float    wheel_strength;         /* 吸附强度 A/rad */
+    float    wheel_width_rad;        /* 卡点宽度 rad */
+    float    wheel_damping;          /* 阻尼系数 A/(rad/s) */
+    float    wheel_limit_A;          /* 力限幅 A */
+    uint8_t  wheel_cfg_active;       /* 1 = SCROLL_WHEEL config active */
 
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */
@@ -414,11 +432,13 @@ void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
+void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
 void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);
 void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit);
-void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit);
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit);
+void FOC_App_SetWheelCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit);
 uint8_t FOC_App_CalIsBusy(FOC_AppHandle_t *handle);
 uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);

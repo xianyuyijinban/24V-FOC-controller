@@ -79,6 +79,8 @@ tools/simulink/slprj/
 # Python cache / Python缓存
 __pycache__/
 *.pyc
+HostComputer/out/
+HostComputer/tmpbuild/
 
 # Local worktrees / 本地工作树
 .worktrees/
@@ -118,3 +120,6 @@ bench_speed_only.py
 _*.py
 _*.txt
 docs/bench_*_baseline.md
+
+# Experiment data json / 实验数据(运行时产物, 不入库)
+scripts/*.json

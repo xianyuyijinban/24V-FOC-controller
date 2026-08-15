@@ -26,6 +26,8 @@
 #include "uart_upload.h"
 #include "adc_sampling.h"
 #include "can_protocol.h"
+#include "fdcan.h"
+#include "foc_profiler.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -70,8 +72,10 @@ volatile uint8_t urR_data[256];
 volatile uint16_t adc_data[8] = {0};
 extern TIM_HandleTypeDef htim1;
 
-#define UART_CMD_LINE_MAX       96U
+#define UART_CMD_LINE_MAX       256U
 #define UART_CMD_QUEUE_DEPTH    8U
+#define UART_CMD_SOURCE_UART    0U
+#define UART_CMD_SOURCE_CAN     1U
 #define UART_ADC_PHASE_SCAN_MIN_TRIGGER 2U
 #define UART_ADC_PHASE_SCAN_MAX_TRIGGER 46U
 #define UART_ADC_PHASE_SCAN_TRIGGER_STEP 2U
@@ -81,9 +85,12 @@ extern TIM_HandleTypeDef htim1;
 static char s_uartCmdLine[UART_CMD_LINE_MAX];
 static uint16_t s_uartCmdLen = 0U;
 static char s_uartCmdQueue[UART_CMD_QUEUE_DEPTH][UART_CMD_LINE_MAX];
+static uint8_t s_uartCmdQueueSource[UART_CMD_QUEUE_DEPTH];
 static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
 static volatile uint8_t s_uartCmdDropUntilEol = 0U;
+static uint8_t s_uartCmdSourceCan = 0U;
+static uint8_t s_uartCmdResponseMuted = 0U;
 static volatile uint32_t s_uartRxRestartFailCount = 0U;
 static volatile uint16_t s_uartRxLastPos = 0U;
 static volatile uint32_t s_uartRxErrorCount = 0U;
@@ -261,25 +268,9 @@ static void UART_CommandQueueCopy(uint8_t index, const char *line)
     s_uartCmdQueue[index][copyLen] = '\0';
 }
 
-static void UART_CommandQueuePushPriority(const char *line)
-{
-    uint8_t prev;
+static void UART_CommandQueuePushPriority(const char *line);
 
-    if (line == NULL) {
-        return;
-    }
-
-    prev = (uint8_t)((s_uartCmdQueueRead + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
-    if (prev == s_uartCmdQueueWrite) {
-        /* 队列满：为实时位置目标让路，丢弃尾部最新的普通命令 */
-        s_uartCmdQueueWrite = (uint8_t)((s_uartCmdQueueWrite + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
-    }
-
-    UART_CommandQueueCopy(prev, line);
-    s_uartCmdQueueRead = prev;
-}
-
-static void UART_CommandQueuePush(const char *line)
+static void UART_CommandQueuePushSource(const char *line, uint8_t source)
 {
     uint8_t next;
 
@@ -299,7 +290,37 @@ static void UART_CommandQueuePush(const char *line)
     }
 
     UART_CommandQueueCopy(s_uartCmdQueueWrite, line);
+    s_uartCmdQueueSource[s_uartCmdQueueWrite] = source;
     s_uartCmdQueueWrite = next;
+}
+
+static void UART_CommandQueuePushPriority(const char *line)
+{
+    uint8_t prev;
+
+    if (line == NULL) {
+        return;
+    }
+
+    prev = (uint8_t)((s_uartCmdQueueRead + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    if (prev == s_uartCmdQueueWrite) {
+        /* 队列满：为实时位置目标让路，丢弃尾部最新的普通命令 */
+        s_uartCmdQueueWrite = (uint8_t)((s_uartCmdQueueWrite + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    }
+
+    UART_CommandQueueCopy(prev, line);
+    s_uartCmdQueueSource[prev] = UART_CMD_SOURCE_UART;
+    s_uartCmdQueueRead = prev;
+}
+
+static void UART_CommandQueuePush(const char *line)
+{
+    UART_CommandQueuePushSource(line, UART_CMD_SOURCE_UART);
+}
+
+void UART_CommandQueuePushFromCan(const char *line)
+{
+    UART_CommandQueuePushSource(line, UART_CMD_SOURCE_CAN);
 }
 
 static void UART_CommandSendText(const char *text)
@@ -308,7 +329,142 @@ static void UART_CommandSendText(const char *text)
     if (text == NULL) {
         return;
     }
+    if (s_uartCmdResponseMuted != 0U) {
+        return;
+    }
+    if (s_uartCmdSourceCan != 0U) {
+        CanProtocol_SendTunnelText(text);
+        return;
+    }
     DrvUart_SendTextP0(text);
+}
+
+static float UART_FocProfilerCyclesToUs(float cycles, uint32_t cpu_hz)
+{
+    if (cpu_hz == 0U) {
+        return 0.0f;
+    }
+    return cycles * 1000000.0f / (float)cpu_hz;
+}
+
+static FOC_ProfilerSnapshot_t s_focProfilerTxSnapshot;
+static uint8_t s_focProfilerTxActive;
+static uint8_t s_focProfilerTxLine;
+
+static uint8_t UART_CommandTrySendFocProfilerStat(const FOC_ProfilerSnapshot_t *snapshot,
+                                                  FOC_ProfilerProbe_t probe)
+{
+    const FOC_ProfilerStat_t *stat;
+    uint32_t min_cycles;
+    uint32_t avg_cycles;
+    float avg_cycles_f;
+    char min_us[20];
+    char avg_us[20];
+    char max_us[20];
+    char budget_us[20];
+    char line[240];
+    int len;
+
+    if ((snapshot == NULL) || ((uint32_t)probe >= (uint32_t)FOC_PROBE_COUNT)) {
+        return 0U;
+    }
+
+    stat = &snapshot->stats[(uint32_t)probe];
+    min_cycles = (stat->count != 0U) ? stat->min_cycles : 0U;
+    avg_cycles = (stat->count != 0U) ? (uint32_t)(stat->sum_cycles / stat->count) : 0U;
+    avg_cycles_f = (stat->count != 0U) ?
+                   ((float)stat->sum_cycles / (float)stat->count) : 0.0f;
+
+    DrvUart_FormatFixed(min_us, sizeof(min_us),
+        UART_FocProfilerCyclesToUs((float)min_cycles, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(avg_us, sizeof(avg_us),
+        UART_FocProfilerCyclesToUs(avg_cycles_f, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(max_us, sizeof(max_us),
+        UART_FocProfilerCyclesToUs((float)stat->max_cycles, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(budget_us, sizeof(budget_us),
+        UART_FocProfilerCyclesToUs((float)snapshot->budget_cycles[(uint32_t)probe],
+                                   snapshot->cpu_hz), 3U);
+
+    len = snprintf(line, sizeof(line),
+        "FOC_TIME,%s,n=%lu,min_cyc=%lu,avg_cyc=%lu,max_cyc=%lu,"
+        "min_us=%s,avg_us=%s,max_us=%s,budget_us=%s,overrun=%lu\r\n",
+        FOC_Profiler_ProbeName(probe),
+        (unsigned long)stat->count,
+        (unsigned long)min_cycles,
+        (unsigned long)avg_cycles,
+        (unsigned long)stat->max_cycles,
+        min_us, avg_us, max_us, budget_us,
+        (unsigned long)stat->overrun_count);
+    if ((len <= 0) || ((size_t)len >= sizeof(line))) {
+        return 0U;
+    }
+    return DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+}
+
+static void UART_CommandStartFocProfilerSnapshot(void)
+{
+    if (s_focProfilerTxActive != 0U) {
+        UART_CommandSendText("FOC_TIME,BUSY\r\n");
+        return;
+    }
+
+    FOC_Profiler_GetSnapshot(&s_focProfilerTxSnapshot);
+    s_focProfilerTxLine = 0U;
+    s_focProfilerTxActive = 1U;
+}
+
+static void UART_CommandServiceFocProfilerSnapshot(void)
+{
+    const FOC_ProfilerStat_t *period_stat;
+    uint32_t jitter_cycles = 0U;
+    char line[240];
+    char jitter_us[20];
+    int len;
+    uint8_t accepted = 0U;
+
+    if (s_focProfilerTxActive == 0U) {
+        return;
+    }
+
+    if (s_focProfilerTxLine == 0U) {
+        len = snprintf(line, sizeof(line),
+            "FOC_TIME,BEGIN,dwt=%u,cpu_hz=%lu,tim1_budget_us=%u,foc_budget_us=%u,probe_ovh_cyc=%lu\r\n",
+            (unsigned)s_focProfilerTxSnapshot.enabled,
+            (unsigned long)s_focProfilerTxSnapshot.cpu_hz,
+            (unsigned)FOC_PROFILER_TIM1_BUDGET_US,
+            (unsigned)FOC_PROFILER_FOC_BUDGET_US,
+            (unsigned long)s_focProfilerTxSnapshot.probe_overhead_cycles);
+        if ((len > 0) && ((size_t)len < sizeof(line))) {
+            accepted = DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+        }
+    } else if (s_focProfilerTxLine <= (uint8_t)FOC_PROBE_COUNT) {
+        accepted = UART_CommandTrySendFocProfilerStat(
+            &s_focProfilerTxSnapshot,
+            (FOC_ProfilerProbe_t)(s_focProfilerTxLine - 1U));
+    } else {
+        period_stat = &s_focProfilerTxSnapshot.stats[FOC_PROBE_IRQ_PERIOD];
+        if ((period_stat->count != 0U) && (period_stat->max_cycles >= period_stat->min_cycles)) {
+            jitter_cycles = period_stat->max_cycles - period_stat->min_cycles;
+        }
+        DrvUart_FormatFixed(jitter_us, sizeof(jitter_us),
+            UART_FocProfilerCyclesToUs((float)jitter_cycles,
+                                       s_focProfilerTxSnapshot.cpu_hz), 3U);
+        len = snprintf(line, sizeof(line),
+            "FOC_TIME,END,jitter_cyc=%lu,jitter_us=%s\r\n",
+            (unsigned long)jitter_cycles, jitter_us);
+        if ((len > 0) && ((size_t)len < sizeof(line))) {
+            accepted = DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+        }
+    }
+
+    if (accepted == 0U) {
+        return;
+    }
+
+    s_focProfilerTxLine++;
+    if (s_focProfilerTxLine > ((uint8_t)FOC_PROBE_COUNT + 1U)) {
+        s_focProfilerTxActive = 0U;
+    }
 }
 
 static void UART_CommandConsumeByte(uint8_t ch)
@@ -968,15 +1124,35 @@ static void UART_CommandExecute(const char *cmd)
         cmd = mapped;
     }
 
-    if (strcmp(cmd, "CMD:UART_RX_STAT?") == 0 || strcmp(cmd, "DIAG:UART_RX?") == 0) {
-        char resp[96];
+    if (strcmp(cmd, "CMD:UART_RX?") == 0 || strcmp(cmd, "CMD:UART_RX_STAT?") == 0) {
+        uint32_t tx_p0_drop;
+        uint32_t tx_p1_drop;
+        uint32_t tx_p2_drop;
+        char resp[176];
+
+        DrvUart_GetTxDropCounts(&tx_p0_drop, &tx_p1_drop, &tx_p2_drop);
         (void)snprintf(resp, sizeof(resp),
-            "UART_RX,OK,err=%lu,restart_fail=%lu,last_pos=%u,buf=%u\r\n",
+            "UART_RX,OK,err=%lu,restart_fail=%lu,last_pos=%u,buf=%u,"
+            "tx_p0_drop=%lu,tx_p1_drop=%lu,tx_p2_drop=%lu\r\n",
             (unsigned long)s_uartRxErrorCount,
             (unsigned long)s_uartRxRestartFailCount,
             (unsigned)s_uartRxLastPos,
-            (unsigned)sizeof(urR_data));
+            (unsigned)sizeof(urR_data),
+            (unsigned long)tx_p0_drop,
+            (unsigned long)tx_p1_drop,
+            (unsigned long)tx_p2_drop);
         UART_CommandSendText(resp);
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:FOC_TIME?") == 0) {
+        UART_CommandStartFocProfilerSnapshot();
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:FOC_TIME,CLEAR") == 0) {
+        FOC_Profiler_Clear();
+        UART_CommandSendText("FOC_TIME,CLEAR,OK\r\n");
         return;
     }
 
@@ -986,16 +1162,20 @@ static void UART_CommandExecute(const char *cmd)
             "SYS:CMDS,OK,groups=SYS|CTRL|GAIN|MOTION|FF|CAL|DIAG\r\n"
             " SYS: FW_INFO? CLEAR_FAULT\r\n"
             " CTRL: UNLOCK,N ENABLE,N MODE,N IREF,Id,Iq SREF,speed PREF,pos STOP\r\n"
-            "  APP_MODE? APP_MODE,RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT\r\n"
+            "  APP_MODE? APP_MODE,RAW|JOINT_POS|GIMBAL_SPEED|HOLD|SPRING_DAMPER|DETENT|SCROLL_WHEEL\r\n"
             "  SPRING:CFG? SPRING:CFG,K,D,limit  DETENT:CFG? DETENT:CFG,count,strength,width,limit\r\n"
+            "  WHEEL:CFG? WHEEL:CFG,count,strength,width,damping,limit\r\n"
+            "  WHEEL:SESSION,<id>,<to_ms>  WHEEL:KEEPALIVE,<id>  WHEEL:STATUS?\r\n"
             " GAIN: PI_CURRENT,Kp,Ki PI_SPEED,Kp,Ki PD_POS,Kp,Kd\r\n"
             " MOTION: MOTION_CFG? MOTION_CFG,s,a,c MOTION_CFG,RESET\r\n"
+            " POS_DIRECT: POS_DIRECT? POS_DIRECT,0|1 POS_DIRECT_GAIN,Kp,Kd POS_DIRECT_KI,Ki\r\n"
+            " FRIC_COMP: FRIC_COMP? FRIC_COMP,pos,neg DIR? (诊断方向锁存/积分/力矩指令)\r\n"
             " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
             " JOINT: LIMIT? LIMIT,min_deg,max_deg LIMIT,OFF\r\n"
             " GIMBAL: RAMP? RAMP,accel\r\n"
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
-            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG TLE_RAW TLE_GPIO,0|1\r\n"
+            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1\r\n"
         );
         return;
     }
@@ -1020,6 +1200,7 @@ static void UART_CommandExecute(const char *cmd)
         else if (g_foc_app.app_mode == APP_MODE_HOLD)       name = "HOLD";
         else if (g_foc_app.app_mode == APP_MODE_SPRING_DAMPER) name = "SPRING_DAMPER";
         else if (g_foc_app.app_mode == APP_MODE_DETENT)     name = "DETENT";
+        else if (g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) name = "SCROLL_WHEEL";
         (void)snprintf(resp, sizeof(resp),
                  "APP_MODE,OK,%s (ctrl_mode=%u)\r\n", name, g_foc_app.control_mode);
         UART_CommandSendText(resp);
@@ -1048,6 +1229,13 @@ static void UART_CommandExecute(const char *cmd)
     if (strcmp(cmd, "CMD:APP_MODE,DETENT") == 0) {
         FOC_App_SetAppMode(&g_foc_app, APP_MODE_DETENT);
         UART_CommandSendText("APP_MODE,OK,DETENT\r\n"); return;
+    }
+    if (strcmp(cmd, "CMD:APP_MODE,SCROLL_WHEEL") == 0) {
+        FOC_App_SetAppMode(&g_foc_app, APP_MODE_SCROLL_WHEEL);
+        if (g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) {
+            UART_CommandSendText("APP_MODE,OK,SCROLL_WHEEL\r\n");
+        }
+        return;
     }
 
     /* ── Phase 3: JOINT soft limit commands ── */
@@ -1133,28 +1321,128 @@ static void UART_CommandExecute(const char *cmd)
 
     /* ── Phase 3B: DETENT:CFG commands ── */
     if (strcmp(cmd, "CMD:DETENT_CFG?") == 0 || strcmp(cmd, "DETENT:CFG?") == 0) {
-        char resp[120];
+        char resp[140];
         (void)snprintf(resp, sizeof(resp),
-            "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,limit=%.3f\r\n",
+            "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
             (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
-            (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_limit_A);
+            (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_damping,
+            (double)g_foc_app.detent_limit_A);
         UART_CommandSendText(resp); return;
     }
     {
-        float dc, ds, dw, dl;
-        if (sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4 ||
-            sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl) == 4) {
-            FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dl);
+        float dc, ds, dw, dd, dl;
+        int n, matched = 0;
+        /* Accept 5-param (with damping) or 4-param (backward compat, damping=0) */
+        n = sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f,%f", &dc, &ds, &dw, &dd, &dl);
+        if (n != 5) {
+            n = sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f,%f", &dc, &ds, &dw, &dd, &dl);
+        }
+        if (n == 5) {
+            FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, dd, dl);
+            matched = 1;
+        } else {
+            /* Fallback: old 4-param format without damping */
+            n = sscanf(cmd, "CMD:DETENT_CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl);
+            if (n != 4) {
+                n = sscanf(cmd, "DETENT:CFG,%f,%f,%f,%f", &dc, &ds, &dw, &dl);
+            }
+            if (n == 4) {
+                FOC_App_SetDetentCfg(&g_foc_app, dc, ds, dw, 0.0f, dl);
+                matched = 1;
+            }
+        }
+        if (matched) {
+            char resp[140];
+            (void)snprintf(resp, sizeof(resp),
+                "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+                (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
+                (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_damping,
+                (double)g_foc_app.detent_limit_A);
+            UART_CommandSendText(resp);
+            return;
+        }
+        /* Not a DETENT command — fall through to next handler */
+    }
+
+    /* ── Phase V1.3: SCROLL_WHEEL / WHEEL commands ── */
+    if (strcmp(cmd, "WHEEL:CFG?") == 0 || strcmp(cmd, "CMD:WHEEL_CFG?") == 0) {
+        char resp[140];
+        (void)snprintf(resp, sizeof(resp),
+            "WHEEL:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+            (double)g_foc_app.wheel_count, (double)g_foc_app.wheel_strength,
+            (double)g_foc_app.wheel_width_rad, (double)g_foc_app.wheel_damping,
+            (double)g_foc_app.wheel_limit_A);
+        UART_CommandSendText(resp); return;
+    }
+    {
+        float wc, ws, ww, wd, wl;
+        int n, matched = 0;
+        n = sscanf(cmd, "WHEEL:CFG,%f,%f,%f,%f,%f", &wc, &ws, &ww, &wd, &wl);
+        if (n == 5) {
+            FOC_App_SetWheelCfg(&g_foc_app, wc, ws, ww, wd, wl);
+            matched = 1;
+        } else {
+            n = sscanf(cmd, "CMD:WHEEL_CFG,%f,%f,%f,%f,%f", &wc, &ws, &ww, &wd, &wl);
+            if (n == 5) {
+                FOC_App_SetWheelCfg(&g_foc_app, wc, ws, ww, wd, wl);
+                matched = 1;
+            }
+        }
+        if (matched) {
+            char resp[140];
+            (void)snprintf(resp, sizeof(resp),
+                "WHEEL:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,damping=%.3f,limit=%.3f\r\n",
+                (double)g_foc_app.wheel_count, (double)g_foc_app.wheel_strength,
+                (double)g_foc_app.wheel_width_rad, (double)g_foc_app.wheel_damping,
+                (double)g_foc_app.wheel_limit_A);
+            UART_CommandSendText(resp);
+            return;
+        }
+    }
+
+    /* WHEEL:SESSION,<id>,<timeout_ms> */
+    {
+        uint32_t sid, tmo;
+        int n = sscanf(cmd, "WHEEL:SESSION,%lu,%lu", &sid, &tmo);
+        if (n >= 1) {
+            if (n < 2) tmo = 1000UL;
+            if (tmo < 100UL) tmo = 100UL;
+            if (tmo > 10000UL) tmo = 10000UL;
+            WheelInput_SessionStart(sid);
             {
-                char resp[120];
-                (void)snprintf(resp, sizeof(resp),
-                    "DETENT:CFG,OK,count=%.0f,strength=%.3f,width=%.3f,limit=%.3f\r\n",
-                    (double)g_foc_app.detent_count, (double)g_foc_app.detent_strength,
-                    (double)g_foc_app.detent_width_rad, (double)g_foc_app.detent_limit_A);
-                UART_CommandSendText(resp);
+                char r[64];
+                (void)snprintf(r, sizeof(r),
+                    "WHEEL:SESSION,OK,id=%lu,timeout=%lu\r\n",
+                    (unsigned long)sid, (unsigned long)tmo);
+                UART_CommandSendText(r);
             }
             return;
         }
+    }
+
+    /* WHEEL:KEEPALIVE,<id> */
+    {
+        uint32_t kid;
+        if (sscanf(cmd, "WHEEL:KEEPALIVE,%lu", &kid) == 1) {
+            WheelInput_SessionKeepalive(kid);
+            return;  /* silent ACK — no response to avoid flooding */
+        }
+    }
+
+    /* WHEEL:STATUS? */
+    if (strcmp(cmd, "WHEEL:STATUS?") == 0) {
+        uint32_t sent, dropped, coalesced, total;
+        char r[128];
+        WheelInput_GetStats(&sent, &dropped, &coalesced, &total);
+        (void)snprintf(r, sizeof(r),
+            "WHEEL:STATUS,OK,session=%u,pos=%ld,pending=%d,sent=%lu,dropped=%lu,coalesced=%lu,total=%lu\r\n",
+            (unsigned)g_wheel.session_active,
+            (long)g_wheel.position_steps,
+            (int)g_wheel.pending_delta,
+            (unsigned long)sent, (unsigned long)dropped,
+            (unsigned long)coalesced, (unsigned long)total);
+        UART_CommandSendText(r);
+        return;
     }
 
     /* ── Phase 6: CAN commands ── */
@@ -1392,6 +1680,91 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* ── POS_DIRECT: 位置环直连电流环判别实验开关 ── */
+    if (strcmp(cmd, "CMD:POS_DIRECT?") == 0) {
+        char resp[160];
+        char kp_str[20], kd_str[20], ki_str[20];
+        DrvUart_FormatFixed(kp_str, sizeof(kp_str), g_foc_app.pos_pd_direct.kp, 3U);
+        DrvUart_FormatFixed(kd_str, sizeof(kd_str), g_foc_app.pos_pd_direct.kd, 3U);
+        DrvUart_FormatFixed(ki_str, sizeof(ki_str), g_foc_app.pos_direct_ki, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "POS_DIRECT,OK,direct=%u,kp=%s,kd=%s,ki=%s\r\n",
+                 (unsigned int)g_foc_app.pos_direct, kp_str, kd_str, ki_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT,%f", &f1) == 1) {
+        uint8_t direct = (f1 > 0.0f) ? 1U : 0U;
+        char resp[32];
+        if (direct != g_foc_app.pos_direct) {
+            g_foc_app.pos_direct = direct;
+            /* 切换时清零速度积分与直连力矩指令，避免结构切换瞬间力矩跳变 */
+            g_foc_app.pi_speed.integral = 0.0f;
+            g_foc_app.pos_direct_iq_cmd = 0.0f;
+        }
+        (void)snprintf(resp, sizeof(resp),
+                 "POS_DIRECT,OK,%u\r\n", (unsigned int)g_foc_app.pos_direct);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT_GAIN,%f,%f", &f1, &f2) == 2) {
+        /* 运行时调直连PD增益（A/rad, A/(rad/s)），判别实验台架扫参用 */
+        if (f1 >= 0.0f && f1 <= 50.0f && f2 >= 0.0f && f2 <= 1.0f) {
+            FOC_App_SetPosDirectPDGains(&g_foc_app, f1, f2);
+            UART_CommandSendText("POS_DIRECT_GAIN,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_DIRECT_GAIN,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT_KI,%f", &f1) == 1) {
+        /* 直连位置环积分增益 A/(rad·s)，低速静摩擦消除（条件积分仅小误差） */
+        if (f1 >= 0.0f && f1 <= 20.0f) {
+            g_foc_app.pos_direct_ki = f1;
+            UART_CommandSendText("POS_DIRECT_KI,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_DIRECT_KI,FAIL,range\r\n");
+        }
+        return;
+    }
+
+    /* ── FRIC_COMP: 静摩擦补偿运行时幅值 ── */
+    if (strcmp(cmd, "CMD:DIR?") == 0) {
+        char resp[160];
+        int dir = (g_foc_app.pos_cmd_dir > 0.0f) ? 1 :
+                  (g_foc_app.pos_cmd_dir < 0.0f) ? -1 : 0;
+        (void)snprintf(resp, sizeof(resp),
+                 "DIR,OK,dir=%d,hold=%u,integral=%.4f,iq_cmd=%.4f,fric_pos=%.3f,fric_neg=%.3f\r\n",
+                 dir,
+                 (unsigned int)g_foc_app.pos_cmd_dir_hold,
+                 (double)g_foc_app.pos_integral,
+                 (double)g_foc_app.pos_direct_iq_cmd,
+                 (double)g_foc_app.fric_comp_pos,
+                 (double)g_foc_app.fric_comp_neg);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:FRIC_COMP?") == 0) {
+        char resp[96];
+        char pos_str[20], neg_str[20];
+        DrvUart_FormatFixed(pos_str, sizeof(pos_str), g_foc_app.fric_comp_pos, 3U);
+        DrvUart_FormatFixed(neg_str, sizeof(neg_str), g_foc_app.fric_comp_neg, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "FRIC_COMP,OK,pos=%s,neg=%s\r\n", pos_str, neg_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:FRIC_COMP,%f,%f", &f1, &f2) == 2) {
+        if (f1 >= 0.0f && f1 <= 0.50f && f2 >= 0.0f && f2 <= 0.50f) {
+            g_foc_app.fric_comp_pos = f1;
+            g_foc_app.fric_comp_neg = f2;
+            UART_CommandSendText("FRIC_COMP,OK\r\n");
+        } else {
+            UART_CommandSendText("FRIC_COMP,FAIL,range\r\n");
+        }
+        return;
+    }
+
     /* --- FW Info / Version --- */
     if (strcmp(cmd, "CMD:FW_INFO?") == 0) {
         char resp[160];
@@ -1619,6 +1992,11 @@ static void UART_CommandExecute(const char *cmd)
             char resp[128];
             if (!g_foc_app.power_unlocked) {
                 UART_CommandSendText("ENABLE,FAIL,locked\r\n");
+                return;
+            }
+            if ((g_foc_app.app_mode == APP_MODE_SCROLL_WHEEL) &&
+                !WheelInput_IsSessionActive()) {
+                UART_CommandSendText("ENABLE,FAIL,no_wheel_session\r\n");
                 return;
             }
             FOC_App_Enable(&g_foc_app);
@@ -2141,6 +2519,7 @@ static void UART_CommandExecute(const char *cmd)
 void UART_Command_ProcessPending(void)
 {
     char cmd[UART_CMD_LINE_MAX];
+    uint8_t cmdSource;
     size_t copyLen;
 
     (void)g_trigger;  /* prevent --gc-sections */
@@ -2149,14 +2528,30 @@ void UART_Command_ProcessPending(void)
         copyLen = UART_BoundedStrLen(s_uartCmdQueue[s_uartCmdQueueRead], UART_CMD_LINE_MAX - 1U);
         memcpy(cmd, s_uartCmdQueue[s_uartCmdQueueRead], copyLen);
         cmd[copyLen] = '\0';
+        cmdSource = s_uartCmdQueueSource[s_uartCmdQueueRead];
         s_uartCmdQueueRead = (uint8_t)((s_uartCmdQueueRead + 1U) % UART_CMD_QUEUE_DEPTH);
         __enable_irq();
 
+        s_uartCmdSourceCan = (cmdSource == UART_CMD_SOURCE_CAN) ? 1U : 0U;
+        s_uartCmdResponseMuted = 0U;
         UART_CommandExecute(cmd);
     }
 
     UART_CommandServiceAdcNoise();
+    UART_CommandServiceFocProfilerSnapshot();
     TLE5012_GpioDiagService();
+    s_uartCmdSourceCan = 0U;
+}
+
+void UART_CommandExecuteMuted(const char *cmd)
+{
+    uint8_t previousSourceCan = s_uartCmdSourceCan;
+
+    s_uartCmdSourceCan = 0U;
+    s_uartCmdResponseMuted = 1U;
+    UART_CommandExecute(cmd);
+    s_uartCmdResponseMuted = 0U;
+    s_uartCmdSourceCan = previousSourceCan;
 }
 /* USER CODE END 0 */
 
@@ -2172,6 +2567,47 @@ extern TIM_HandleTypeDef htim1;
 extern DMA_HandleTypeDef hdma_usart1_tx;
 extern DMA_HandleTypeDef hdma_usart1_rx;
 /* USER CODE BEGIN EV */
+
+void FDCAN1_IT0_IRQHandler(void)
+{
+    HAL_FDCAN_IRQHandler(&hfdcan1);
+}
+
+static uint8_t FDCAN_RxDlcToBytes(uint32_t dlc)
+{
+    if (dlc <= 8U) {
+        return (uint8_t)dlc;
+    }
+    switch (dlc) {
+        case 9U:  return 12U;
+        case 10U: return 16U;
+        case 11U: return 20U;
+        case 12U: return 24U;
+        case 13U: return 32U;
+        case 14U: return 48U;
+        default:  return 64U;
+    }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+    FDCAN_RxHeaderTypeDef rxHeader;
+    uint8_t rxData[8];
+
+    if ((hfdcan != &hfdcan1) ||
+        ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)) {
+        return;
+    }
+
+    while (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+        uint8_t len = FDCAN_RxDlcToBytes(rxHeader.DataLength);
+
+        if (len > 8U) {
+            len = 8U;
+        }
+        CanProtocol_OnRx(rxHeader.Identifier, rxData, len);
+    }
+}
 
 
 /* USER CODE END EV */
@@ -2399,6 +2835,8 @@ void DMA1_Stream4_IRQHandler(void)
   */
 void TIM1_UP_IRQHandler(void)
 {
+  uint32_t tim1_isr_start = FOC_Profiler_Begin();
+  FOC_Profiler_RecordIrqEntry(tim1_isr_start);
   /* USER CODE BEGIN TIM1_UP_IRQn 0 */
   /* USER CODE END TIM1_UP_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
@@ -2407,7 +2845,9 @@ void TIM1_UP_IRQHandler(void)
      * PWM: 10kHz center-aligned (ARR=11999, PSC=0).
      * Effective FOC rate: ADC-frame-gated, ~10kHz (matches PWM/ADC trigger).
      */
+    uint32_t current_path_start = FOC_Profiler_Begin();
     FOC_App_TIM1_IRQHandler(&g_foc_app);
+    FOC_Profiler_End(FOC_PROBE_CURRENT_PATH, current_path_start);
     
     /* TLE5012 encoder read: target ~5kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
     static uint8_t tle5012_div_counter = 0;
@@ -2421,21 +2861,28 @@ void TIM1_UP_IRQHandler(void)
     static uint8_t speed_loop_div_counter = 0;
     if (++speed_loop_div_counter >= 10) 
     {
+        uint32_t speed_loop_start;
         speed_loop_div_counter = 0;
+        speed_loop_start = FOC_Profiler_Begin();
         FOC_App_SpeedLoop(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_SPEED_LOOP, speed_loop_start);
     }
     
     /* Position loop: target ~200Hz. Actual rate depends on TIM1_UP freq (TBD by scope). */
     static uint8_t position_loop_div_counter = 0;
     if (++position_loop_div_counter >= 100) 
     {
+        uint32_t position_loop_start;
         position_loop_div_counter = 0;
+        position_loop_start = FOC_Profiler_Begin();
         FOC_App_PositionLoop(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_POSITION_LOOP, position_loop_start);
     }
     
     /* DRV8350S status poll. Rate = TIM1_UP freq (TBD by scope). */
     DRV8350S_TIM1_UpdateCallback(&drv8350s);
   /* USER CODE END TIM1_UP_IRQn 1 */
+  FOC_Profiler_End(FOC_PROBE_TIM1_ISR, tim1_isr_start);
 }
 
 /**

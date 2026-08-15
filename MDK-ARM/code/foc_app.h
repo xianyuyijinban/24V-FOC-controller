@@ -57,10 +57,26 @@ extern "C" {
 #define FOC_SPEED_REF_MAX_RAD_PER_S        8.0f /* RAW SPEED SREF safety clamp */
 #define FOC_CURRENT_LOOP_KP_12V_BENCH       0.50f /* ARR=11999 post-resolution baseline: clean bidirectional tracking. */
 #define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* P-only baseline; Ki to be reintroduced in small steps later. */
-#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.05f /* 位置末端小误差静摩擦补偿，帮助闭合最后几度 */
-#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.05f /* 正反向对称补偿，避免零位附近方向偏置 */
+#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.12f /* 静摩擦幅值 A(FF库仑 Stribeck 极低速起动用, 实测静摩擦启动0.09A) */
+#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.12f /* 正反向对称 */
 #define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */
 #define FOC_POSITION_PD_KD_DEFAULT 0.12f /* 12V台架位置模式默认速度阻尼 */
+
+/* 位置环直连电流环模式 (判别实验: 低速平滑性 A/B 对比)
+ * 直连时位置环PD输出单位为 A(力矩)，跳过速度环PI直接进FF层+电流环。
+ * 增益起点 = 级联等效: KP_PD(4.0) × Kp_speed(0.25) = 1.0 A/rad,
+ *                KD_PD(0.12) × Kp_speed(0.25) = 0.03 A/(rad/s) */
+#define FOC_POS_DIRECT_KP_DEFAULT 0.5f  /* 直连刚度 A/rad (定版 2026-08-14) */
+#define FOC_POS_DIRECT_KD_DEFAULT 0.03f /* 直连阻尼 A/(rad/s) */
+#define FOC_POS_DIRECT_KI_DEFAULT 1.5f  /* 直连位置环积分增益 A/(rad·s) (低速静摩擦消除) */
+#define FOC_POS_INTEGRAL_LIMIT_A 0.10f  /* 直连位置环积分输出限幅 A */
+#define FOC_POS_LOOP_TS 0.005f          /* 位置环周期 200Hz */
+#define FOC_POS_INTEGRAL_ERR_RAD 0.035f /* 条件积分误差上限 rad(~2°)，大误差不积分避免加剧过冲 */
+#define FOC_FRIC_CMD_DIR_UPDATE_RAD 0.0002f /* 指令方向锁存更新阈值 rad(~0.01°) */
+#define FOC_FRIC_CMD_DIR_CLEAR_RAD 0.002f   /* 指令方向清除阈值 rad(~0.11°) */
+#define FOC_FRIC_CMD_DIR_HOLD_CNT 50U       /* 指令方向保持窗口 @200Hz=0.25s(>PC步进间隔0.2s, 保证补偿连续) */
+#define FOC_FRIC_STRIBECK_VS_RADPS 0.01f    /* Stribeck 过渡速度: <0.01rad/s(0.57°/s)接近静摩擦满值, 高于快速衰减 */
+#define FOC_FRIC_STRIBECK_KINEMATIC 0.20f   /* 动摩擦/静摩擦幅值比(匀速时补偿衰减到该比例×静摩擦) */
 #define FOC_POSITION_PD_KP_SCALE 1.0f   /* 派生增益 */
 #define FOC_POSITION_PD_KP_MIN 4.0f     /* 最小刚度 */
 #define FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S 0.05f /* 误差超过该值才加起动偏置 */
@@ -116,9 +132,17 @@ extern "C" {
 #define FOC_SPRING_D_DEFAULT       0.05f  /* 阻尼系数 A/(rad/s) */
 #define FOC_SPRING_LIMIT_DEFAULT   0.30f  /* 弹簧力限幅 A */
 #define FOC_DETENT_COUNT_DEFAULT   12.0f  /* 卡点数量 (12/圈 = 每30°) */
-#define FOC_DETENT_STRENGTH_DEFAULT 1.0f  /* 吸附强度 A/rad */
-#define FOC_DETENT_WIDTH_DEFAULT   0.13f  /* 卡点宽度 ~7.5° */
-#define FOC_DETENT_LIMIT_DEFAULT   0.25f  /* 卡点力限幅 A */
+#define FOC_DETENT_STRENGTH_DEFAULT 6.0f  /* 吸附强度 A/rad */
+#define FOC_DETENT_WIDTH_DEFAULT   0.24f  /* 卡点宽度 ~13.75°, 覆盖~92%间距 */
+#define FOC_DETENT_DAMPING_DEFAULT 0.10f  /* 阻尼系数 A/(rad/s)，防止振荡 */
+#define FOC_DETENT_LIMIT_DEFAULT   0.60f  /* 卡点力限幅 A */
+
+/* SCROLL_WHEEL defaults — independent config, shared detent algorithm */
+#define FOC_WHEEL_COUNT_DEFAULT     24.0f  /* 卡点数量 (24/圈 = 每15°) */
+#define FOC_WHEEL_STRENGTH_DEFAULT   6.0f  /* 吸附强度 A/rad */
+#define FOC_WHEEL_WIDTH_DEFAULT      0.16f /* 卡点宽度 ~9.2° */
+#define FOC_WHEEL_DAMPING_DEFAULT    0.10f /* 阻尼系数 A/(rad/s) */
+#define FOC_WHEEL_LIMIT_DEFAULT      0.30f /* 卡点力限幅 A */
 
 /* 固件版本信息 */
 #define FOC_FW_VERSION          "1.0.0"
@@ -171,6 +195,7 @@ typedef enum {
     APP_MODE_HOLD,              /* 当前位置保持：底层POSITION + 锁定当前角度 */
     APP_MODE_SPRING_DAMPER,     /* 虚拟弹簧阻尼：Iq = K*(theta_ref - theta) - D*speed */
     APP_MODE_DETENT,            /* 虚拟卡点：吸附到最近 detent 位置 */
+    APP_MODE_SCROLL_WHEEL,      /* 鼠标滚轮：复用detent力反馈+独立wheel事件 */
 } AppMode_t;
 
 /* 保护参数 */
@@ -257,7 +282,16 @@ typedef struct {
     float    detent_count;           /* 卡点数量 (每圈) */
     float    detent_strength;        /* 卡点吸附强度 A/rad */
     float    detent_width_rad;       /* 卡点宽度 rad */
+    float    detent_damping;         /* 卡点阻尼系数 A/(rad/s) */
     float    detent_limit_A;         /* 卡点力限幅 A */
+
+    /* SCROLL_WHEEL config (independent of DETENT) */
+    float    wheel_count;            /* 卡点数量 (每圈) */
+    float    wheel_strength;         /* 吸附强度 A/rad */
+    float    wheel_width_rad;        /* 卡点宽度 rad */
+    float    wheel_damping;          /* 阻尼系数 A/(rad/s) */
+    float    wheel_limit_A;          /* 力限幅 A */
+    uint8_t  wheel_cfg_active;       /* 1 = SCROLL_WHEEL config active */
 
     /* 反馈值 */
     float Ia, Ib, Ic;           /* 三相电流 A */
@@ -285,9 +319,22 @@ typedef struct {
     float joint_pos_limit_max_rad;      /* 关节软限位上限 rad (JOINT_POS) */
     uint8_t joint_soft_limit_enabled;   /* 软限位使能 */
 
+    /* 静摩擦补偿运行时幅值 (A, 替代编译期宏, 可经 CMD:FRIC_COMP 调)
+     * 实测启动电流约 0.09A; 默认取宏值 0.05A (待扫描实验定版) */
+    float fric_comp_pos;                /* 正向静摩擦补偿电流 A */
+    float fric_comp_neg;                /* 反向静摩擦补偿电流 A */
+
     /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
     FOC_PositionPD_t pos_pd;        /* 位置环PD */
+    FOC_PositionPD_t pos_pd_direct; /* 位置环直连PD（输出力矩 A，跳过速度环） */
+    uint8_t pos_direct;             /* 1=位置模式直连电流环（默认0=三环级联） */
+    float   pos_direct_iq_cmd;      /* 直连模式位置环力矩指令 A（200Hz更新，2kHz使用） */
+    float   pos_direct_ki;          /* 直连位置环积分增益 A/(rad·s), 运行时CMD:POS_DIRECT_KI调 */
+    float   pos_integral;           /* 直连位置环积分状态 rad·s */
+    float   pos_cmd_dir;            /* 位置指令方向锁存 -1/0/+1 (慢摇连续静摩擦补偿方向源) */
+    float   pos_ref_prev;           /* 上一周期 pos_ref (计算指令方向增量) */
+    uint16_t pos_cmd_dir_hold;      /* 指令方向保持计数 @200Hz (ref静止后仍保持, 防PC步进间歇清方向) */
 
     /* 前馈数据 */
     FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */
@@ -413,13 +460,15 @@ void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
+void FOC_App_SetPosDirectPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad);
 void FOC_App_SetGimbalRamp(FOC_AppHandle_t *handle, float accel_radps2);
 void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit);
-void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit);
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit);
+void FOC_App_SetWheelCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit);
 uint8_t FOC_App_CalIsBusy(FOC_AppHandle_t *handle);
 uint8_t FOC_App_CalPrecheck(FOC_AppHandle_t *handle);
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage);

@@ -1,5 +1,875 @@
 # PROGRESS
 
+## [2026-08-14] 台架实跑：板子恢复 + POS_DIRECT 判别/调优/COG 评估（首次硬件闭环验证）
+
+### Problem / Task
+- 8-13 完成 POS_DIRECT（位置环直连电流环）软件实现，待台架。8-14 实际硬件验证：
+  - 板子此前 UART 全静默、pyOCD 连不上内核 → 真凶是 Flash 空（8-01 失败烧录遗产），MCU 硬件一直健康
+  - 编码器线束坏 → 更换后 SPI 恢复
+  - 低速平滑性判别实验 + 直连增益调优 + 齿槽 LUT 质量评估
+
+### Resolution
+1. **板子恢复**：Keil 烧录成功（Erase/Program/Verify OK）→ pyOCD reset → 完整启动序列（EARLY_UART→CLOCK_READY→USART_READY→PERIPH_READY→DRV_READY→ADC_READY→MAIN_LOOP）。静态噪声健康：Ia/Ib/Ic std 4.0/3.8/5.9mA，VBUS 11.92V，UART RX 0 错误，fault=0。
+2. **编码器恢复**：换线后 `TLE_RAW,raw=0xF8D7,crc_error=0,valid=1`，角度实时有效（修复前 raw=0xFFFF MISO 悬空）。装好编码器后手动验证角度稳定跟随。
+3. **电机识别**：`CMD:IDENTIFY,1` → `CAL:STATUS,step=COMPLETE,percent=100,identified=1`（PN/RS/LS/KE/J/ENC_ALIGN/MOTION_VERIFY/COG 全流程）。**持久化验证通过**：pyOCD reset 重启后 motorId=1 自动恢复，无需重新识别。
+4. **POS_DIRECT A/B 判别**（`scripts/pos_direct_ab_test.py`，rounds=2, dwell=2.5s）：
+   - 位置纹波 angle_pp：CASCADE 6.83° → DIRECT **2.10°（-69%）**
+   - 力矩纹波 iq_pp：0.0174A → **0.0139A（-20%）**
+   - 速度纹波相当（0.076 vs 0.075），全程 0 fault
+   - **结论：低速位置模式直连结构显著更平滑**，假设成立。
+5. **直连增益扫参**（`scripts/sweep_direct_gains.py`）：kp×kd 9 组合 + 聚焦 4 组合×2轮。
+   - 关键发现：**kd 越大位置纹波越差**（kd=0.03 一致最优，0.10 全线恶化）——低速域速度差分噪声经 D 项放大，印证"速度不可信"
+   - **定版 kp=0.5, kd=0.03**：angle_pp=1.361°, iq_pp=0.0109A（vs 默认 kp=1.0 的 2.005°，改善 32%）
+6. **COG 齿槽 LUT 评估**（`scripts/cog_ab_test.py`）：
+   - COG ON(gain=0.25/phase=60°) 比 OFF 位置纹波**恶化 28.6%**（1.719° vs 1.337°，n=3）→ **当前 LUT 是负优化**
+   - 相位扫描（`scripts/phase_sweep.py`）：+120° 优于默认 60°（1.432° vs 2.005°），但 OFF 基线跨轮波动大（1.34~2.58°）→ 步进序列对 COG 检测不灵敏，**LUT 需用匀速纹波+FFT 专门标定**
+
+### Prevention / Follow-up
+- 齿槽 LUT 重标定（相位对齐 + 多转平均重采 + 谐波滤波）为独立优化项，待步骤3真实场景验证后处理。
+- 直连增益最优参数 kp=0.5/kd=0.03 尚未写入固件默认（当前默认仍 kp=1.0/kd=0.03），测试用 `CMD:POS_DIRECT_GAIN` 运行时设；定版后改 `FOC_POS_DIRECT_KP/KD_DEFAULT`。
+- 全 FF 帧被固件判 data_ok=1（Round4 宽容策略）——编码器真故障时会出假角度，建议后续加"全0xFF判无效"。
+- 后续步骤（见会话规划清单）：3 真实场景手感 → 4 位置环提频评估 → 5 摩擦低速区重构。
+
+### Verification
+- 板子：Keil 烧录 Verify OK，pyOCD reset 后启动序列完整，重启参数持久化 motorId=1。
+- 静态噪声：Ia/Ib/Ic std 4.0/3.8/5.9mA，存档 `scripts/static_noise_20260813_013404.json`。
+- A/B 判别 JSON：`scripts/pos_direct_ab_20260814_235109.json`；增益扫参 `sweep_direct_gains_20260814_003831.json`；COG `cog_ab_20260814_004444.json`；相位 `phase_sweep_20260814_005101.json`。
+- 识别全程 0 fault；扫参/判别全程 0 fault。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet（与 8-13 POS_DIRECT + 8-01 CAN 同批）
+- Files:
+  - `scripts/pos_direct_ab_test.py`（新增，A/B 判别，含编码修复）
+  - `scripts/sweep_direct_gains.py`（新增，增益扫参）
+  - `scripts/cog_ab_test.py`（新增，COG ON/OFF）
+  - `scripts/phase_sweep.py`（新增，相位扫描）
+  - `scripts/static_noise_check.py`（新增，静态噪声）
+  - `PROGRESS.md`
+
+## [2026-08-14] 匀速测量尝试与低速跟踪摩擦主导发现（修正 A/B 解读）
+
+### Problem / Task
+- 步骤3 目标是量化直连结构在云台慢摇（匀速段）的平滑性，需让电机匀速转动并采集纹波。
+- 实测暴露更深问题：**位置环（级联+直连）低速跟踪都受摩擦主导，电机响应慢、到位慢**。
+
+### Resolution
+1. **匀速测量脚本 `speed_ramp_test.py`**：PREF 流式递增模拟平滑斜坡，采 N 帧算速度/Iq 纹波/频谱。遇到并解决 3 个障碍：
+   - **PC 端 pyserial write 阻塞读取根因**：单线程连续 `ser.write` 命令流会让 N 帧采集骤降到 ~1.8fps（实测 20/33/50Hz 均如此）；改用**后台线程发命令 + 主线程读**后恢复 54fps。这是本仓库所有 UART 流式命令脚本必须注意的坑。
+   - **位置环最短路径语义**：PREF 递增超过 360° 会触发 `FOC_AngleNormalize` wrap，位置环目标来回跳（电机剧烈振荡 Iq pp=0.84A）。限扫动幅度在单圈内（SWEEP_RAD=1.0 rad）。
+   - **角度差分 wrap 处理**：单圈内无需 wrap，只做 ±360 修正。
+2. **决定性发现：级联和直连位置环都跟踪慢**。同一 6° 步进（级联 pos_direct=0）：
+   - angle 143.45°→147.48°（2.5s 只到位 4/6°）
+   - **iq_ref=-0.08A（位置环在输出力矩）但 iq_act=+0.02A（实际电流只有指令 1/4）**
+   - Vq=-0.2V，电机缓慢爬行
+   - 直连 pos_direct=1 同样只动 0.1°
+3. **修正 A/B 判别解读**：DIRECT angle_pp=2.10° 优于级联 6.83° 是**稳态抖动维度**的改善；但"能否快速到位"上两结构都受摩擦限制。**低速不平滑根因是摩擦（静摩擦+齿槽），不是环结构**。结构切换改善抖动，未解决摩擦本身。
+4. **结论**：下一步需量化摩擦特性（力矩模式电流递增找启动电流/库仑摩擦），作为后续摩擦补偿、观测器、LUT 标定的输入。
+
+### Prevention / Follow-up
+- UART 流式命令脚本必须用后台线程发命令 + 主线程读（见 speed_ramp_test.py）。
+- 位置环 PREF 无法表达多圈匀速（最短路径语义），匀速测量限单圈扫动。
+- 低速到位能力受摩擦主导，单靠 DIRECT 结构不够；需摩擦补偿/观测器/LUT 方向。
+- 待办：摩擦特性测量（力矩模式 IREF 扫描）。
+
+### Verification
+- 后台线程 vs 单线程 PREF 流：N 帧 215/4s vs ~7/4s。
+- 级联/直连同 6° 步进：均只到位 0.1-4/6°，iq_act≈iq_ref×0.25。
+- `scripts/speed_ramp_test.py` 已修复可用（单档 smoke 通过，多档扫动后续跑）。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet
+- Files:
+  - `scripts/speed_ramp_test.py`（新增，匀速测量）
+  - `PROGRESS.md`
+
+## [2026-08-14] 静摩擦补偿运行时命令 + 补偿力矩扫描
+
+### Problem / Task
+- 实测摩擦启动电流 ~0.09A，现有静摩擦补偿（编译期宏 0.05A）不足。需验证不同补偿力矩电流下低速到位性能，并让补偿运行时可调。
+
+### Resolution
+1. **固件**：`foc_app.h/c` 静摩擦补偿幅值改为运行时变量 `fric_comp_pos/neg`（默认宏值 0.05A）；`stm32h7xx_it.c` 新增 `CMD:FRIC_COMP,pos,neg` 设置 / `CMD:FRIC_COMP?` 查询（范围 0~0.50A），SYS:CMDS? 同步。
+2. **脚本** `scripts/friction_comp_sweep.py`：DIRECT kp=0.5/kd=0.03 + COG OFF 下，补偿 {0,0.05,0.07,0.09,0.11,0.13}A × ±6° 步进，测 0.5s/1s/2s 到位度、稳态 pp、过冲。
+3. **烧录**：pyOCD flash 在此环境不可靠（无输出不写入，疑似探针时序），用户 Keil 烧录成功 + pyOCD reset 后新固件运行（FRIC_COMP,OK 响应，identified=1 参数保留）。
+
+### 扫描结果
+| 补偿A | 正向1s剩% | 反向1s剩% | 稳态pp° | 过冲° |
+|-------|-----------|-----------|---------|-------|
+| 0.00 | 96.0 | 77.5 | 0.025 | 5.43 |
+| 0.05 | 76.2 | 71.3 | 0.020 | 5.06 |
+| 0.07 | 55.8 | 64.8 | 0.030 | 5.49 |
+| 0.09 | 35.0 | 22.3 | 0.020 | 5.27 |
+| 0.11 | 34.8 | 21.8 | 0.030 | 3.80 |
+| 0.13 | 31.5 | 21.2 | 0.030 | 3.40 |
+
+- **补偿越大到位越快**，0.11~0.13A 最优（1s 剩 31%/21%）；静摩擦补偿方向验证成立。
+- **新问题：6° 阶跃过冲 3~5°（60~90% 超调）**，0A 也有 5.4° → DIRECT kp=0.5/kd=0.03 阶跃阻尼不足，非补偿造成。低速稳态优化（kd 小）与大步进阻尼矛盾。
+
+### Prevention / Follow-up
+- 详细设计见 `docs/LOW_SPEED_SMOOTHNESS_EXPERIMENT.md`（唯一主记录）。
+- 阶跃过冲待处理（加大 KD / 斜坡生成 / 位置阻尼项），或先转真实场景（云台慢摇小幅斜坡）评估影响。
+- pyOCD flash 不可靠，固件烧录用 Keil（已验证）。
+
+### Verification
+- GCC + Keil 编译 0 错 0 警。
+- 新固件 `FRIC_COMP,OK,pos=0.050,neg=0.050`，identified=1。
+- 扫描数据 `scripts/friction_comp_sweep_20260814_014558.json`。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet
+- Files:
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/foc_app.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `scripts/friction_comp_sweep.py`（新增）
+  - `docs/LOW_SPEED_SMOOTHNESS_EXPERIMENT.md`（新增）
+  - `PROGRESS.md`
+
+## [2026-08-14] 阶跃过冲根因定位：KD 扫描 + 斜坡验证（粘滑/静摩擦死区主导）
+
+### Problem / Task
+- 摩擦补偿扫描发现 6° 阶跃过冲 3~5°。需判明过冲来源：加大 KD（阻尼）？斜坡生成（PC 端）？还是结构性问题。
+- 两个假设：A) DIRECT kp=0.5/kd=0.03 阻尼不足，加大 KD 可压过冲；B) 云台真实场景是斜坡非阶跃，斜坡可避开过冲。
+
+### Resolution
+1. **脚本 `scripts/overshoot_kd_sweep.py`**：实验A 固定 kp=0.5 扫 kd={0.03..0.20}×±6° 阶跃；实验B 后台线程发斜坡 PREF（2°/s）替代阶跃。摩擦补偿统一 0.12A、COG OFF。
+2. **实验A 结果**：加大 KD **压不住过冲**——过冲均值全程 3.6~5.4° 不降（kd=0.20 仍 5.3°），稳态 pp 却从 0.02° 恶化到 0.145°。KD 加大只换来到位略快（1s 剩 29%→10%）。→ 排除"加大 KD"。
+3. **实验B 结果（关键）**：斜坡 2°/s 下前 1s 位移≈0（爬行），斜坡结束仍差 1.4~1.7° 追不上，反向轨迹呈典型粘滑（-1.5° 卡住→突跳-3.5°→回弹-2.9°）。→ **PC 端斜坡不仅没解决过冲，还暴露了更严重的跟踪滞后+粘滑**。
+
+### 根因分析（阶跃过冲与斜坡滞后同源）
+- **P-only 位置环对静摩擦有固有稳态误差**：P 项 kp×e 要突破静摩擦 0.09A 需 e>0.09/0.5=10.3°。补偿退出后平衡点可离目标 ~10°。
+- **bang-bang 补偿死区（误差>3°切/1°退）在慢速斜坡下失效**：跟踪误差恒<3° → 补偿从不触发 → P 项力矩<静摩擦 → 电机粘住。误差一旦过阈值补偿突切入 → 粘滑+过冲。
+- 阶跃大步进误差大补偿切入能到位，但动量冲过头=过冲；斜坡慢速误差小补偿失效=滞后。**两者都是"静摩擦阈值 vs 误差阈值补偿"的结构矛盾**。
+- 云台慢摇=极慢斜坡，误差恒小 → 现有补偿方案在真实场景会卡死，需固件重构。
+
+### Prevention / Follow-up
+- 低速摩擦补偿需重构（固件改动，Keil 烧录）：
+  1. **位置环加积分（PI）**：积分累积突破静摩擦，消除末端稳态误差（最直接）
+  2. **补偿从"误差死区"改"速度方向相关"**：只要 PREF 在变/指令速度非零即补满静摩擦，连续输出替代 bang-bang
+  3. 或摩擦观测器/前馈（后续）
+- 建议先做"连续方向补偿 + 位置环积分"之一，再做云台慢摇真实场景。
+
+### Verification
+- 脚本编译 0 错；板子 COM10 在线，identified=1。
+- 实验A：kd=0.03 时过冲 3.65°、稳态 0.020°（最优稳态）——维持 kp=0.5/kd=0.03 定版。
+- 实验B：斜坡 2°/s 正向 1s 剩 95%、末端差 1.4°；反向差 1.7°。
+- 数据：`scripts/overshoot_kd_20260814_082311.json`、`overshoot_ramp_20260814_082629.json`。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet
+- Files:
+  - `scripts/overshoot_kd_sweep.py`（新增）
+  - `PROGRESS.md`
+
+## [2026-08-14] 低速摩擦固件重构（直连PI + 指令方向连续补偿）台架验证通过
+
+### Problem / Task
+- 前一轮定位阶跃过冲 + 斜坡粘滑/滞后同源：P-only 位置环静摩擦稳态误差 + bang-bang 误差死区补偿慢速失效。需固件重构验证。
+- 方案（用户拍板"两个都做"）：①位置环直连条件积分消除静摩擦稳态误差；②摩擦补偿方向从误差阈值(3°/1°)改"指令方向锁存"连续输出。
+
+### Resolution
+1. **固件**（`foc_app.h/c` + `stm32h7xx_it.c`）：
+   - 直连 PI：`pos_integral` 积分状态 + `pos_direct_ki`(默认1.5, `CMD:POS_DIRECT_KI` 运行时调)。条件积分仅 |err|<2°（大误差靠PD冲避免加剧过冲）+ PD饱和冻结抗windup + 输出限幅 ±0.10A。
+   - 方向锁存：`pos_cmd_dir` 由 ref 增量>0.01° 设方向并保持，到位(err<0.11°)或误差反向清0。SpeedLoop 摩擦补偿方向改用 pos_cmd_dir（±1）。
+   - 测试断言 test_build_system.py 同步（friction 部分），GCC 编译 0 错 0 警。
+2. **烧录**：Keil 烧录成功，pyOCD reset 唤醒（target `stm32h743vghx`，`stm32h743vi` 不被 pyocd 识别）。
+3. **验证**（`friction_comp_sweep.py` + `overshoot_kd_sweep.py --mode=ramp`）：
+
+| 指标 | 旧固件 | 新固件 |
+|------|--------|--------|
+| 6° 阶跃过冲 | 3.8~5.4° | **0.58°** |
+| 6° 阶跃到位 | 1s 剩 35% | **0.5s 到位 100%** |
+| 斜坡2°/s末端差 | 1.4~1.7° 追不上 | **3s 到位 +0.5°** |
+| 斜坡前1s | 卡死(爬行) | **0.5s 走 0.6° 无爬行** |
+| 稳态 pp | 0.02~0.03° | 0.03~0.08° |
+
+### 技术坑（防再踩）
+- **pyserial 同句柄并发 write/read 饿死读**：后台线程持续写 PREF 期间主线程 0 帧，停写即恢复（板子无 fault、遥测正常）。流式命令必须单线程交替（每 0.2s 发一步 + 读）。
+- **ENABLE 后 pos_ref 遗留**：位置环可能被上次会话 pos_ref 猛拉，测试前应先 PREF 钉住当前位置或确认状态。
+- pyocd reset target 名用 `stm32h743vghx`。
+
+### Prevention / Follow-up
+- **反向不对称**（斜坡反向 3.2s 到位、阶跃反向剩 27%、过冲 3.28°）为下一步优化点：静摩擦/齿槽正反差异 + 反向补偿方向切换时序。
+- 齿槽 LUT 标定仍待做（负优化）。
+- 直连定版 kp=0.5/kd=0.03/ki=1.5 待写入固件默认。
+- 新目标：低速关节电机算法优化至贴近商用云台（见会话规划）。
+
+### Verification
+- GCC 0 错 0 警；板子 COM10，identified=1。
+- 数据：`friction_comp_sweep_20260814_092552.json`、`overshoot_ramp_20260814_092659.json`、`verify_lowspeed_20260814_092458.json`。
+- 斜坡"过冲6°"为 summarize 统计 bug（起点位移0计入），真实超调 0.5°。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet
+- Files:
+  - `MDK-ARM/code/foc_app.h` / `foc_app.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `scripts/overshoot_kd_sweep.py`、`scripts/verify_low_speed.py`（新增）
+  - `test_build_system.py`
+  - `docs/LOW_SPEED_SMOOTHNESS_EXPERIMENT.md`、`PROGRESS.md`
+
+## [2026-08-14] 低速匀速跟进：补偿方向修复 + FF库仑前馈 + 齿槽标定（速度 0.82→1.81°/s）
+
+### Problem / Task
+- 摩擦重构后阶跃/到位 OK，但匀速 2°/s 严重粘滑（速度均值仅 0.82°/s，残差 18.6°）。
+- 需找到低速匀速爬行的根因并修复，为齿槽标定铺路。
+
+### Resolution（逐步定位链）
+1. **`CMD:DIR?` 诊断命令**（新增）→ 决定性发现：正向斜坡 `dir=-1`，**补偿方向与运动相反**。
+   - 根因：`pos_ref` 是 control frame（=用户角×encoder_dir），encoder_dir=-1 时用户角递增→control 角递减→`ref_delta` 符号反。
+   - 修复：锁存/清方向都乘 `encoder_dir_f` 转用户坐标。
+2. **kp 灵敏度**：kp=0.5→2.0 时匀速 0.82→1.58°/s（残差 4.46°）。位置刚度是关键（误差小就有足够力矩），但剩余仍粘滑。
+3. **级联对比**：级联更差（0.14°/s）——级联位置环要 ~32° 误差才给 2°/s 速度指令，低速速度环失效。
+4. **Stribeck 平滑**（补偿随速度衰减到动摩擦）：残差 3.73°，但速度 std 仍大。
+5. **FF 库仑前馈死区 bug**：`FOC_FF_COULOMB_DEADBAND_RADPS=0.05`，2°/s(=0.035) 恰好低于死区 → 低速库仑前馈从不触发 → 爬行。
+   - 修复：库仑前馈低速用指令方向兜底（`pos_cmd_dir`），Tc/Kt 连续输出。
+6. **双补偿过冲**：FF库仑 + pos_cmd_dir 补偿(0.12)叠加 → 速度 1.25°/s 恶化。**comp=0 最优**（FF库仑足够）。
+
+### 匀速结果（comp=0 + FF库仑 + kp=2.0）
+
+| 配置 | 速度均值 | 残差 pp | 速度std |
+|------|---------|---------|---------|
+| 初始(kp=0.5+补偿0.12) | 0.82°/s | 18.6° | — |
+| kp=2.0 | 1.58°/s | 4.46° | 2.22 |
+| +Stribeck平滑 | 1.24°/s | 3.73° | 3.26 |
+| **+FF库仑兜底(comp=0)** | **1.81°/s** | **2.94°** | 2.31 |
+
+- 速度 0.82→1.81°/s（90% 目标），残差改善 6 倍。低速匀速本质问题（库仑前馈缺失）定位并修复。
+- 剩余速度 std 2.31 主要来自齿槽（0.099Hz 谐波）+ 粘滑残余。
+
+### 齿槽 LUT 标定（cogging_calibrate.py 新增）
+- 位置环直连扫 350°，采 Iq vs 角度 → 齿槽力矩波形 **pp=0.123A**，主导谐波 **22 次/圈**（非理论 24）。
+- 硬编码 LUT（encoder_dir=-1 反转对齐）+ Init 覆盖（`cogging_lut_cal.h` 自动生成）。
+- **相位扫描无稳定改善**（速度 std 全相位 ~2.5-3）→ LUT 相位对齐未精确（theta_mech vs 用户角 offset 未定），待下一步精确对齐。
+
+### 技术坑
+- pyOCD flash 本机可用（`-t stm32h743vghx -e sector`，只擦固件区，参数区 0x081E0000 保留）——用户授权后自行烧录，无需 Keil。
+- SWD 偶发 "board uninit" 错误，重试即好。
+
+### Prevention / Follow-up
+- 齿槽 LUT 精确对齐（需 mech_zero_offset/encoder_dir 精确关系 → phase_offset）
+- Tc/Kt 标定（FF库仑幅值是否最优）
+- 摩擦补偿默认值待定（comp=0 最优，pos_cmd_dir 补偿应默认 0 或低值）
+
+### Verification
+- GCC 0 错 0 警；pyOCD 烧录保留 identified=1。
+- 数据：`ripple_pos2.0_*.json`、`cogging_lut_20260814_102810.json`。
+
+### Commit
+- Branch: `codex/sync-main-20260519`；working tree changes not committed yet
+- Files: `foc_app.h/c`、`stm32h7xx_it.c`、`cogging_lut_cal.h`(新)、`scripts/cogging_calibrate.py`(新)、`scripts/speed_ripple_measure.py`、`PROGRESS.md`
+
+## [2026-08-13] POS_DIRECT 位置环直连电流环判别实验（软件侧就绪，待台架）
+
+### Problem / Task
+- 齿槽+摩擦导致低速转动不平滑。低速域速度估计信噪比差，P-only 速度环扰动抑制弱。
+- 判别假设：低速时位置环PD输出直接作为力矩指令(A)进电流环（跳过速度环），比三环级联更平滑。
+
+### Resolution
+- `foc_app.h/c`：新增 `pos_pd_direct`（输出力矩A）、`pos_direct` 开关（默认0=级联）、`pos_direct_iq_cmd`。
+  - `FOC_App_PositionLoop`（200Hz）：直连时 PD 输出写入 `pos_direct_iq_cmd`，跳过巡航逻辑，speed_ref 清零。
+  - `FOC_App_SpeedLoop`（2kHz）：位置模式+直连时跳过速度PI（`goto ff_layers`），iq_ref_mech=pos_direct_iq_cmd，FF层（惯量/摩擦/齿槽LUT）与静摩擦补偿照常叠加；RsFF 速度误差传0。
+  - 直连增益默认 `FOC_POS_DIRECT_KP_DEFAULT=1.0 A/rad`、`KD=0.03 A/(rad/s)`（≈级联等效 KP_PD 4.0 × Kp_speed 0.25）。
+- `stm32h7xx_it.c`：新增 `CMD:POS_DIRECT?` / `CMD:POS_DIRECT,0|1`（切换时清速度积分与直连力矩，防跳变）/ `CMD:POS_DIRECT_GAIN,kp,kd`（台架扫参）；SYS:CMDS? 同步。
+- `scripts/pos_direct_ab_test.py`：A/B 判别脚本（步进 ±2° + 斜坡 5°，稳态窗 angle/Iq/speed 纹波统计，JSON 报告）。功率步骤需 `--power-ok`。
+- 顺手修复 Keil 3 警告（foc_app.c 补 uart_upload.h include；can_protocol.c 加 `CanProtocol_SelfTestOk()` getter 消费自检结果）。
+
+### Prevention / Follow-up
+- 台架测试（板子修复后）：`python scripts/pos_direct_ab_test.py --port COM7 --power-ok`。
+- 直连组若振荡 → 先调 KD；若纹波未降 → 对比 COG ON/OFF 与纹波主频（264×ω/2π Hz）判断齿槽 LUT 质量。
+- 切换 POS_DIRECT 建议在电机未使能时进行；热切换已有积分清零保护但仍有小跳变。
+- 直连力矩指令 200Hz ZOH 台阶影响待实测评估，后续可把位置环提频。
+
+### Verification
+- GCC build.ps1: PASS, 0 warnings; text=175440 (+952B vs 基线 174456)。
+- Keil UV4: 0 Error(s), 0 Warning(s)。
+- HostComputer: 205 tests OK（协议仅新增命令，无回归）。
+- `scripts/pos_direct_ab_test.py`: py_compile + dry-run 通过；硬件实跑待板子修复后执行。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Status: working tree changes not committed yet（与 8/1 CAN 工作区变更同批）
+- Files:
+  - `MDK-ARM/code/foc_app.h`
+  - `MDK-ARM/code/foc_app.c`
+  - `MDK-ARM/code/can_protocol.h`
+  - `MDK-ARM/code/can_protocol.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `scripts/pos_direct_ab_test.py`
+  - `PROGRESS.md`
+
+## [2026-08-01] Keil5 编译修复
+
+### Problem / Task
+- Keil5 编译报 L6218E 未定义符号：`CanProtocol_*`、`CurStream_*`、`WheelInput_*`、`g_wheel`；同时有 3 条 ARMCC 警告。
+
+### Resolution
+- 在 `MDK-ARM/24V FOC Controller.uvprojx` 的 `code` 组补充 `can_protocol.c/h`、`current_stream.c/h`、`wheel_input.c/h`。
+- `param_storage.c` 的 32 字节 Flash 写入缓冲改为 `static aligned(32)`，消除 auto object 对齐警告。
+- `motor_identify.c` 删除未使用局部变量 `omega_elec`，给被 `#if 0` 包裹代码引用的 `MI_PnRetryWithHigherCurrent` 加 `__attribute__((unused))`。
+
+### Prevention / Follow-up
+- 以后新增 `MDK-ARM/code/*.c|h` 时同步更新 GCC `build.ps1`/`Makefile` 和 Keil `uvprojx`。
+
+### Verification
+- Keil `UV4.exe -b MDK-ARM\24V FOC Controller.uvprojx`: 0 Error(s), 0 Warning(s)，生成 `.axf/.hex`。
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: PASS；text=174448, data=508, bss=42720。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `MDK-ARM/24V FOC Controller.uvprojx`
+  - `MDK-ARM/code/param_storage.c`
+  - `MDK-ARM/code/motor_identify.c`
+
+## [2026-08-01] CAN 固件烧录尝试与 CMSIS-DAP 诊断
+
+### Problem / Task
+- 用户反馈 pyOCD/CMSIS-DAP 可用，继续完成 CAN 固件烧录与上电验证。
+
+### Resolution
+- 确认 `python -m pyocd list` 识别到 `CMSIS-DAP by muselab-tech.com JCK CMSIS-DAP`，目标 `stm32h743vitx` 可用。
+- 尝试 1MHz、100kHz、10kHz，attach/under-reset，禁用 `DebugDeviceUnlock`，`--no-reset` 和 chip erase 多种组合。
+- 100kHz + attach/under-reset + 禁用解锁序列可连接并 halt，但 Flash loader 执行阶段反复出现 `SWD/JTAG communication failure (No ACK)`，未完成可信烧录。
+- 当前 COM10/COM5 均无 UART 输出，调试连接随后也丢失；结论是目标供电或 SWD 接线/复位链路需要硬件检查。
+
+### Prevention / Follow-up
+- 对控制器断电复位，确认 3.3V 供电、SWDIO/SWCLK/GND/nRESET 接线稳定后再烧录。
+- CAN 总线验收仍缺 candleLight/gs_usb 适配器；烧录成功后运行 `scripts/can_bench_test.py`。
+
+### Verification
+- `python -m pyocd list`: probe detected。
+- `python -m pyocd commander ... -M attach -f 100k -O pack.debug_sequences.disabled_sequences=DebugDeviceUnlock -c status -c halt`: 可连接并 halt。
+- `python -m pyocd flash ...`: FAIL，Erase/Programming 阶段 SWD No ACK。
+- UART COM10/COM5: 无启动输出。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `docs/CAN_TaskCards_DeepSeek_Report_20260801.md`
+  - `PROGRESS.md`
+
+## [2026-08-01] CAN v1.0 任务卡 T1-T5 实现与软件验证
+
+### Problem / Task
+- 按 `docs/CAN_TaskCards_DeepSeek.md` 完成 CAN 通信与上位机任务：FDCAN 基础打通、NMT/快速通道/遥测/故障、命令隧道、CanTransport、测试与台架脚本。
+
+### Resolution
+- FDCAN1 改为 500 kbit/s，启用 RX FIFO0=8、TX FIFO=3、标准滤波器、FDCAN1_IT0；内部回环自检后切 Normal。
+- 重写 `can_protocol.c/h`：RX 入环形缓冲、主循环分发、心跳 armed 守护、50Hz STATE_FAST、BOOTUP、FAULT_EVENT、Bus-off 自愈。
+- 命令队列增加 UART/CAN 来源标记，CAN 隧道命令响应经 TUNNEL_RESP 分包回传，响应截断 255 字节。
+- 新增 `HostComputer/can_tunnel.py`、`can_transport.py` 及 12 个 CAN 单测；新增 `scripts/can_bench_test.py` 覆盖协议 §13 用例 1-12。
+- 任务卡 T6 明确等待 Kimi 详细设计，未提前动 UI 重构。
+
+### Prevention / Follow-up
+- 硬件验收仍需 candleLight 适配器和安全台架：运行 `scripts/can_bench_test.py`，需要 `--power-ok` 的用例必须确认台架安全。
+- COM9 当前不存在；当前机器仅有 COM3/COM4/COM10，未发现 pyOCD/CMSIS-DAP。
+
+### Verification
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: PASS；text=174456, data=508, bss=42664；ELF/HEX/BIN 生成。
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 205 tests PASS。
+- `python -m unittest discover -s scripts -p "test*.py"`: 6 tests PASS。
+- CAN 台架实跑未执行：gs_usb 无设备，无 COM9，无 pyOCD。
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `Core/Inc/fdcan.h`
+  - `Core/Src/fdcan.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `MDK-ARM/code/can_protocol.c`
+  - `MDK-ARM/code/can_protocol.h`
+  - `MDK-ARM/code/head.h`
+  - `24V FOC Controller.ioc`
+  - `HostComputer/can_tunnel.py`
+  - `HostComputer/can_transport.py`
+  - `HostComputer/test_can_tunnel.py`
+  - `HostComputer/test_can_transport.py`
+  - `HostComputer/requirements.txt`
+  - `scripts/can_bench_test.py`
+  - `docs/CAN_TaskCards_DeepSeek_Report_20260801.md`
+
+## [2026-07-15] FOC Runtime Test UART Bug Fixes
+
+### Problem / Task
+- Fix the runtime experiment's unreachable `DIAG:UART_RX?` alias and remove per-command serial input resets that hid ACK/backpressure behavior and discarded valid binary current frames.
+
+### Resolution
+- Made mapped `CMD:UART_RX?` the canonical handler while retaining `CMD:UART_RX_STAT?` compatibility, and documented the recommended diagnostic command.
+- Added an atomic, cumulative P0/P1/P2 TX admission-drop snapshot and included the counters in `UART_RX,OK` responses.
+- Changed the runtime script to decode stale buffered traffic before each command, match only new response prefixes, preserve binary/CRC counters, require a fresh `FOC_TIME,BEGIN...END` transaction, and report UART/TX-drop deltas in CSV and Markdown output.
+- Added offline mixed ASCII/binary tests covering split frames, stale ACK isolation, strict prefix matching, UART statistics, and FOC profiler transaction boundaries.
+
+### Prevention / Follow-up
+- Run the planned hardware regression without per-command input-buffer resets: both UART RX aliases 20/20, BIN1000 for 60 seconds with 100 queries, zero CRC/RX/P0-drop deltas, then READY_IDLE and SPEED_BIN1000 profiler smoke tests.
+- If `tx_p0_drop_delta` is nonzero, treat the run as failed and address it with a separate P0 response-queue redesign rather than increasing host timeouts.
+
+### Verification
+- `python -m unittest scripts.test_foc_runtime_profile`: 6 tests passed.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 193 tests passed.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: passed with 0 errors and 0 warnings; text 165488 bytes, data 504 bytes, BSS 39472 bytes; ELF/HEX/BIN generated.
+- Hardware flash/regression was not run because the controller was not requested or assumed to be connected.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `Core/Src/stm32h7xx_it.c`
+  - `MDK-ARM/code/uart_upload.h`
+  - `MDK-ARM/code/uart_upload.c`
+  - `scripts/foc_runtime_profile.py`
+  - `scripts/test_foc_runtime_profile.py`
+  - `docs/UART_COMMANDS.md`
+  - `PROGRESS.md`
+
+## [2026-07-14] Persistent DWT FOC Runtime Profiler
+
+### Problem / Task
+- Add a low-overhead, long-lived execution-time diagnostic for the STM32H743 FOC runtime so future control features can be evaluated against the real 50 us TIM1 deadline.
+
+### Resolution
+- Added a DWT `CYCCNT` profiler with calibrated empty-probe overhead, wrap-safe cycle deltas, 64-bit cycle sums, min/average/max statistics, deadline overrun counts, and atomic clear/snapshot operations.
+- Instrumented `FOC_Run`, the complete current path, speed loop, position loop, the full TIM1 update ISR, and adjacent TIM1 entry periods without changing control frequencies or interrupt priorities.
+- Added `DIAG:FOC_TIME?` / `DIAG:FOC_TIME,CLEAR` and legacy `CMD:` aliases. Snapshot output is queued one P0 line at a time with retry, so a long report cannot overflow the 1024-byte UART TX ring.
+- Added `scripts/foc_runtime_profile.py` for the seven 12V runtime scenarios, three-repeat outlier checks, mixed ASCII/BIN1000 decoding, UART/fault checks, and timestamped CSV/Markdown reports.
+- Integrated the profiler source into GCC, Make, and Keil builds and documented the UART commands.
+
+### Prevention / Follow-up
+- Flash the instrumented firmware and run all seven 30-second scenarios on the 12V free-running bench; hardware verification is still required for the DWT probe overhead, 20 kHz/10 kHz observed rates, ISR jitter, and final timing margin.
+- Treat any `TIM1_ISR` sample at or above 50 us as a hard failure; retain isolated maxima that exceed peer runs by more than 20% as possible preemption/anomaly evidence.
+
+### Verification
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: passed with 0 errors and 0 warnings; text 165344 bytes, data 504 bytes, BSS 39472 bytes; ELF/HEX/BIN generated.
+- `python -m py_compile scripts\foc_runtime_profile.py`: passed.
+- Synthetic profiler parse/report smoke test: passed, including PASS classification and 20.000 us remaining-budget calculation.
+- Hardware flash and runtime capture were not performed in this turn.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `MDK-ARM/code/foc_profiler.h`
+  - `MDK-ARM/code/foc_profiler.c`
+  - `Core/Src/main.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `MDK-ARM/code/foc_app.c`
+  - `build.ps1`
+  - `Makefile`
+  - `MDK-ARM/24V FOC Controller.uvprojx`
+  - `docs/UART_COMMANDS.md`
+  - `scripts/foc_runtime_profile.py`
+  - `PROGRESS.md`
+
+## [2026-07-13] Motor Control Code Walkthrough
+
+### Problem / Task
+- Trace and explain how motor commands, product modes, cascaded control loops, FOC transforms, PWM generation, feedback sampling, and safety state transitions are implemented in the firmware.
+
+### Resolution
+- Mapped the execution path from UART commands and `APP_MODE` selection through the position, speed, and current loops to inverse Park/SVPWM and TIM1 CCR outputs.
+- Confirmed that product modes reuse the common FOC core: RAW/JOINT/GIMBAL/HOLD select or constrain the normal cascaded loops, while SPRING/DETENT/SCROLL_WHEEL inject virtual-physics torque through `Iq_ref` and bypass the normal position loop.
+- Identified the main reading entry points in `main.c`, `stm32h7xx_it.c`, `foc_app.c`, and `foc_core.c`; no motor-control source was changed.
+
+### Prevention / Follow-up
+- Keep `control_mode` (TORQUE/SPEED/POSITION) separate from `app_mode` (product behavior) when extending features; new haptic modes should reuse the current loop and explicitly define which outer loops they bypass.
+
+### Verification
+- Static code inspection only; no build or hardware test was required for this explanation.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `Core/Src/main.c`
+  - `Core/Src/stm32h7xx_it.c`
+  - `MDK-ARM/code/foc_app.c`
+  - `MDK-ARM/code/foc_core.c`
+  - `PROGRESS.md`
+
+## [2026-07-12] Source-Only Public Release Branch
+
+### Problem / Task
+- Clean the development workspace and publish only production firmware, HostComputer/Bridge source, build configuration, README, and license files while keeping test scripts, test reports, architecture documents, and internal progress records off GitHub.
+
+### Resolution
+- Removed the obsolete local `HostComputer/out/` and `HostComputer/tmpbuild/` PyQt6 packaging trees (about 160 MB) and added both paths to `.gitignore`.
+- Created a clean release worktree from `origin/main`, overlaid the latest production source, and removed public copies of `.cmsis` sample content, BenchTests, HostComputer tests, internal docs/plans, architecture/progress records, root bench/debug scripts, and Simulink test tooling.
+- Kept required STM32 HAL/CMSIS dependencies under `Drivers/`, plus the STM32 firmware, PySide6 HostComputer, FOC Device Bridge, build files, README, MIT license, and third-party notices.
+- Pushed the curated snapshot to `origin/codex/public-code-readme` and fast-forwarded remote `main` to the same release commit; remote `main` was not force-updated.
+
+### Prevention / Follow-up
+- Keep `codex/public-code-readme` as a review and rollback reference for the source-only `main` snapshot.
+- Keep private validation assets in the development workspace and do not copy them into future public snapshots.
+
+### Verification
+- Firmware GCC build passed with text 162744 bytes, data 504 bytes, and BSS 39008 bytes; ELF/HEX/BIN were generated.
+- HostComputer and FOC Device Bridge regression: 200 tests passed.
+- Python compile check passed for all published HostComputer and Bridge modules.
+- Secret-pattern scan found no private keys or common token formats; no test/docs/log/data/executable files were added or modified in the public commit.
+
+### Commit
+- Branch: `codex/public-code-readme`
+- Commit: `d1b8126b25ffe492e2d8acf8e3e963a4d895ea4f` (`publish: refresh source-only project snapshot`)
+- Status: pushed to `origin/codex/public-code-readme` and `origin/main`
+- Files:
+  - Production firmware and desktop source trees
+  - `README.md`
+  - `LICENSE`
+  - `THIRD_PARTY_NOTICES.md`
+  - Build configuration files
+
+## [2026-07-11] PySide6 Migration and Public License Setup
+
+### Problem / Task
+- Complete the public-release license setup after confirming that Ctrl-FOC-Lite was used only as a design reference, while avoiding PyQt6 GPL distribution ambiguity for the desktop applications.
+
+### Resolution
+- Migrated `HostComputer` and `FOC_Device_Bridge` from PyQt6 to PySide6, including signals, slots, tests, requirements, and PyInstaller configuration.
+- Added a root MIT `LICENSE` for original project code and documentation, plus `THIRD_PARTY_NOTICES.md` covering STM32 HAL, CMSIS, PySide6/Qt, Python dependencies, PyInstaller, and the bundled libusb DLL.
+- Updated README technology and license sections, explicitly recording that Ctrl-FOC-Lite was referenced without copying its source.
+- Updated both desktop packaging scripts to place the project license and third-party notices in release output.
+
+### Prevention / Follow-up
+- Do not publish older PyQt6-based executable packages as the MIT release artifacts.
+- Preserve upstream vendor license files and include applicable Qt/Python dependency notices with every binary release.
+- Verify the exact provenance of `libusb-1.0.dll` before redistributing it publicly.
+
+### Verification
+- `python -m unittest HostComputer.test_adc_noise_gui HostComputer.test_data_parser HostComputer.test_gui_logic HostComputer.test_main_window HostComputer.test_serial_service FOC_Device_Bridge.test_bridge`: 200 tests passed.
+- `python -m compileall -q HostComputer FOC_Device_Bridge`: passed.
+- `build_host_gui_app.ps1`: PySide6 one-folder Host package built successfully.
+- `FOC_Device_Bridge/build_bridge.ps1`: PySide6 Bridge executable built successfully.
+- Repository source scan found no remaining PyQt6, `pyqtSignal`, or `pyqtSlot` references outside ignored historical artifacts.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `LICENSE`
+  - `THIRD_PARTY_NOTICES.md`
+  - `README.md`
+  - `HostComputer/requirements.txt`
+  - `HostComputer/gui_app.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/serial_worker.py`
+  - `HostComputer/transport.py`
+  - `HostComputer/test_main_window.py`
+  - `HostComputer/test_adc_noise_gui.py`
+  - `FOC_Device_Bridge/`
+  - `build_host_gui_app.ps1`
+  - `PROGRESS.md`
+
+## [2026-07-11] Public Release License Provenance Audit
+
+### Problem / Task
+- Confirm whether the project could add an open-source license before its public GitHub release, with particular attention to Ctrl-FOC-Lite references and desktop GUI dependencies.
+
+### Resolution
+- Confirmed with the project owner that Ctrl-FOC-Lite was used only as a design reference and no source code was copied, so it does not need to be treated as a derived-code license source.
+- Confirmed that the STM32 HAL and CMSIS trees already carry their own upstream licenses and must retain those notices.
+- Identified PyQt6 in both `HostComputer` and `FOC_Device_Bridge` as the remaining license decision: retaining PyQt6 favors GPL-3.0-compatible distribution, while a permissive project license should first migrate those applications to PySide6 or use a commercial PyQt license.
+
+### Prevention / Follow-up
+- Do not add a blanket MIT license until the owner chooses between GPL-3.0 distribution and a PySide6 migration followed by permissive licensing.
+- Add a root license, component scope notes, and `THIRD_PARTY_NOTICES.md` once that choice is made.
+
+### Verification
+- Reviewed root README license text, desktop requirements/imports, repository ignore rules, and bundled STM32 vendor license locations.
+- No source or build files were changed as part of this audit.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `PROGRESS.md`
+
+## [2026-07-11] GitHub README Rewrite
+
+### Problem / Task
+- The root README contained mojibake, obsolete 24V/230400-baud assumptions, stale GUI descriptions, and an MIT-license claim even though the repository has no LICENSE file.
+
+### Resolution
+- Replaced the README with a clean UTF-8, Chinese-first GitHub overview covering the 12V baseline, FOC implementation, seven APP_MODE modes, calibration/protection, 1Mbaud circular-DMA UART, binary current stream, HostComputer GUI, Windows scroll-wheel Bridge, build/test commands, architecture diagrams, safety notes, and known limitations.
+- Documented CAN and BIN2000 as experimental rather than release-ready, and explicitly noted that the repository still needs a license decision before public reuse rights are granted.
+
+### Prevention / Follow-up
+- Keep release-facing constants synchronized with `foc_app.h`, `usart.c`, `current_stream.h`, and `docs/UART_COMMANDS.md` whenever the electrical or communication baseline changes.
+- Add repository screenshots and a deliberate LICENSE file before the public GitHub release if desired.
+
+### Verification
+- README decoded as UTF-8 with 315 lines and balanced Markdown code fences.
+- All referenced internal documentation paths exist.
+- No stale `230400`, COM9, 24V supply recommendation, or false MIT-license text remains.
+- `git diff --check -- README.md`: passed apart from the repository's existing LF/CRLF conversion warning.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `README.md`
+  - `PROGRESS.md`
+
+## [2026-07-11] Scroll Wheel Bridge Ownership and Host State Sync
+
+### Problem / Task
+- The visible Host GUI could select SCROLL_WHEEL but initially had no way to ask the background Bridge to connect to the selected COM port or start/stop the wheel session. The wheel panel also reported the wrong underlying control mode and showed `--` until the first physical wheel event.
+- APP_MODE acknowledgements overwrote the mode combo while signals were blocked, leaving the combo, stacked panel, desired mode, and firmware-confirmed mode inconsistent.
+
+### Resolution
+- Added IPC requests for Bridge-owned COM connection and wheel enable/disable, then connected them to explicit Host GUI buttons. Bridge remains the only SCROLL_WHEEL lifecycle and OS input owner.
+- Added initial wheel-status broadcasts on `CONNECTED_IDLE` and `WHEEL_ACTIVE`, so the Host immediately displays zeroed position and delta counters before the first physical event.
+- Mapped `SCROLL_WHEEL` to the firmware position-control layer in both response inference paths.
+- APP_MODE acknowledgements now update only the firmware-confirmed mode. They no longer overwrite the user's selected mode or stacked panel; mismatches are shown as `待同步：<模式>` until the requested sequence completes.
+- Rebuilt `dist/FOC_Device_Bridge.exe` and `dist/24V_FOC_Host/24V_FOC_Host.exe`.
+
+### Prevention / Follow-up
+- Keep `app_mode_selected` (GUI intent) separate from `app_mode` (firmware confirmation); never mutate selection widgets from an ACK while their signals are blocked.
+- Hardware verification should confirm that enabling the wheel changes `CONNECTED_IDLE` to `WHEEL_ACTIVE` and physical detents increment both counters and Windows scroll input.
+
+### Verification
+- HostComputer tests: 193 tests OK.
+- FOC_Device_Bridge tests: 7 tests OK.
+- `python -m compileall -q HostComputer FOC_Device_Bridge`: OK.
+- Bridge and Host PyInstaller packaging: completed successfully.
+- User screenshot confirmed Bridge ownership of `COM7`, `CONNECTED_IDLE`, position `0`, total delta `0`, and the position-control label.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `FOC_Device_Bridge/bridge_app.py`
+  - `FOC_Device_Bridge/ipc_protocol.py`
+  - `FOC_Device_Bridge/ipc_server.py`
+  - `FOC_Device_Bridge/serial_owner.py`
+  - `FOC_Device_Bridge/test_bridge.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/serial_worker.py`
+  - `HostComputer/test_main_window.py`
+  - `HostComputer/transport.py`
+  - `PROGRESS.md`
+
+## [2026-07-10] Bridge Launch Confusion and Single-instance Fix
+
+### Problem / Task
+- User reported that `dist/FOC_Device_Bridge.exe` could not be opened as an upper-computer GUI.
+
+### Resolution
+- Confirmed the executable was not crashing: six `FOC_Device_Bridge` processes were running with no main window because Bridge is intentionally a system-tray background application, not the HostComputer GUI.
+- Located the real GUI executable at `dist/24V_FOC_Host/24V_FOC_Host.exe` and rebuilt it from the current source.
+- Added live-server probing to `IpcServer.start()` so a second Bridge instance is rejected instead of removing the active named-pipe endpoint.
+- Added tray notifications explaining that Bridge is running in the tray and that `24V_FOC_Host.exe` is the visible GUI. Duplicate launches now notify and exit.
+- Stopped the six stale Bridge processes that were also locking the old executable, then rebuilt the Bridge package successfully.
+
+### Prevention / Follow-up
+- Launch order for wheel mode: start `FOC_Device_Bridge.exe` once, then open `24V_FOC_Host.exe`.
+- Keep the two executables separately named and distributed together; Bridge owns COM/input injection, Host is the visible debug UI.
+
+### Verification
+- Bridge tests: 5 tests OK, including rejection of a second live IPC owner.
+- HostComputer tests: 191 tests OK.
+- Python compileall: OK.
+- `FOC_Device_Bridge/build_bridge.ps1`: package rebuilt successfully after closing stale processes.
+- `build_host_gui_app.ps1`: package rebuilt successfully.
+- Launched the rebuilt Host executable and observed `FOC 上位机调试工具` with `Responding=True`; the verification process was then closed.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `FOC_Device_Bridge/ipc_server.py`
+  - `FOC_Device_Bridge/bridge_app.py`
+  - `FOC_Device_Bridge/test_bridge.py`
+  - `PROGRESS.md`
+
+## [2026-07-10] SCROLL_WHEEL Session and Bridge Integration Fix
+
+### Problem / Task
+- Implemented the remaining fixes from the SCROLL_WHEEL re-review: session ownership, safe OS injection, real bridge/device state propagation, package-safe startup, binary frame hardening, and automated bridge coverage.
+
+### Resolution
+- Firmware now accumulates and emits wheel deltas only while a live `WHEEL:SESSION` exists. Starting a session resets the event baseline, sequence, and pending deltas; no-session processing clears queued input instead of emitting W frames. The power-enable path also rejects `SCROLL_WHEEL` with `ENABLE,FAIL,no_wheel_session` when no session exists.
+- Bridge now calls `SendInput` only when both its SessionManager is `WHEEL_ACTIVE` and the W-frame carries `session_active`. Events outside that ownership boundary are ignored.
+- HostComputer can no longer use the generic APP_MODE power controls to enter `SCROLL_WHEEL`; its enable, arm, and direct mode-set actions are disabled for that selection, leaving the tray Bridge as the sole lifecycle owner.
+- IPC server caches and immediately sends the latest controller/session state to new clients. `BridgeTransport` now distinguishes named-pipe connectivity from a real controller connection and decodes `CONN_STATE`, `WHEEL_STATUS`, and `ERROR` frames. HostComputer displays bridge session, wheel position, and total delta.
+- Added a package-safe `bridge_launcher.py` and changed the PyInstaller script to use it, fixing package-relative imports.
+- Binary parser now requires exact payload lengths (`C=20`, `W=16`) before unpacking and records length errors.
+- Added HostComputer parser/GUI tests and a new Bridge test suite for enable ordering, injection gating, connection/status decoding, and cached IPC state.
+
+### Verification
+- `python -m unittest discover -s HostComputer -p test*.py`: 191 tests OK.
+- `python -m unittest discover -s FOC_Device_Bridge -p test*.py`: 4 tests OK.
+- `python -m compileall -q HostComputer FOC_Device_Bridge`: OK.
+- Bridge/launcher/transport import smoke: OK.
+- Firmware GCC build: 0 errors, 0 warnings; text=162744, data=504, bss=39008.
+- `FOC_Device_Bridge/build_bridge.ps1`: PyInstaller completed successfully.
+- Package output: `dist/FOC_Device_Bridge.exe` (168223836 bytes).
+- Hardware behavior was not tested because the controller was not available for this change.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: not committed yet
+- Status: working tree contains existing user changes plus this fix
+- Files:
+  - `MDK-ARM/code/wheel_input.c`
+  - `FOC_Device_Bridge/bridge_app.py`
+  - `FOC_Device_Bridge/ipc_server.py`
+  - `FOC_Device_Bridge/bridge_launcher.py`
+  - `FOC_Device_Bridge/build_bridge.ps1`
+  - `FOC_Device_Bridge/test_bridge.py`
+  - `HostComputer/transport.py`
+  - `HostComputer/serial_worker.py`
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/data_parser.py`
+  - `HostComputer/test_data_parser.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-10] SCROLL_WHEEL Fix Re-review
+
+### Problem / Task
+- Re-reviewed the eight fixes applied after the initial SCROLL_WHEEL implementation review, without changing functional code.
+
+### Resolution
+- Confirmed all eight reported fixes are present: bridge imports compile, the ACK contract uses `CUR_STREAM`, APP_MODE precedes session start, SerialOwner stays on the main Qt thread, APP_MODE is committed only after validation, detent crossing is bidirectional at 0.55 spacing, ISR/main delta exchange is protected, and the seventh GUI mode panel exists.
+- Found a remaining release blocker in session ownership: `WheelInput_Process()` still emits W frames while `session_active == 0`, the bridge injects every W event without checking its session state/flag, and the HostComputer advanced page can directly run the generic `APP_MODE,SCROLL_WHEEL -> ENABLE` sequence without starting a bridge session. This bypasses keepalive timeout protection and permits OS wheel injection outside the owned session.
+- Found an IPC state gap: `BridgeTransport.open()` treats named-pipe connectivity as device connectivity and ignores `CONN_STATE`, `WHEEL_STATUS`, and `ERROR` frames. The GUI can therefore report connected while the bridge has no COM device, and the new wheel status labels cannot update.
+- Found a packaging blocker: `build_bridge.ps1` passes `bridge_app.py` directly to PyInstaller, but that file uses package-relative imports. Running the configured entry point fails with `ImportError: attempted relative import with no known parent package`.
+- Found a parser hardening/test gap: known binary frame types are decoded without validating their required payload lengths (C=20, W=16), and the bridge directory currently has no automated tests.
+
+### Prevention / Follow-up
+- Make the bridge the sole owner of SCROLL_WHEEL activation: gate firmware W-frame output on an active session, gate `SendInput` on `STATE_WHEEL_ACTIVE` plus the W-frame session flag, and route/disable HostComputer's generic SCROLL_WHEEL arm controls.
+- Surface bridge device state and wheel status through `BridgeTransport` before treating IPC as a connected motor controller.
+- Package through a module-safe launcher or absolute imports, and add bridge/session/parser tests before creating the executable.
+
+### Verification
+- `python -m unittest discover -s HostComputer -p test*.py`: 188 tests OK.
+- `python -m compileall -q HostComputer FOC_Device_Bridge`: OK.
+- Python package imports for bridge/session/transport: OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware build 0 errors, 0 warnings; text=162608, data=504, bss=39008.
+- `python FOC_Device_Bridge\bridge_app.py`: fails at package-relative import, matching the current PyInstaller entry-point risk.
+- `python -m unittest discover -s FOC_Device_Bridge -p test*.py`: 0 tests discovered.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `PROGRESS.md`
+
+## [2026-07-10] SCROLL_WHEEL Implementation Code Review
+
+### Problem / Task
+- Reviewed the newly implemented SCROLL_WHEEL firmware mode, W-frame protocol, Windows bridge, HostComputer IPC transport, GUI integration, and build/test coverage.
+
+### Resolution
+- Firmware GCC build succeeds, and the existing HostComputer suite still passes, but the feature is not release-ready.
+- Found blocking bridge and lifecycle defects: `bridge_app.py` has a Python syntax error; the enable sequence expects `TELEM:CUR` while firmware returns `CUR_STREAM`; APP_MODE entry clears the wheel session created by the preceding session command; bridge serial methods are called directly from the wrong Qt thread; and SCROLL_WHEEL precheck failures can leave the mode selected and emit both FAIL and OK.
+- Found correctness gaps in the detent/event path: the event threshold effectively uses one full detent spacing instead of the documented 0.55 spacing, force feedback and event quantization use separate centers, and ISR/main-loop delta exchange is not synchronized.
+- Found integration/test gaps: the GUI exposes seven APP_MODE choices but only six stacked panels, bridge IPC reports pipe connectivity as device connectivity, and no automated tests cover W-frame parsing, bridge IPC/session behavior, or wheel quantization.
+
+### Prevention / Follow-up
+- Fix blocking bridge startup, ACK contract, session ordering/gating, mode precheck rollback, and Qt thread ownership before hardware flashing.
+- Add isolated tests for the generic binary parser, wheel quantizer, SessionManager, IPC transport, and fake wheel injection before packaging.
+
+### Verification
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 188 tests OK, but none cover the new bridge/wheel runtime.
+- `python -m compileall -q HostComputer FOC_Device_Bridge`: failed at `FOC_Device_Bridge/bridge_app.py:26` with `SyntaxError`.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: firmware build completed successfully; text=162616, data=504, bss=39008.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: working tree changes not committed yet
+- Files:
+  - `PROGRESS.md`
+
+## [2026-07-09] Current Stream Plot Freeze Mitigation
+
+### Problem / Task
+- User reported that the HostComputer waveform view freezes every time the current-stream acquisition switch is enabled.
+- Screenshot showed binary current samples still arriving (`rx` around 1 kfps) while the plotted traces stopped updating, and angle/telemetry channels were mixed with mA current channels on one Y axis.
+
+### Resolution
+- Found a GUI hot-path bug in `_get_current_stream_plot_data()`: each current sample called `_sample_time_s()`, which recalculated measured fps by copying the full current ring. With a 20k-sample ring this degraded toward O(n²) per plot refresh.
+- Reworked the current-stream plot path to take one ring snapshot, estimate fps once, crop to the visible tail while following latest, and decimate to a fixed 3000-point budget.
+- When enabling the current-stream acquisition group, the GUI now resets the current-stream time origin/ring/parser stats and switches the plot to Ia/Ib/Ic-only view so angle/speed/voltage no longer distort the current waveform Y axis.
+- Added regression tests for one-snapshot plotting and current-only channel selection on acquisition enable.
+
+### Verification
+- `python -m unittest HostComputer.test_main_window HostComputer.test_gui_logic HostComputer.test_data_parser`: 174 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 185 tests OK.
+
+### Second Freeze Update
+- User reported that after the first mitigation the whole GUI could still freeze and eventually show `not connected`; screenshot showed the ring continuing to fill while the visible X window stopped near 3s and `rx` briefly reported an impossible ~20kfps.
+- Decoupled current-stream sample arrival from plotting: sample batches now only establish the sequence origin, while the chart timer pulls snapshots at a fixed GUI refresh rate.
+- Changed current-stream X axis to use `seq / configured_rate` (`BIN 1kHz` = 1000 fps, `BIN 2kHz` = 2000 fps) instead of payload `tick_ms` or jittery measured fps.
+- Cached plot legend rebuilds and guarded programmatic `setXRange()` so it cannot disable follow-latest as if the user had panned/zoomed.
+- Changed the current-stream stats label to calculate `rx fps` from real wall-clock elapsed time so GUI stalls do not produce fake 20kfps readings.
+- Added regression tests for configured-rate time axes and timer-driven current-stream refresh.
+- Latest verification: `python -m unittest HostComputer.test_main_window HostComputer.test_gui_logic HostComputer.test_data_parser`: 177 tests OK.
+- Latest verification: `python -m unittest discover -s HostComputer -p "test*.py"`: 188 tests OK.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: not committed yet
+- Status: working tree has existing unrelated/user changes plus this HostComputer fix
+- Files:
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
+## [2026-07-09] APP_MODE Preset ACK Timeout Root Cause
+
+### Problem / Task
+- User reported that DETENT knob mode was now usable, but switching presets caused ACK timeout and the cause was unclear after debugging.
+
+### Resolution
+- Found that the sequence-specific `build_app_mode_command()` returned `CMD:APP_MODE,<mode>` without a trailing newline, while `SerialService.send_command()` writes the string exactly as provided and does not append `\n`.
+- Because preset/config flows start with `APP_MODE -> DETENT:CFG` / `SPRING:CFG`, the firmware never received a complete APP_MODE line, so it never ACKed and the sequence timed out before the preset command was sent.
+- Fixed `build_app_mode_command()` to reuse `CommandBuilder.app_mode_set()`, making every sequence APP_MODE command newline-terminated and validated.
+- Fixed `_on_hold_lock()` to actually dispatch `CMD:APP_MODE,HOLD\n`; it previously built a sequence and returned without sending.
+- Added tests to lock in newline-terminated APP_MODE sequence commands and HOLD dispatch behavior.
+
+### Prevention / Follow-up
+- Treat all outbound serial commands as full line protocol frames; helper functions used by sequences must return newline-terminated strings.
+- Hardware check: click a DETENT preset and confirm the TX log shows `CMD:APP_MODE,DETENT` followed by `DETENT:CFG,...`, with no ACK timeout.
+
+### Verification
+- `python -m unittest HostComputer.test_gui_logic HostComputer.test_main_window HostComputer.test_data_parser`: 173 tests OK.
+- `python -m unittest discover -s HostComputer -p "test*.py"`: 184 tests OK.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`: build completed successfully, 0 errors, 0 warnings; text=159048, bss=38896.
+
+### Commit
+- Branch: `codex/sync-main-20260519`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: `working tree changes not committed yet`
+- Files:
+  - `HostComputer/gui_logic.py`
+  - `HostComputer/main_window.py`
+  - `HostComputer/test_gui_logic.py`
+  - `HostComputer/test_main_window.py`
+  - `PROGRESS.md`
+
 ## [2026-07-07] APP_MODE Sync And UART ACK Release Candidate
 
 ### Problem / Task
@@ -22,8 +892,8 @@
 
 ### Commit
 - Branch: `codex/sync-main-20260519`
-- Commit: `pending release commit`
-- Status: `working tree changes not committed yet`
+- Commit: `09536c5dc598cb20f1f203c06805bdd0976813bb`
+- Status: `committed in v1.2.0-APP_MODE_SYNC; later working tree changes exist`
 - Files:
   - `Core/Src/stm32h7xx_it.c`
   - `Core/Src/usart.c`

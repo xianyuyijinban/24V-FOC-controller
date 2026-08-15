@@ -118,10 +118,13 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 | `DIAG:FAULT_DETAIL` | — | Full fault diagnostic snapshot |
 | `DIAG:JDIAG` | — | Inertia identification diagnostic |
 | `DIAG:PWM_DIAG` | — | Real-time PWM/timing/current diagnostic |
+| `DIAG:UART_RX?` | — | UART RX health and cumulative P0/P1/P2 TX admission-drop counters |
 | `DIAG:TLE_RAW` | — | TLE5012B raw sensor readout |
 | `DIAG:TLE_GPIO,0\|1` | `int` | Start/stop TLE5012 GPIO diagnostic (5s) |
+| `DIAG:FOC_TIME?` | - | Query DWT timing statistics for FOC and TIM1 control paths |
+| `DIAG:FOC_TIME,CLEAR` | - | Clear timing statistics and restart IRQ-period measurement |
 
-**Legacy**: `CMD:FAULT_DETAIL`, `CMD:JDIAG`, `CMD:PWM_DIAG`, `CMD:TLE_RAW`, `CMD:TLE_GPIO_DIAG,N`
+**Legacy**: `CMD:FAULT_DETAIL`, `CMD:JDIAG`, `CMD:PWM_DIAG`, `CMD:UART_RX_STAT?`, `CMD:FOC_TIME?`, `CMD:FOC_TIME,CLEAR`, `CMD:TLE_RAW`, `CMD:TLE_GPIO_DIAG,N`
 
 ---
 

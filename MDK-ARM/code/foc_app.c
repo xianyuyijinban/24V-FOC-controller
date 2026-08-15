@@ -6,6 +6,11 @@
 
 #include "foc_app.h"
 #include "current_stream.h"
+#include "foc_profiler.h"
+#include "wheel_input.h"
+#include "tle5012.h"
+#include "uart_upload.h"
+#include "cogging_lut_cal.h"
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
@@ -107,7 +112,15 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->detent_count    = FOC_DETENT_COUNT_DEFAULT;
     handle->detent_strength = FOC_DETENT_STRENGTH_DEFAULT;
     handle->detent_width_rad= FOC_DETENT_WIDTH_DEFAULT;
+    handle->detent_damping  = FOC_DETENT_DAMPING_DEFAULT;
     handle->detent_limit_A  = FOC_DETENT_LIMIT_DEFAULT;
+    /* SCROLL_WHEEL independent config */
+    handle->wheel_count     = FOC_WHEEL_COUNT_DEFAULT;
+    handle->wheel_strength  = FOC_WHEEL_STRENGTH_DEFAULT;
+    handle->wheel_width_rad = FOC_WHEEL_WIDTH_DEFAULT;
+    handle->wheel_damping   = FOC_WHEEL_DAMPING_DEFAULT;
+    handle->wheel_limit_A   = FOC_WHEEL_LIMIT_DEFAULT;
+    handle->wheel_cfg_active = 0U;
     BlackBox_Init();                           /* Phase 5A */
     handle->joint_pos_limit_min_rad = -0.524f;  /* -30 deg */
     handle->joint_pos_limit_max_rad =  0.524f;  /* +30 deg */
@@ -146,6 +159,20 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
                         FOC_POSITION_PD_KD_DEFAULT,
                         handle->position_speed_limit_radps,
                         -handle->position_speed_limit_radps);
+
+    /* 初始化位置环直连PD控制器 - 输出力矩给定 A（判别实验，默认关闭） */
+    FOC_PositionPD_Init(&handle->pos_pd_direct,
+                        FOC_POS_DIRECT_KP_DEFAULT,
+                        FOC_POS_DIRECT_KD_DEFAULT,
+                        FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A,
+                        -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A);
+    handle->pos_direct = 0U;
+    handle->pos_direct_iq_cmd = 0.0f;
+    handle->pos_direct_ki = FOC_POS_DIRECT_KI_DEFAULT;
+    handle->pos_integral = 0.0f;
+    handle->pos_cmd_dir = 0.0f;
+    handle->pos_cmd_dir_hold = 0U;
+    handle->pos_ref_prev = handle->pos_ref;
     
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
@@ -154,8 +181,17 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->cogging_lut.gain = 0.25f;
     handle->cogging_lut.phase_offset_rad = FOC_PI / 3.0f;  /* +60 deg */
 
+    /* 静摩擦补偿运行时幅值默认 (overridable via CMD:FRIC_COMP) */
+    handle->fric_comp_pos = FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A;
+    handle->fric_comp_neg = FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A;
+
     /* 尝试加载参数 */
     FOC_App_LoadParam(handle);
+    /* 标定齿槽 LUT 覆盖(替代识别/Flash 低质 LUT; 2026-08-14 台架标定, encoder_dir=-1 已对齐) */
+    memcpy(handle->cogging_lut.table, COGGING_LUT_CAL, sizeof(float) * FOC_COGGING_LUT_SIZE);
+    handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
+    handle->cogging_lut.valid = 1U;
+    handle->cogging_lut.gain = 1.0f;
     FOC_App_UpdateIdentifyState(handle);
     
     /* 如果参数有效，更新控制环参数 */
@@ -482,7 +518,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         }
     } else {
         /* 执行FOC计算 */
+        uint32_t foc_run_start = FOC_Profiler_Begin();
         FOC_Run(&handle->foc);
+        FOC_Profiler_End(FOC_PROBE_FOC_RUN, foc_run_start);
     }
     
     /* 更新PWM */
@@ -911,6 +949,17 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             iq_ref_mech = 0.0f;
             goto haptic_torque_injection;
         }
+        /* ── 位置环直连电流环 (判别实验): 跳过速度PI，位置环力矩指令
+         *    直接进FF层(齿槽LUT/摩擦/惯量)与静摩擦补偿 ── */
+        if ((handle->control_mode == FOC_MODE_POSITION) && (handle->pos_direct != 0U)) {
+            handle->pi_speed.integral = 0.0f;
+            FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 直连：速度误差不参与控制 */
+            iq_ref_mech = FOC_Saturate(handle->pos_direct_iq_cmd, iq_limit_pos, iq_limit_neg);
+            handle->speed_loop_p_iq = iq_ref_mech;
+            handle->speed_loop_i_iq = 0.0f;
+            handle->speed_i_state = 5U;  /* 5 = pos_direct bypass */
+            goto ff_layers;
+        }
         /* ── Speed PI with conditional integration ── */
         {
             float p_iq = handle->pi_speed.Kp * speed_error;
@@ -920,11 +969,13 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             if (handle->control_mode == FOC_MODE_SPEED && handle->enable_pwm != 0U) {
                 float abs_sref = fabsf(speed_ref_temp);
 
-                if (abs_sref < 0.02f) {
-                    /* SREF too small: clear integrator to prevent residual creep */
+                if (abs_sref < 0.0005f) {
+                    /* SREF ~0 (静止): clear integrator to prevent residual creep.
+                     * 原阈值0.02rad/s把0.1°/s(=0.0017)也清了积分→速度环P-only→低速无法
+                     * 克服静摩擦不动(实测速度模式0.1°/s仅15%)。下调后极低速可积分。 */
                     handle->pi_speed.integral = 0.0f;
                     i_state = 3U;  /* cleared */
-                } else if (abs_sref >= 0.05f && fabsf(speed_error) >= 0.02f) {
+                } else if (abs_sref >= 0.0005f && fabsf(speed_error) >= 0.0005f) {
                     /* Active zone: allow integration */
                     handle->pi_speed.integral += speed_error;
                     i_state = 1U;  /* active */
@@ -975,6 +1026,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             handle->speed_i_state = i_state;
         }
 
+ff_layers:
         /* P2: Acceleration / Inertia Feedforward
          * alpha = d(speed_ref_ramped)/dt, Iq_ff = J * alpha / Kt (Kt ≈ Ke in SI)
          * 门禁: J必须在[FOC_FF_INERTIA_J_MIN, FOC_FF_INERTIA_J_MAX], B<=FOC_FF_INERTIA_B_MAX
@@ -1024,10 +1076,34 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             if (friction_allowed) {
                 float omega = speed_mech_user;  /* 使用用户坐标速度，不用裸speed_mech */
                 float friction_total = 0.0f;
-                /* Coulomb: constant magnitude with sign direction, deadband near zero */
+                /* Coulomb: 高速用速度方向, 位置模式低速/静止用指令方向(pos_cmd_dir, 方向锁存)
+                 * —— 原死区0.05rad/s 使 2°/s(=0.035) 低速库仑前馈从不触发, 导致爬行。
+                 * 指令方向兜底后, 低速匀速也有连续库仑前馈(Tc/Kt), 消除死区爬行。 */
+                float coulomb_dir;
                 if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
-                    friction_total += (omega > 0.0f) ?
-                        (handle->motor_param.Tc / Kt) : (-handle->motor_param.Tc / Kt);
+                    coulomb_dir = (omega > 0.0f) ? 1.0f : -1.0f;
+                } else if ((handle->control_mode == FOC_MODE_POSITION) &&
+                           (handle->pos_cmd_dir != 0.0f)) {
+                    coulomb_dir = handle->pos_cmd_dir;
+                } else {
+                    coulomb_dir = 0.0f;
+                }
+                if (coulomb_dir != 0.0f) {
+                    /* 幅值: POSITION 用静摩擦 fric_comp(极低速0.1°/s起动需0.09A, Tc/Kt=0.06不足致爬行),
+                     * Stribeck 随速度衰减到动摩擦比例(2°/s→~0.03A)。其他模式用识别 Tc/Kt。 */
+                    float fric;
+                    if (handle->control_mode == FOC_MODE_POSITION) {
+                        fric = (coulomb_dir > 0.0f) ?
+                               handle->fric_comp_pos : handle->fric_comp_neg;
+                    } else {
+                        fric = handle->motor_param.Tc / Kt;
+                    }
+                    float coulomb = coulomb_dir * fric;
+                    /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。 */
+                    float stick = expf(-fabsf(omega) / FOC_FRIC_STRIBECK_VS_RADPS);
+                    float smooth = FOC_FRIC_STRIBECK_KINEMATIC
+                                   + (1.0f - FOC_FRIC_STRIBECK_KINEMATIC) * stick;
+                    friction_total += coulomb * smooth;
                 }
                 /* Viscous: proportional to speed */
                 friction_total += handle->motor_param.B * omega / Kt;
@@ -1143,30 +1219,32 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             ((speed_ref_temp * speed_error) > 0.0f)) {
             friction_dir = speed_ref_temp;
         } else if (handle->control_mode == FOC_MODE_POSITION) {
-            float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
-            float theta_mech_control = theta_mech_zeroed * encoder_dir;
-            float pos_error_for_friction = FOC_AngleNormalize(handle->pos_ref - theta_mech_control);
-            if (fabsf(pos_error_for_friction) > FOC_POSITION_STATIC_FRICTION_ENTER_RAD) {
-                handle->position_friction_active = 1U;
-            } else if (fabsf(pos_error_for_friction) < FOC_POSITION_STATIC_FRICTION_EXIT_RAD) {
-                handle->position_friction_active = 0U;
-            }
-            if (handle->position_friction_active != 0U) {
-                friction_dir = pos_error_for_friction;
-            }
+            /* 低速静摩擦前馈统一由 FF 层库仑处理(fric_comp + pos_cmd_dir方向兜底 + Stribeck),
+             * 此处禁用避免双重补偿(实测双份过冲: 匀速从1.8→1.25°/s恶化)。 */
+            friction_dir = 0.0f;
         }
 
         if (friction_dir != 0.0f) {
             if (handle->control_mode == FOC_MODE_POSITION) {
                 friction_comp = (friction_dir > 0.0f) ?
-                                FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A :
-                                FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A;
+                                handle->fric_comp_pos :
+                                handle->fric_comp_neg;
             } else {
                 friction_comp = (friction_dir > 0.0f) ?
                                 FOC_SPEED_STATIC_FRICTION_POS_COMP_A :
                                 FOC_SPEED_STATIC_FRICTION_NEG_COMP_A;
             }
             friction_delta = (friction_dir > 0.0f) ? friction_comp : -friction_comp;
+            /* Stribeck 平滑: 起动(低速)给满静摩擦, 随速度指数衰减到动摩擦。
+             * 恒定 bang-bang 补偿在匀速时持续给满力, 电机冲过头→位置环拉回→
+             * 极限环粘滑。平滑后高速衰减, 仅低速补静摩擦, 消除振荡。 */
+            {
+                float v_mag = fabsf(speed_mech_user);
+                float stick = expf(-v_mag / FOC_FRIC_STRIBECK_VS_RADPS);
+                float smooth = FOC_FRIC_STRIBECK_KINEMATIC
+                               + (1.0f - FOC_FRIC_STRIBECK_KINEMATIC) * stick;
+                friction_delta *= smooth;
+            }
             iq_ref_mech += friction_delta;
             iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
         }
@@ -1214,7 +1292,40 @@ haptic_torque_injection:
             detent_torque = FOC_Saturate(detent_torque,
                                          handle->detent_limit_A,
                                         -handle->detent_limit_A);
+            /* Detent damping: oppose motion to prevent overshoot oscillation */
+            detent_torque -= handle->detent_damping * speed_feedback;
             iq_ref_mech += detent_torque;
+        } else if (handle->app_mode == APP_MODE_SCROLL_WHEEL && handle->motor_identified) {
+            /* SCROLL_WHEEL: same detent algorithm as DETENT, independent config.
+             * Additionally feeds wheel_input for event generation. */
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            float wheel_spacing = (2.0f * FOC_PI) / handle->wheel_count;
+            float nearest = roundf(pos_rad / wheel_spacing) * wheel_spacing;
+            float wheel_error = FOC_AngleNormalize(nearest - pos_rad);
+            float wheel_torque = handle->wheel_strength * wheel_error;
+            /* Width: ramp down outside wheel_width */
+            {
+                float half_w = handle->wheel_width_rad * 0.5f;
+                float abs_e = fabsf(wheel_error);
+                if (abs_e > handle->wheel_width_rad) {
+                    wheel_torque = 0.0f;
+                } else if (abs_e > half_w) {
+                    float ramp = 1.0f - (abs_e - half_w) / half_w;
+                    wheel_torque *= (ramp > 0.0f) ? ramp : 0.0f;
+                }
+            }
+            wheel_torque = FOC_Saturate(wheel_torque,
+                                        handle->wheel_limit_A,
+                                       -handle->wheel_limit_A);
+            wheel_torque -= handle->wheel_damping * speed_feedback;
+            iq_ref_mech += wheel_torque;
+
+            /* Feed wheel_input for detent quantization & event generation */
+            WheelInput_Update(pos_rad, speed_feedback,
+                              (uint8_t)(handle->enable_pwm != 0U),
+                              (uint8_t)(1U /* encoder_valid checked on entry */));
         }
         iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
 
@@ -1272,7 +1383,8 @@ haptic_torque_injection:
 static uint8_t FOC_App_IsHapticMode(const FOC_AppHandle_t *handle)
 {
     return (handle->app_mode == APP_MODE_SPRING_DAMPER ||
-            handle->app_mode == APP_MODE_DETENT) ? 1U : 0U;
+            handle->app_mode == APP_MODE_DETENT ||
+            handle->app_mode == APP_MODE_SCROLL_WHEEL) ? 1U : 0U;
 }
 
 void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
@@ -1289,6 +1401,14 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         return;
     }
 
+    /* 非位置模式/非运行时清零低速静摩擦状态（积分+指令方向） */
+    if ((handle->state != FOC_STATE_RUNNING) ||
+        (handle->control_mode != FOC_MODE_POSITION)) {
+        handle->pos_integral = 0.0f;
+        handle->pos_cmd_dir = 0.0f;
+        handle->pos_cmd_dir_hold = 0U;
+    }
+
     /* 位置环（仅在位置模式且运行状态执行） */
     if (handle->state == FOC_STATE_RUNNING && 
         handle->control_mode == FOC_MODE_POSITION) {
@@ -1303,8 +1423,63 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         /* 处理角度环绕（最短路径） */
         pos_error = FOC_AngleNormalize(pos_error);
 
+        /* 指令方向锁存(慢摇连续静摩擦补偿方向源, 级联与直连共用):
+         * ref 有增量→方向=sign(增量)并重置保持窗口; hold窗口内(ref刚动过,
+         * 含PC步进间歇期)方向保持——否则PC每0.2s步进时 ref_delta 间歇为0
+         * 会误清方向导致补偿5Hz间歇、长斜坡爬行; hold耗尽后 到位或误差反向→清0。
+         * 注意: pos_ref 为 control frame(=用户角×encoder_dir), 方向/误差须转回
+         * 用户坐标再判, 否则 encoder_dir=-1 时补偿方向反(正向运动 dir=-1 帮倒忙)。 */
+        float enc_dir_f = encoder_dir_f;
+        float ref_delta = (handle->pos_ref - handle->pos_ref_prev) * enc_dir_f;
+        float pos_err_user = pos_error * enc_dir_f;
+        handle->pos_ref_prev = handle->pos_ref;
+        if (fabsf(ref_delta) > FOC_FRIC_CMD_DIR_UPDATE_RAD) {
+            handle->pos_cmd_dir = (ref_delta > 0.0f) ? 1.0f : -1.0f;
+            handle->pos_cmd_dir_hold = FOC_FRIC_CMD_DIR_HOLD_CNT;
+        } else if (handle->pos_cmd_dir_hold > 0U) {
+            handle->pos_cmd_dir_hold--;
+        } else if (fabsf(pos_err_user) < FOC_FRIC_CMD_DIR_CLEAR_RAD) {
+            handle->pos_cmd_dir = 0.0f;
+        } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
+            handle->pos_cmd_dir = 0.0f;
+        }
+
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
         float pos_pd_out = FOC_PositionPD_Update(&handle->pos_pd, pos_error, speed_mech_user_pos);
+
+        /* 位置环直连电流环 (判别实验)：
+         * 直连PD输出直接作为力矩指令(A)，跳过速度环PI，速度环只保留
+         * FF层(齿槽/摩擦/惯量)与静摩擦补偿。speed_ref 清零避免
+         * speed_ref_ramped 斜坡把惯量FF带起来。
+         * 叠加低速条件积分(消除静摩擦稳态误差): 仅 |err|<2° 积分, PD饱和
+         * 冻结(抗windup), 积分输出限幅±0.10A。 */
+        if (handle->pos_direct != 0U) {
+            float pd_out = FOC_PositionPD_Update(
+                &handle->pos_pd_direct, pos_error, speed_mech_user_pos);
+            uint8_t pd_sat = ((pd_out >= handle->pos_pd_direct.output_max) ||
+                              (pd_out <= handle->pos_pd_direct.output_min)) ? 1U : 0U;
+            if ((pd_sat == 0U) && (fabsf(pos_error) < FOC_POS_INTEGRAL_ERR_RAD)) {
+                handle->pos_integral += pos_error * FOC_POS_LOOP_TS;
+            }
+            float ki_out = handle->pos_direct_ki * handle->pos_integral;
+            if (ki_out > FOC_POS_INTEGRAL_LIMIT_A) {
+                ki_out = FOC_POS_INTEGRAL_LIMIT_A;
+            } else if (ki_out < -FOC_POS_INTEGRAL_LIMIT_A) {
+                ki_out = -FOC_POS_INTEGRAL_LIMIT_A;
+            }
+            handle->pos_direct_iq_cmd = FOC_Saturate(
+                pd_out + ki_out,
+                handle->pos_pd_direct.output_max,
+                handle->pos_pd_direct.output_min);
+            handle->speed_ref = 0.0f;
+            handle->speed_ref_ramped = 0.0f;
+            handle->position_loop_error_diag = pos_error;
+            handle->position_loop_pd_out_diag = handle->pos_direct_iq_cmd;
+            handle->position_loop_pd_sat_diag = pd_sat;
+            handle->traj_active_diag = 0U;
+            handle->traj_cmd_diag = handle->pos_direct_iq_cmd;
+            return;
+        }
 
         /* V5 巡航速度下限：大误差时维持最低巡航速度，避免末端渐近慢尾
          * 使用运行时配置，若 cruise > speed_limit 则自动夹紧 */
@@ -1383,6 +1558,12 @@ void FOC_App_Enable(FOC_AppHandle_t *handle)
     uint8_t stall_enable = 0U;
 
     if ((handle == NULL) || !handle->power_unlocked) {
+        return;
+    }
+
+    if ((handle->app_mode == APP_MODE_SCROLL_WHEEL) &&
+        !WheelInput_IsSessionActive()) {
+        handle->enable_pwm = 0U;
         return;
     }
 
@@ -1783,6 +1964,21 @@ void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
                         -handle->position_speed_limit_radps);
 }
 
+void FOC_App_SetPosDirectPDGains(FOC_AppHandle_t *handle, float kp, float kd)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    /* 直连PD输出限幅固定为位置模式Iq限幅（力矩域） */
+    FOC_PositionPD_Init(&handle->pos_pd_direct,
+                        kp,
+                        kd,
+                        FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A,
+                        -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A);
+    handle->pos_direct_iq_cmd = 0.0f;
+}
+
 /**
  * @brief 设置控制模式
  * @param handle FOC应用层句柄指针
@@ -1856,7 +2052,6 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
 {
     if (handle == NULL) return;
 
-    handle->app_mode = mode;
     handle->pi_speed.integral = 0.0f;
     handle->position_friction_active = 0U;
 
@@ -1935,7 +2130,54 @@ void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode)
             }
         }
         break;
+
+    case APP_MODE_SCROLL_WHEEL:
+        /* SCROLL_WHEEL: requires identified motor + encoder online.
+         * Capture nearest detent as starting position, zero the wheel
+         * input state, and turn off current stream. */
+        if (!handle->motor_identified) {
+            DrvUart_SendTextP0("APP_MODE,FAIL,not_identified\r\n");
+            return;
+        }
+        if (!TLE5012_IsDataValid()) {
+            DrvUart_SendTextP0("APP_MODE,FAIL,no_encoder\r\n");
+            return;
+        }
+        /* Disable high-frequency current stream to avoid latency */
+        CurStream_SetMode(CUR_STREAM_OFF, 0);
+        handle->control_mode = FOC_MODE_POSITION;
+        FOC_App_RefreshEncoderFeedback(handle);
+        {
+            float theta_mech_zeroed = FOC_AngleNormalize(
+                handle->theta_mech - handle->motor_param.mech_zero_offset);
+            float pos_rad = FOC_App_PositionSensorToControlFrame(handle, theta_mech_zeroed);
+            if (handle->wheel_count > 0.5f) {
+                float spacing = (2.0f * FOC_PI) / handle->wheel_count;
+                pos_rad = roundf(pos_rad / spacing) * spacing;
+            }
+            handle->pos_ref = FOC_AngleNormalize(pos_rad);
+            handle->position_ref_user_set = 1U;
+        }
+        handle->speed_ref = 0.0f;
+        handle->speed_ref_ramped = 0.0f;
+        handle->wheel_cfg_active = 1U;
+        /* Sync wheel_input config from handle defaults */
+        {
+            WheelConfig_t wcfg;
+            wcfg.count     = handle->wheel_count;
+            wcfg.strength  = handle->wheel_strength;
+            wcfg.width_rad = handle->wheel_width_rad;
+            wcfg.damping   = handle->wheel_damping;
+            wcfg.limit_A   = handle->wheel_limit_A;
+            WheelInput_ApplyConfig(&wcfg);
+        }
+        WheelInput_ResetState();
+        break;
     }
+
+    /* Only commit app_mode after validation passes (SCROLL_WHEEL may
+     * have returned early on prereq failure — see P1-5 fix). */
+    handle->app_mode = mode;
 }
 
 void FOC_App_SetJointLimits(FOC_AppHandle_t *handle, float min_rad, float max_rad)
@@ -1965,18 +2207,44 @@ void FOC_App_SetSpringCfg(FOC_AppHandle_t *handle, float K, float D, float limit
     handle->spring_limit_A = limit;
 }
 
-void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float limit)
+void FOC_App_SetDetentCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit)
 {
     if (handle == NULL) return;
     if (count < 1.0f) count = 1.0f;
     if (strength < 0.0f) strength = 0.0f;
     if (width < 0.01f) width = 0.01f;
+    if (damping < 0.0f) damping = 0.0f;
     if (limit < 0.01f) limit = 0.01f;
     if (limit > 1.0f) limit = 1.0f;
     handle->detent_count = count;
     handle->detent_strength = strength;
     handle->detent_width_rad = width;
+    handle->detent_damping = damping;
     handle->detent_limit_A = limit;
+}
+
+void FOC_App_SetWheelCfg(FOC_AppHandle_t *handle, float count, float strength, float width, float damping, float limit)
+{
+    WheelConfig_t wcfg;
+    if (handle == NULL) return;
+    if (count < 1.0f) count = 1.0f;
+    if (strength < 0.0f) strength = 0.0f;
+    if (width < 0.01f) width = 0.01f;
+    if (damping < 0.0f) damping = 0.0f;
+    if (limit < 0.01f) limit = 0.01f;
+    if (limit > 1.0f) limit = 1.0f;
+    handle->wheel_count     = count;
+    handle->wheel_strength  = strength;
+    handle->wheel_width_rad = width;
+    handle->wheel_damping   = damping;
+    handle->wheel_limit_A   = limit;
+    /* Sync to wheel_input module */
+    wcfg.count     = count;
+    wcfg.strength  = strength;
+    wcfg.width_rad = width;
+    wcfg.damping   = damping;
+    wcfg.limit_A   = limit;
+    WheelInput_ApplyConfig(&wcfg);
 }
 
 void FOC_App_SetVoltageThresholds(FOC_AppHandle_t *handle, float undervoltage, float overvoltage)

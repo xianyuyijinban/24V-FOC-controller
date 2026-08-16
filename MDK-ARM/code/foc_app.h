@@ -62,8 +62,8 @@ extern "C" {
 #define FOC_SPEED_REF_MAX_RAD_PER_S        8.0f /* RAW SPEED SREF safety clamp */
 #define FOC_CURRENT_LOOP_KP_12V_BENCH       0.50f /* ARR=11999 post-resolution baseline: clean bidirectional tracking. */
 #define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* P-only baseline; Ki to be reintroduced in small steps later. */
-#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.12f /* 静摩擦幅值 A(FF库仑 Stribeck 极低速起动用, 实测静摩擦启动0.09A) */
-#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.12f /* 正反向对称 */
+#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.022f /* 静摩擦幅值 A (2026-08-16 定版: rs=1.0 交付后缩放, 实测摩擦启动0.025A) */
+#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.022f /* 正反向对称 */
 #define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */
 #define FOC_POSITION_PD_KD_DEFAULT 0.12f /* 12V台架位置模式默认速度阻尼 */
 
@@ -71,9 +71,9 @@ extern "C" {
  * 直连时位置环PD输出单位为 A(力矩)，跳过速度环PI直接进FF层+电流环。
  * 增益起点 = 级联等效: KP_PD(4.0) × Kp_speed(0.25) = 1.0 A/rad,
  *                KD_PD(0.12) × Kp_speed(0.25) = 0.03 A/(rad/s) */
-#define FOC_POS_DIRECT_KP_DEFAULT 0.5f  /* 直连刚度 A/rad (定版 2026-08-14) */
-#define FOC_POS_DIRECT_KD_DEFAULT 0.03f /* 直连阻尼 A/(rad/s) */
-#define FOC_POS_DIRECT_KI_DEFAULT 1.5f  /* 直连位置环积分增益 A/(rad·s) (低速静摩擦消除) */
+#define FOC_POS_DIRECT_KP_DEFAULT 0.49f /* 直连刚度 A/rad (2026-08-16 定版: rs=1.0 交付后缩放) */
+#define FOC_POS_DIRECT_KD_DEFAULT 0.007f /* 直连阻尼 A/(rad/s) (rs=1.0 缩放) */
+#define FOC_POS_DIRECT_KI_DEFAULT 0.37f  /* 直连位置环积分增益 A/(rad·s) (rs=1.0 缩放) */
 #define FOC_POS_INTEGRAL_LIMIT_A 0.10f  /* 直连位置环积分输出限幅 A */
 #define FOC_POS_LOOP_TS 0.005f          /* 位置环周期 200Hz */
 #define FOC_POS_INTEGRAL_ERR_RAD 0.035f /* 条件积分误差上限 rad(~2°)，大误差不积分避免加剧过冲 */

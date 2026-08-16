@@ -10,7 +10,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from data_parser import CommandBuilder, FOCDataPacket
 from gui_logic import build_adc_noise_command, parse_adc_noise_response

@@ -828,13 +828,13 @@ class CommandBuilder:
 
     @staticmethod
     def detent_cfg_query() -> str:
-        """Query detent config. Response: DETENT:CFG,OK,count=X,strength=Y.YYY,width=Z.ZZZ,limit=W.WWW"""
+        """Query detent config. Response: DETENT:CFG,OK,count=X,strength=Y.YYY,width=Z.ZZZ,damping=D.DDD,limit=W.WWW"""
         return "DETENT:CFG?\n"
 
     @staticmethod
-    def detent_cfg_set(count: int, strength: float, width: float, limit: float) -> str:
-        """Set detent params: count, strength, width, torque limit."""
-        return f"DETENT:CFG,{int(count)},{strength:.3f},{width:.3f},{limit:.3f}\n"
+    def detent_cfg_set(count: int, strength: float, width: float, damping: float, limit: float) -> str:
+        """Set detent params: count, strength, width, damping, torque limit."""
+        return f"DETENT:CFG,{int(count)},{strength:.3f},{width:.3f},{damping:.3f},{limit:.3f}\n"
 
     # ── Telemetry Stream Control ───────────────────────────────────────────
 
@@ -870,22 +870,66 @@ class CurrentSample:
     flags: int = 0
 
 
+@dataclass
+class WheelEvent:
+    """Wheel event from the SCROLL_WHEEL product mode (W-frame).
+
+    Payload (16 bytes, little-endian):
+      0-1:   seq            uint16
+      2-5:   tick_ms        uint32
+      6-7:   delta_steps    int16
+      8-11:  position_steps int32
+      12-13: speed_mrad_s   int16
+      14-15: flags          uint16
+    """
+    seq: int = 0
+    tick_ms: int = 0
+    delta_steps: int = 0
+    position_steps: int = 0
+    speed_mrad_s: int = 0
+    flags: int = 0
+
+    @property
+    def motor_running(self) -> bool:
+        return bool(self.flags & 1)
+
+    @property
+    def encoder_valid(self) -> bool:
+        return bool(self.flags & 2)
+
+    @property
+    def delta_coalesced(self) -> bool:
+        return bool(self.flags & 4)
+
+    @property
+    def session_active(self) -> bool:
+        return bool(self.flags & 8)
+
+
 class BinaryCurrentParser:
-    """Scans byte stream for A5 5A binary current frames, validates CRC-8,
-    and returns decoded CurrentSample objects. Residual text bytes are returned
+    """Scans byte stream for A5 5A binary frames, validates CRC-8,
+    and returns decoded objects. Residual text bytes are returned
     for the ASCII line parser.
 
-    Binary frame format (25 bytes):
-      0-1:   Sync  0xA5 0x5A
-      2:     Type  0x43 ('C')
-      3:     Len   20
-      4-23:  Payload (20 bytes, little-endian)
-      24:    CRC-8 (poly 0x07, init 0x00, over bytes 0-23)
+    Supports variable-length frames (payload_len read from byte 3):
+      - Type 'C' (0x43): CurrentSample (payload 20 bytes)
+      - Type 'W' (0x57): WheelEvent (payload 16 bytes)
+      - Unknown types: skipped and counted
+
+    Frame envelope:
+      0-1:   Sync   0xA5 0x5A
+      2:     Type   'C' (0x43) or 'W' (0x57)
+      3:     Len    payload length in bytes
+      4-...: Payload (Len bytes, little-endian)
+      Last:  CRC-8  (poly 0x07, init 0x00, over bytes 0 to 4+len-1)
     """
 
     SYNC = b'\xA5\x5A'
-    FRAME_LEN = 25
-    PAYLOAD_LEN = 20
+    MIN_FRAME_LEN = 6   # sync(2) + type(1) + len(1) + crc(1) = 5, round to 6
+    TYPE_CURRENT = 0x43  # 'C'
+    TYPE_WHEEL   = 0x57  # 'W'
+    CURRENT_PAYLOAD_LEN = 20
+    WHEEL_PAYLOAD_LEN = 16
 
     # CRC-8 table (poly 0x07, init 0x00)
     _CRC8_TABLE = [
@@ -929,24 +973,40 @@ class BinaryCurrentParser:
         self.frames_decoded: int = 0
         self.last_seq: int = -1
         self.seq_gaps: int = 0
+        self.unknown_types: int = 0
+        self.length_errors: int = 0
+        # Per-type seq tracking for gap detection
+        self._last_seq_by_type: dict = {}
 
     def reset_stats(self):
         self.crc_errors = 0
         self.frames_decoded = 0
         self.last_seq = -1
         self.seq_gaps = 0
+        self.unknown_types = 0
+        self.length_errors = 0
+        self._last_seq_by_type.clear()
 
     def feed(self, data: bytes) -> Tuple[List[CurrentSample], bytes]:
-        """Feed raw bytes. Returns (samples, residual_text_bytes).
+        """Feed raw bytes. Returns (current_samples, residual_text_bytes).
 
-        Binary frames (A5 5A ...) are consumed and decoded.
+        Backward-compatible signature. For wheel events, use feed_all().
+        """
+        current_samples, _wheel_events, residual = self.feed_all(data)
+        return current_samples, residual
+
+    def feed_all(self, data: bytes) -> Tuple[List[CurrentSample], List[WheelEvent], bytes]:
+        """Feed raw bytes. Returns (current_samples, wheel_events, residual_text_bytes).
+
+        Binary frames (A5 5A ...) are consumed and decoded based on type byte.
         Bytes not belonging to any valid binary frame are returned as residual text.
         """
         self._buf.extend(data)
-        samples: List[CurrentSample] = []
+        current_samples: List[CurrentSample] = []
+        wheel_events: List[WheelEvent] = []
         residual = bytearray()
 
-        while len(self._buf) >= self.FRAME_LEN:
+        while len(self._buf) >= self.MIN_FRAME_LEN:
             # Find next sync
             sync_idx = self._buf.find(self.SYNC)
             if sync_idx == -1:
@@ -960,36 +1020,64 @@ class BinaryCurrentParser:
                 residual.extend(self._buf[:sync_idx])
                 del self._buf[:sync_idx]
 
+            # Read header: need at least sync(2) + type(1) + len(1) = 4 bytes
+            if len(self._buf) < 4:
+                break
+
+            payload_len = self._buf[3]
+            type_byte = self._buf[2]
+
+            # Quick sanity: type must be a known type or we flag it
+            if type_byte not in (self.TYPE_CURRENT, self.TYPE_WHEEL):
+                # Unknown type — skip the sync marker, try again
+                self.unknown_types += 1
+                residual.append(self._buf.pop(0))
+                residual.append(self._buf.pop(0))
+                continue
+
+            expected_len = (
+                self.CURRENT_PAYLOAD_LEN
+                if type_byte == self.TYPE_CURRENT
+                else self.WHEEL_PAYLOAD_LEN
+            )
+            if payload_len != expected_len:
+                self.length_errors += 1
+                residual.append(self._buf.pop(0))
+                residual.append(self._buf.pop(0))
+                continue
+
+            total_frame_len = 4 + payload_len + 1  # header(4) + payload + crc(1)
+
             # Need at least a full frame
-            if len(self._buf) < self.FRAME_LEN:
+            if len(self._buf) < total_frame_len:
                 break
 
             # Peek at the candidate frame
-            candidate = self._buf[:self.FRAME_LEN]
+            candidate = self._buf[:total_frame_len]
 
-            # Quick sanity: type byte must be 0x43, length must be 20
-            if candidate[2] != 0x43 or candidate[3] != self.PAYLOAD_LEN:
-                # False sync — skip the first sync byte, emit as text
-                residual.append(self._buf.pop(0))
-                continue
-
-            # Validate CRC-8
-            crc = self._compute_crc8(candidate[:24])
-            if crc != candidate[24]:
+            # Validate CRC-8 (over all bytes except the CRC byte itself)
+            crc = self._compute_crc8(candidate[:total_frame_len - 1])
+            if crc != candidate[total_frame_len - 1]:
                 self.crc_errors += 1
                 # Skip the sync marker, try again
                 residual.append(self._buf.pop(0))
-                residual.append(self._buf.pop(0))  # pop both sync bytes
+                residual.append(self._buf.pop(0))
                 continue
 
-            # Valid frame — decode
-            sample = self._decode_frame(candidate)
-            samples.append(sample)
-            del self._buf[:self.FRAME_LEN]
+            # Valid frame — dispatch on type
+            if type_byte == self.TYPE_CURRENT:
+                sample = self._decode_c_payload(candidate[4:4 + payload_len])
+                current_samples.append(sample)
+                self._track_seq(type_byte, sample.seq)
+            elif type_byte == self.TYPE_WHEEL:
+                event = self._decode_w_payload(candidate[4:4 + payload_len])
+                wheel_events.append(event)
+                self._track_seq(type_byte, event.seq)
 
-        # Do not hold short ASCII ACK lines (for example UNLOCK,OK,1\r\n)
-        # waiting for a 25-byte binary frame. Only keep bytes that could still
-        # become the beginning of a binary frame on the next serial read.
+            self.frames_decoded += 1
+            del self._buf[:total_frame_len]
+
+        # Do not hold short ASCII ACK lines waiting for a binary frame
         if self._buf:
             sync_idx = self._buf.find(self.SYNC)
             if sync_idx == -1:
@@ -1003,7 +1091,7 @@ class BinaryCurrentParser:
                 residual.extend(self._buf[:sync_idx])
                 del self._buf[:sync_idx]
 
-        return samples, bytes(residual)
+        return current_samples, wheel_events, residual
 
     def _compute_crc8(self, data: bytes) -> int:
         crc = 0x00
@@ -1011,19 +1099,10 @@ class BinaryCurrentParser:
             crc = self._CRC8_TABLE[crc ^ b]
         return crc
 
-    def _decode_frame(self, frame: bytes) -> CurrentSample:
-        """Decode a validated 25-byte binary frame."""
-        payload = frame[4:24]
+    def _decode_c_payload(self, payload: bytes) -> CurrentSample:
+        """Decode a 20-byte CurrentSample payload (little-endian)."""
         seq, tick_ms, ia_mA, ib_mA, ic_mA, id_mA, iq_mA, vbus_mV, flags = \
             struct.unpack('<H I h h h h h H H', payload)
-
-        # Seq gap detection
-        if self.last_seq >= 0:
-            expected = (self.last_seq + 1) & 0xFFFF
-            if seq != expected:
-                self.seq_gaps += 1
-        self.last_seq = seq
-        self.frames_decoded += 1
 
         return CurrentSample(
             seq=seq,
@@ -1036,6 +1115,32 @@ class BinaryCurrentParser:
             vbus=vbus_mV * 0.001,
             flags=flags,
         )
+
+    def _decode_w_payload(self, payload: bytes) -> WheelEvent:
+        """Decode a 16-byte WheelEvent payload (little-endian)."""
+        seq, tick_ms, delta_steps, position_steps, speed_mrad_s, flags = \
+            struct.unpack('<H I h i h H', payload)
+
+        return WheelEvent(
+            seq=seq,
+            tick_ms=tick_ms,
+            delta_steps=delta_steps,
+            position_steps=position_steps,
+            speed_mrad_s=speed_mrad_s,
+            flags=flags,
+        )
+
+    def _track_seq(self, type_byte: int, seq: int) -> None:
+        """Track per-type sequence for gap detection."""
+        last = self._last_seq_by_type.get(type_byte, -1)
+        if last >= 0:
+            expected = (last + 1) & 0xFFFF
+            if seq != expected:
+                self.seq_gaps += 1
+        self._last_seq_by_type[type_byte] = seq
+        # Also maintain backward-compatible self.last_seq from C frames
+        if type_byte == self.TYPE_CURRENT:
+            self.last_seq = seq
 
 
 # ── ACK Parser ────────────────────────────────────────────────────────────────
@@ -1075,6 +1180,11 @@ ACK_PATTERNS = [
     (re.compile(r'^(HOME),FAIL,(.+)$'),                                     False),
     (re.compile(r'^(CLEAR_HOME),OK$'),                                      True),
     (re.compile(r'^(CLEAR_HOME),FAIL,(.+)$'),                               False),
+    # Haptic config set responses (SPRING:CFG / DETENT:CFG)
+    (re.compile(r'^(SPRING:CFG),OK,.+'),                                    True),
+    (re.compile(r'^(SPRING:CFG),FAIL,(.+)$'),                               False),
+    (re.compile(r'^(DETENT:CFG),OK,.+'),                                    True),
+    (re.compile(r'^(DETENT:CFG),FAIL,(.+)$'),                               False),
 ]
 
 

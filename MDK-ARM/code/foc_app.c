@@ -924,7 +924,13 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 
     /* Speed and position commands are user-frame mechanical values. Keep the
        outer loops in that frame, then map the torque command to the q-axis once. */
-    speed_feedback = speed_mech_user;
+    if ((handle->obs_use_speed != 0U) && (handle->speed_obs.valid != 0U)) {
+        /* 速度环反馈用观测器速度(平滑, 低速 0.1°/s 不被差分量化噪声淹没)。
+         * 低速专测; 高速观测器低带宽(w0~12)滞后, 需 obs_use_speed=0 切回差分。 */
+        speed_feedback = handle->speed_obs_user;
+    } else {
+        speed_feedback = speed_mech_user;
+    }
     speed_error = speed_ref_temp - speed_feedback;
     /* 将速度误差传给 FOC 核心，用于自适应 Rs 前馈置信度计算 */
     FOC_SetRsFFSpeedError(&handle->foc, speed_error);
@@ -1074,35 +1080,40 @@ ff_layers:
                                         (handle->ff_blocked_by_enc_dir == 0U)) ? 1U : 0U;
             handle->ff_diag.friction_enabled = friction_allowed;
             if (friction_allowed) {
-                float omega = speed_mech_user;  /* 使用用户坐标速度，不用裸speed_mech */
+                float omega = speed_mech_user;  /* 高速库仑方向用差分速度 */
+                float omega_smooth = omega;     /* Stribeck 平滑速度(优先观测器平滑) */
+                if ((handle->speed_obs.valid != 0U)) {
+                    omega_smooth = handle->speed_obs_user;
+                }
                 float friction_total = 0.0f;
-                /* Coulomb: 高速用速度方向, 位置模式低速/静止用指令方向(pos_cmd_dir, 方向锁存)
-                 * —— 原死区0.05rad/s 使 2°/s(=0.035) 低速库仑前馈从不触发, 导致爬行。
-                 * 指令方向兜底后, 低速匀速也有连续库仑前馈(Tc/Kt), 消除死区爬行。 */
+                /* Coulomb: 高速用速度方向, 低速用指令方向兜底
+                 * - POSITION: pos_cmd_dir (方向锁存, 连续斜坡)
+                 * - SPEED: SREF 指令符号 (差分速度噪声淹没 0.1°/s 信号, 速度方向不可靠) */
                 float coulomb_dir;
                 if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
                     coulomb_dir = (omega > 0.0f) ? 1.0f : -1.0f;
                 } else if ((handle->control_mode == FOC_MODE_POSITION) &&
                            (handle->pos_cmd_dir != 0.0f)) {
                     coulomb_dir = handle->pos_cmd_dir;
+                } else if ((handle->control_mode == FOC_MODE_SPEED) &&
+                           (fabsf(speed_ref_temp) > 1e-5f)) {
+                    coulomb_dir = (speed_ref_temp > 0.0f) ? 1.0f : -1.0f;
                 } else {
                     coulomb_dir = 0.0f;
                 }
                 if (coulomb_dir != 0.0f) {
-                    /* 幅值: POSITION 用静摩擦 fric_comp(极低速0.1°/s起动需0.09A, Tc/Kt=0.06不足致爬行),
-                     * Stribeck 随速度衰减到动摩擦比例(2°/s→~0.03A)。其他模式用识别 Tc/Kt。 */
-                    float fric;
-                    if (handle->control_mode == FOC_MODE_POSITION) {
-                        fric = (coulomb_dir > 0.0f) ?
-                               handle->fric_comp_pos : handle->fric_comp_neg;
-                    } else {
-                        fric = handle->motor_param.Tc / Kt;
-                    }
+                    /* 幅值: 先验摩擦 fric_comp (FRIC_COMP 运行时设, 匹配启动电流)。
+                     * 速度模式原本用 Tc/Kt, 但 Tc 未识别=0 → 库仑前馈恒 0, 低速全靠
+                     * 速度环积分硬扛。统一用 fric_comp 先验。 */
+                    float fric = (coulomb_dir > 0.0f) ?
+                                 handle->fric_comp_pos : handle->fric_comp_neg;
                     float coulomb = coulomb_dir * fric;
-                    /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。 */
-                    float stick = expf(-fabsf(omega) / FOC_FRIC_STRIBECK_VS_RADPS);
-                    float smooth = FOC_FRIC_STRIBECK_KINEMATIC
-                                   + (1.0f - FOC_FRIC_STRIBECK_KINEMATIC) * stick;
+                    /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。
+                     * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
+                     * fric_vs 运行时校准(0.1°/s 需更小 VS 让运动时衰减到动摩擦, 否则过驱动)。 */
+                    float stick = expf(-fabsf(omega_smooth) / handle->fric_vs);
+                    float smooth = handle->fric_kin
+                                   + (1.0f - handle->fric_kin) * stick;
                     friction_total += coulomb * smooth;
                 }
                 /* Viscous: proportional to speed */
@@ -1121,6 +1132,22 @@ ff_layers:
         handle->ff_diag.friction_iq = 0.0f;
         handle->ff_diag.friction_enabled = 0U;
 #endif
+
+        /* 观测器 T_hat 前馈: 速度模式 + obs_use_speed 时, 扰动(摩擦)估计直接补偿,
+         * 速度环不需积分硬扛摩擦(低速起动/稳定, Tc 未识别=0 时尤其关键)。
+         * 用上一拍 T_hat(观测器在 FF 层尾更新)。 */
+        if ((handle->control_mode == FOC_MODE_SPEED) &&
+            (handle->obs_use_speed != 0U) &&
+            (handle->speed_obs.valid != 0U)) {
+            float Kt_obs = handle->motor_param.Ke;
+            if (fabsf(Kt_obs) > 1e-10f) {
+                float t_ff = handle->speed_obs.T_hat_lpf / Kt_obs;
+                t_ff = FOC_Saturate(t_ff, FOC_FF_FRICTION_MAX_A, -FOC_FF_FRICTION_MAX_A);
+                handle->ff_diag.friction_iq += t_ff;
+                iq_ref_mech += t_ff;
+                iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
+            }
+        }
 
         /* P0: Cogging Torque LUT Feedforward
          * Linear interpolation on 264-bin table indexed by mechanical angle
@@ -1361,6 +1388,20 @@ haptic_torque_injection:
 
         /* 更新电流参考值 */
         FOC_App_SetCurrentRef(handle, 0.0f, iq_cmd);  /* Id=0控制 */
+
+        /* 低速速度观测器 (线性ESO) 更新: 机械帧模型。
+         * iq_ref_mech/Iq_ref/Idq.q 均为用户帧电流, 须乘 encoder_dir 转机械帧,
+         * 否则 enc_dir=-1 时观测器转矩方向反 (与 Gopinath DOB 门禁同源问题)。
+         * 驱动用实测 Idq.q (非指令), 避免"指令自洽"陷阱。 */
+        {
+            float enc_dir_f_obs = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+            float iq_mech = handle->foc.Idq.q * enc_dir_f_obs;
+            FOC_SpeedObserver_Update(&handle->speed_obs,
+                                     handle->theta_mech, iq_mech,
+                                     1.0f / (float)FOC_SPEED_LOOP_FREQ);
+            handle->speed_obs_mech = handle->speed_obs.omega_lpf;
+            handle->speed_obs_user = handle->speed_obs.omega_lpf * enc_dir_f_obs;
+        }
     }
 
     handle->speed_loop_count++;
@@ -1417,7 +1458,14 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
         float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
         float theta_mech_user_pos = theta_mech_zeroed * encoder_dir_f;
-        float speed_mech_user_pos = handle->speed_mech * encoder_dir_f;
+        /* D项速度源: obs_use_d 时用观测器速度(平滑, 允许更高kd阻尼),
+         * 否则差分速度(噪声大, kd受限于0.03)。 */
+        float speed_mech_user_pos;
+        if ((handle->obs_use_d != 0U) && (handle->speed_obs.valid != 0U)) {
+            speed_mech_user_pos = handle->speed_obs.omega_lpf * encoder_dir_f;
+        } else {
+            speed_mech_user_pos = handle->speed_mech * encoder_dir_f;
+        }
         float pos_error = handle->pos_ref - theta_mech_user_pos;
         
         /* 处理角度环绕（最短路径） */
@@ -1824,6 +1872,9 @@ void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
     handle->speed_mech = 0.0f;
     handle->speed_elec = 0.0f;
     handle->speed_theta_prev = handle->theta_mech;
+    handle->speed_obs_mech = 0.0f;
+    handle->speed_obs_user = 0.0f;
+    FOC_SpeedObserver_Reset(&handle->speed_obs, handle->theta_mech);
     handle->position_ref_user_set = 0U;
     handle->speed_loop_ready = 0U;
     handle->position_friction_active = 0U;
@@ -2423,6 +2474,25 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
         obs->enabled = (handle->motor_param.J > 0.0f && handle->motor_param.Ke > 0.0f) ? 1U : 0U;
     }
 #endif
+
+    /* 低速速度观测器 (线性ESO): 机械帧模型, J/B/Kt 用辨识值 */
+    {
+        handle->obs_w0 = FOC_OBSERVER_W0_DEFAULT;
+        handle->obs_t_gain = FOC_OBSERVER_T_GAIN_DEFAULT;
+        handle->obs_use_d = 0U;
+        handle->obs_use_speed = 0U;
+        handle->fric_vs = FOC_FRIC_STRIBECK_VS_RADPS;
+        handle->fric_kin = FOC_FRIC_STRIBECK_KINEMATIC;
+        handle->speed_obs_mech = 0.0f;
+        handle->speed_obs_user = 0.0f;
+        FOC_SpeedObserver_Init(&handle->speed_obs,
+                               handle->motor_param.J,
+                               handle->motor_param.B,
+                               handle->motor_param.Ke,
+                               handle->obs_w0,
+                               1.0f / (float)FOC_SPEED_LOOP_FREQ);
+        handle->speed_obs.t_gain = handle->obs_t_gain;
+    }
 
 #if FOC_FF_ENABLE_COGGING
     /* Load cogging LUT from Flash */

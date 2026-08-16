@@ -23,7 +23,7 @@ static uint8_t MI_RsConverged(float rs_positive, float rs_negative);
 static uint8_t MI_RsUseSinglePolarityFallback(MI_Handle_t *handle);
 static MI_ErrorCode_t MI_UseLsFallback(MI_Handle_t *handle);
 static float MI_GetPnTestCurrent(const MI_Handle_t *handle);
-static uint8_t MI_PnRetryWithHigherCurrent(MI_Handle_t *handle);
+static uint8_t __attribute__((unused)) MI_PnRetryWithHigherCurrent(MI_Handle_t *handle);
 static float MI_ClampAbsVoltage(float voltage, float limit);
 static float MI_WrapDelta(float delta);
 static void MI_ApplyVerifyVoltageVector(MI_Handle_t *handle, float theta_elec);
@@ -1256,7 +1256,6 @@ MI_ErrorCode_t MI_IdentifyCogging(MI_Handle_t *handle)
     MI_ErrorCode_t encoder_status;
     float theta_mech_now;
     float delta_mech;
-    float omega_elec;
     float pole_pairs;
     uint32_t elapsed;
     uint16_t i;
@@ -1703,7 +1702,7 @@ static float MI_GetPnTestCurrent(const MI_Handle_t *handle)
     return current;
 }
 
-static uint8_t MI_PnRetryWithHigherCurrent(MI_Handle_t *handle)
+static uint8_t __attribute__((unused)) MI_PnRetryWithHigherCurrent(MI_Handle_t *handle)
 {
     float next_current;
 

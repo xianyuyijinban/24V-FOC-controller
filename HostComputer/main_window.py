@@ -4,8 +4,8 @@ import math
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -179,10 +179,11 @@ except ImportError:
 
 
 class HostMainWindow(QMainWindow):
-    command_requested = pyqtSignal(str)
-    refresh_ports_requested = pyqtSignal()
-    connect_requested = pyqtSignal(str, int)
-    disconnect_requested = pyqtSignal()
+    command_requested = Signal(str)
+    refresh_ports_requested = Signal()
+    connect_requested = Signal(str, int)
+    disconnect_requested = Signal()
+    bridge_wheel_enable_requested = Signal(bool)
 
     LOG_LIMIT = 400
     IDENTIFY_LOG_LIMIT = 200
@@ -190,6 +191,7 @@ class HostMainWindow(QMainWindow):
     VBUS_LIMIT_CONFIRM_TIMEOUT_MS = 600
     VBUS_LIMIT_CONFIRM_EPSILON_V = 0.01
     PLOT_REFRESH_INTERVAL_MS = 50
+    CURRENT_STREAM_PLOT_MAX_POINTS = 3000
     LOG_REFRESH_INTERVAL_MS = 150
     KNOWN_MOTOR_RS_OHM = 8.8
     KNOWN_MOTOR_LD_H = 0.0005
@@ -214,6 +216,7 @@ class HostMainWindow(QMainWindow):
         self._plot_buffer = RollingPlotBuffer()
         self._plot_curves: dict[str, object] = {}
         self._plot_legend = None
+        self._plot_legend_channels: frozenset[str] = frozenset()
         self._mode_button_map: dict[int, list[QRadioButton]] = {0: [], 1: [], 2: []}
         self._last_encoder_warning_state: bool | None = None
         self._last_rx_activity_at_ms: int | None = None
@@ -222,6 +225,7 @@ class HostMainWindow(QMainWindow):
         self._pending_vbus_limit_requested_at_ms: int | None = None
         self._plot_refresh_pending = False
         self._log_refresh_pending = False
+        self._cur_stats_prev_at_s: float | None = None
 
         self.setWindowTitle("FOC 上位机调试工具")
         self.resize(1500, 920)
@@ -236,6 +240,7 @@ class HostMainWindow(QMainWindow):
         self._scope_follow_latest: bool = True
         self._scope_auto_y: bool = True
         self._scope_suppress_range_change: bool = False
+        self._scope_ignore_manual_range_until_ms: float = 0.0
 
         self._build_toolbar()
         self._build_status_bar()
@@ -828,6 +833,7 @@ class HostMainWindow(QMainWindow):
         self.mode_panel_stack.addWidget(self._build_hold_panel())          # 3: HOLD
         self.mode_panel_stack.addWidget(self._build_spring_damper_panel()) # 4: SPRING_DAMPER
         self.mode_panel_stack.addWidget(self._build_detent_panel())        # 5: DETENT
+        self.mode_panel_stack.addWidget(self._build_scroll_wheel_panel())  # 6: SCROLL_WHEEL
         self.app_mode_combo.currentIndexChanged.connect(self._on_app_mode_combo_changed)
         layout.addWidget(self.mode_panel_stack, stretch=1)
 
@@ -1156,10 +1162,10 @@ class HostMainWindow(QMainWindow):
         self.spring_D_spin.setValue(0.05)
 
         self.spring_limit_spin = QDoubleSpinBox()
-        self.spring_limit_spin.setRange(0.01, 1.0)
+        self.spring_limit_spin.setRange(0.01, 2.0)
         self.spring_limit_spin.setDecimals(3)
         self.spring_limit_spin.setSingleStep(0.05)
-        self.spring_limit_spin.setValue(0.30)
+        self.spring_limit_spin.setValue(0.60)
 
         self.spring_cfg_set_btn = QPushButton("应用参数")
         self.spring_cfg_set_btn.clicked.connect(self._on_spring_cfg_set)
@@ -1185,11 +1191,11 @@ class HostMainWindow(QMainWindow):
         # ── Presets ──
         preset_group = QGroupBox("预设")
         preset_row = QHBoxLayout(preset_group)
-        self.detent_preset_light_btn = QPushButton("轻卡点\n12格 强度0.50")
+        self.detent_preset_light_btn = QPushButton("轻卡点\n12格 强度3.00")
         self.detent_preset_light_btn.clicked.connect(lambda: self._on_detent_preset("light"))
-        self.detent_preset_std_btn = QPushButton("标准\n12格 强度1.00")
+        self.detent_preset_std_btn = QPushButton("标准\n12格 强度6.00")
         self.detent_preset_std_btn.clicked.connect(lambda: self._on_detent_preset("standard"))
-        self.detent_preset_dense_btn = QPushButton("密集\n24格 强度1.20")
+        self.detent_preset_dense_btn = QPushButton("密集\n24格 强度7.00")
         self.detent_preset_dense_btn.clicked.connect(lambda: self._on_detent_preset("dense"))
         for btn in (self.detent_preset_light_btn, self.detent_preset_std_btn, self.detent_preset_dense_btn):
             btn.setMinimumHeight(44)
@@ -1207,22 +1213,28 @@ class HostMainWindow(QMainWindow):
         self.detent_count_spin.setValue(12)
 
         self.detent_strength_spin = QDoubleSpinBox()
-        self.detent_strength_spin.setRange(0.0, 5.0)
+        self.detent_strength_spin.setRange(0.0, 20.0)
         self.detent_strength_spin.setDecimals(3)
-        self.detent_strength_spin.setSingleStep(0.1)
-        self.detent_strength_spin.setValue(1.0)
+        self.detent_strength_spin.setSingleStep(0.5)
+        self.detent_strength_spin.setValue(6.0)
 
         self.detent_width_spin = QDoubleSpinBox()
         self.detent_width_spin.setRange(0.01, 1.0)
         self.detent_width_spin.setDecimals(3)
         self.detent_width_spin.setSingleStep(0.01)
-        self.detent_width_spin.setValue(0.13)
+        self.detent_width_spin.setValue(0.24)
+
+        self.detent_damping_spin = QDoubleSpinBox()
+        self.detent_damping_spin.setRange(0.0, 0.5)
+        self.detent_damping_spin.setDecimals(3)
+        self.detent_damping_spin.setSingleStep(0.01)
+        self.detent_damping_spin.setValue(0.10)
 
         self.detent_limit_spin = QDoubleSpinBox()
-        self.detent_limit_spin.setRange(0.01, 1.0)
+        self.detent_limit_spin.setRange(0.01, 2.0)
         self.detent_limit_spin.setDecimals(3)
         self.detent_limit_spin.setSingleStep(0.05)
-        self.detent_limit_spin.setValue(0.25)
+        self.detent_limit_spin.setValue(0.60)
 
         self.detent_cfg_set_btn = QPushButton("应用参数")
         self.detent_cfg_set_btn.clicked.connect(self._on_detent_cfg_set)
@@ -1230,9 +1242,55 @@ class HostMainWindow(QMainWindow):
         cfg_fl.addRow("Count (每圈卡点数):", self.detent_count_spin)
         cfg_fl.addRow("Strength (强度 A/rad):", self.detent_strength_spin)
         cfg_fl.addRow("Width (宽度 rad):", self.detent_width_spin)
+        cfg_fl.addRow("Damping (阻尼 A/(rad/s)):", self.detent_damping_spin)
         cfg_fl.addRow("Limit (限幅 A):", self.detent_limit_spin)
         cfg_fl.addRow(self.detent_cfg_set_btn)
         layout.addWidget(cfg_group)
+        layout.addStretch()
+        return panel
+
+    def _build_scroll_wheel_panel(self) -> QWidget:
+        """SCROLL_WHEEL mode panel - managed by FOC_Device_Bridge tray application."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        info_group = QGroupBox("Scroll Wheel Mode / 滚轮鼠标")
+        info_fl = QFormLayout(info_group)
+        note = QLabel(
+            "滚轮模式由 FOC Device Bridge 独占串口并注入系统滚轮事件。\n"
+            "请先启动 Bridge，再在上位机顶部选择控制板串口并连接。\n"
+            "会话超过 1 秒未收到保活时，固件会自动停止电机。"
+        )
+        note.setWordWrap(True)
+        info_fl.addRow(note)
+        layout.addWidget(info_group)
+
+        status_group = QGroupBox("Wheel Status / 滚轮状态")
+        status_fl = QFormLayout(status_group)
+        self.wheel_session_label = QLabel("--")
+        self.wheel_position_label = QLabel("--")
+        self.wheel_delta_label = QLabel("--")
+        status_fl.addRow("Session / 会话:", self.wheel_session_label)
+        status_fl.addRow("Position (steps):", self.wheel_position_label)
+        status_fl.addRow("Total Delta:", self.wheel_delta_label)
+        layout.addWidget(status_group)
+
+        control_row = QHBoxLayout()
+        self.wheel_bridge_enable_btn = QPushButton("启用滚轮")
+        self.wheel_bridge_disable_btn = QPushButton("停用滚轮")
+        self.wheel_bridge_enable_btn.setEnabled(False)
+        self.wheel_bridge_disable_btn.setEnabled(False)
+        self.wheel_bridge_enable_btn.clicked.connect(
+            lambda: self.bridge_wheel_enable_requested.emit(True)
+        )
+        self.wheel_bridge_disable_btn.clicked.connect(
+            lambda: self.bridge_wheel_enable_requested.emit(False)
+        )
+        control_row.addWidget(self.wheel_bridge_enable_btn)
+        control_row.addWidget(self.wheel_bridge_disable_btn)
+        layout.addLayout(control_row)
+
         layout.addStretch()
         return panel
 
@@ -1331,11 +1389,37 @@ class HostMainWindow(QMainWindow):
         self.connect_requested.connect(worker.connect_port)
         self.disconnect_requested.connect(worker.disconnect_port)
         self.command_requested.connect(worker.send_command)
+        self.bridge_wheel_enable_requested.connect(worker.request_bridge_wheel_enable)
         worker.ports_updated.connect(self.update_ports)
         worker.connection_changed.connect(self.update_connection_state)
         worker.log_line.connect(self.handle_log_line)
         worker.packet_received.connect(self.apply_packet)
         worker.current_samples_batch.connect(self._on_current_samples_batch)
+        if hasattr(worker, "bridge_state_changed"):
+            worker.bridge_state_changed.connect(self.update_bridge_state)
+        if hasattr(worker, "wheel_status_changed"):
+            worker.wheel_status_changed.connect(self.update_wheel_status)
+
+    def update_bridge_state(self, state: dict):
+        state_name = str(state.get("state", "DISCONNECTED"))
+        port = str(state.get("port", ""))
+        if state_name == "DISCONNECTED":
+            self.wheel_session_label.setText("未连接")
+            self.wheel_position_label.setText("--")
+            self.wheel_delta_label.setText("--")
+            self.wheel_bridge_enable_btn.setEnabled(False)
+            self.wheel_bridge_disable_btn.setEnabled(False)
+            return
+        suffix = f" | {port}" if port else ""
+        self.wheel_session_label.setText(f"{state_name}{suffix}")
+        self.wheel_bridge_enable_btn.setEnabled(state_name == "CONNECTED_IDLE")
+        self.wheel_bridge_disable_btn.setEnabled(
+            state_name in ("WHEEL_ENABLING", "WHEEL_ACTIVE", "WHEEL_DISABLING")
+        )
+
+    def update_wheel_status(self, status: dict):
+        self.wheel_position_label.setText(str(status.get("position_steps", "--")))
+        self.wheel_delta_label.setText(str(status.get("total_delta", "--")))
 
     def update_ports(self, ports: list[str]):
         self._state.available_ports = list(ports)
@@ -1385,7 +1469,7 @@ class HostMainWindow(QMainWindow):
             self._state.gimbal_ramp_accel = None
             self._state.spring_K = self._state.spring_D = self._state.spring_limit = None
             self._state.detent_count = None
-            self._state.detent_strength = self._state.detent_width = self._state.detent_limit = None
+            self._state.detent_strength = self._state.detent_width = self._state.detent_damping = self._state.detent_limit = None
 
         self._apply_control_enable_state()
         self._refresh_identify_state_panel()
@@ -1432,9 +1516,9 @@ class HostMainWindow(QMainWindow):
         # ── V1.2 App-tab power controls ──
         self.app_unlock_button.setEnabled(state["can_unlock"])
         self.app_lock_button.setEnabled(state["can_lock"])
-        self.app_enable_button.setEnabled(state["can_enable"])
+        self.app_enable_button.setEnabled(state["app_enable"])
         self.app_disable_button.setEnabled(state["can_disable"])
-        self.app_arm_button.setEnabled(state["can_quick_arm"])
+        self.app_arm_button.setEnabled(state["app_arm"])
         if self._state.power_unlocked and self._state.motor_enabled:
             power_text = "已解锁 | 已使能"
             power_style = "color: #0f766e; font-weight: 600;"
@@ -1455,9 +1539,10 @@ class HostMainWindow(QMainWindow):
         sd_ok = state["spring_detent_config"]
         motion_ok = state["motion_target"]
         hold_ok = state["hold_button"]
+        bridge_managed_wheel = (self._state.app_mode_selected or "RAW") == "SCROLL_WHEEL"
 
         self.app_mode_combo.setEnabled(app_mode_ok)
-        self.app_mode_set_button.setEnabled(app_mode_ok)
+        self.app_mode_set_button.setEnabled(app_mode_ok and not bridge_managed_wheel)
         self.app_stop_button.setEnabled(self._state.is_connected)
 
         # JOINT_POS
@@ -1493,6 +1578,7 @@ class HostMainWindow(QMainWindow):
         self.detent_count_spin.setEnabled(sd_ok)
         self.detent_strength_spin.setEnabled(sd_ok)
         self.detent_width_spin.setEnabled(sd_ok)
+        self.detent_damping_spin.setEnabled(sd_ok)
         self.detent_limit_spin.setEnabled(sd_ok)
         self.detent_cfg_set_btn.setEnabled(sd_ok)
         self.detent_preset_light_btn.setEnabled(sd_ok)
@@ -1620,18 +1706,14 @@ class HostMainWindow(QMainWindow):
                 elif ack.command:
                     abort_command_sequence(self._state, "序列中止：" + ack.command + " 失败")
                 if ack.ok:
-                    if ack.command == "APP_MODE":
-                        self.app_mode_combo.blockSignals(True)
-                        idx = self.app_mode_combo.findData(ack.app_mode_name or "")
-                        if idx >= 0:
-                            self.app_mode_combo.setCurrentIndex(idx)
-                        self.app_mode_combo.blockSignals(False)
-                        self._refresh_mode_views()
                     self._show_notification("INFO", f"固件确认: {ack.raw}")
                 else:
                     reason_text = ack.reason or "未知原因"
                     self._show_notification("ERROR", f"{ack.command} 失败: {reason_text}")
                     self._record_identify_event(f"命令失败: {ack.raw}")
+            elif self._state.pending_sequence is not None:
+                # Diagnostic: log RX lines that ACK parser missed while sequence is pending
+                self.handle_log_line("INFO", f"[SEQ-DBG] ACK missed, seq_idx={self._state.pending_seq_index}: {message[:120]}")
             # Existing ADC_NOISE parsing
             adc_noise_result = parse_adc_noise_response(message)
             if adc_noise_result is not None:
@@ -1938,6 +2020,7 @@ class HostMainWindow(QMainWindow):
         token = self.app_mode_combo.itemData(idx)
         if token:
             self._state.app_mode_selected = token
+        self._apply_control_enable_state()
         self._refresh_mode_views()
 
     def _on_app_enable(self):
@@ -1978,6 +2061,9 @@ class HostMainWindow(QMainWindow):
             self._show_notification("ERROR", "无法切换APP_MODE：未连接或识别中/故障")
             return
         mode = self.app_mode_combo.currentData()
+        if mode == "SCROLL_WHEEL":
+            self._show_notification("ERROR", "滚轮鼠标模式由 FOC Device Bridge 管理，请从系统托盘启用。")
+            return
         try:
             cmd = CommandBuilder.app_mode_set(mode)
         except ValueError as e:
@@ -2046,7 +2132,11 @@ class HostMainWindow(QMainWindow):
         if not state["hold_button"]:
             self._show_notification("ERROR", "无法锁定：未连接/未解锁/未使能/识别中/故障")
             return
-        seq = build_app_target_sequence(self._state.app_mode_selected or "RAW", CommandBuilder.app_mode_set("HOLD"))
+        seq = [CommandBuilder.app_mode_set("HOLD")]
+        first = start_command_sequence(self._state, seq)
+        if first:
+            self.command_requested.emit(first)
+            self.handle_log_line("CMD", first)
 
     def _on_joint_pos_start(self):
         state = button_enable_state(self._state)
@@ -2075,6 +2165,7 @@ class HostMainWindow(QMainWindow):
         self.spring_D_spin.setValue(D)
         self.spring_limit_spin.setValue(limit)
         seq = build_app_config_sequence("SPRING_DAMPER", CommandBuilder.spring_cfg_set(K, D, limit))
+        first = start_command_sequence(self._state, seq)
         if first:
             self.command_requested.emit(first)
             self.handle_log_line("CMD", first)
@@ -2101,11 +2192,12 @@ class HostMainWindow(QMainWindow):
         if not state["spring_detent_config"]:
             self._show_notification("ERROR", "无法设置卡点参数：未连接或识别中/故障")
             return
-        count, strength, width, limit = DETENT_PRESETS[preset]
+        count, strength, width, damping, limit = DETENT_PRESETS[preset]
         self.detent_count_spin.setValue(count)
         self.detent_strength_spin.setValue(strength)
         self.detent_width_spin.setValue(width)
-        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, limit))
+        self.detent_damping_spin.setValue(damping)
+        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, damping, limit))
         first = start_command_sequence(self._state, seq)
         if first:
             self.command_requested.emit(first)
@@ -2119,8 +2211,9 @@ class HostMainWindow(QMainWindow):
         count = self.detent_count_spin.value()
         strength = self.detent_strength_spin.value()
         width = self.detent_width_spin.value()
+        damping = self.detent_damping_spin.value()
         limit = self.detent_limit_spin.value()
-        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, limit))
+        seq = build_app_config_sequence("DETENT", CommandBuilder.detent_cfg_set(count, strength, width, damping, limit))
         first = start_command_sequence(self._state, seq)
         if first:
             self.command_requested.emit(first)
@@ -2152,14 +2245,10 @@ class HostMainWindow(QMainWindow):
                     "HOLD": 2,
                     "SPRING_DAMPER": 2,
                     "DETENT": 2,
+                    "SCROLL_WHEEL": 2,
                 }.get(result["mode"])
                 if inferred_ctrl is not None:
                     self._state.app_mode_ctrl = inferred_ctrl
-            self.app_mode_combo.blockSignals(True)
-            idx = self.app_mode_combo.findData(result["mode"])
-            if idx >= 0:
-                self.app_mode_combo.setCurrentIndex(idx)
-            self.app_mode_combo.blockSignals(False)
             self._refresh_mode_views()
             return
 
@@ -2195,10 +2284,12 @@ class HostMainWindow(QMainWindow):
             self._state.detent_count = result["count"]
             self._state.detent_strength = result["strength"]
             self._state.detent_width = result["width"]
+            self._state.detent_damping = result["damping"]
             self._state.detent_limit = result["limit"]
             self.detent_count_spin.setValue(result["count"])
             self.detent_strength_spin.setValue(result["strength"])
             self.detent_width_spin.setValue(result["width"])
+            self.detent_damping_spin.setValue(result["damping"])
             self.detent_limit_spin.setValue(result["limit"])
             return
 
@@ -2353,7 +2444,7 @@ class HostMainWindow(QMainWindow):
         if selected == app_token:
             sync_mark = ""
         else:
-            sync_mark = f" [待同步:{app_mode_cn(selected)}]"
+            sync_mark = f" [待同步：{app_mode_cn(selected)}]"
         if app_token == "RAW":
             ctrl_mode = self._state.app_mode_ctrl
             if ctrl_mode is None:
@@ -2364,7 +2455,13 @@ class HostMainWindow(QMainWindow):
 
     @staticmethod
     def _inferred_app_control_mode(app_mode: str) -> int:
-        if app_mode in {"JOINT_POS", "HOLD", "SPRING_DAMPER", "DETENT"}:
+        if app_mode in {
+            "JOINT_POS",
+            "HOLD",
+            "SPRING_DAMPER",
+            "DETENT",
+            "SCROLL_WHEEL",
+        }:
             return 2
         if app_mode == "GIMBAL_SPEED":
             return 1
@@ -2659,9 +2756,7 @@ class HostMainWindow(QMainWindow):
             if elapsed is not None:
                 lo = max(0.0, elapsed - self._scope_window_s)
                 hi = lo + self._scope_window_s
-                self._scope_suppress_range_change = True
-                self.plot_widget.setXRange(lo, hi, padding=0.0)
-                self._scope_suppress_range_change = False
+                self._set_plot_x_range(lo, hi)
 
         # ── Auto Y ──
         self._update_plot_axis_label(channels)
@@ -2672,6 +2767,9 @@ class HostMainWindow(QMainWindow):
         legend = getattr(self, "_plot_legend", None)
         if legend is None:
             return
+        legend_channels = frozenset(channels)
+        if legend_channels == self._plot_legend_channels:
+            return
         try:
             legend.clear()
             for channel in PLOT_CHANNELS:
@@ -2680,6 +2778,7 @@ class HostMainWindow(QMainWindow):
                         self._plot_curves[channel],
                         PLOT_CHANNEL_LABELS.get(channel, channel),
                     )
+            self._plot_legend_channels = legend_channels
         except Exception:
             return
 
@@ -2716,7 +2815,7 @@ class HostMainWindow(QMainWindow):
         return None
 
     def _current_stream_elapsed_s(self) -> float | None:
-        if self._scope_start_tick_ms is None:
+        if self._scope_start_seq is None:
             return None
         worker = getattr(self, "_serial_worker", None)
         if worker is None:
@@ -2724,7 +2823,7 @@ class HostMainWindow(QMainWindow):
         samples = worker.current_ring().get_recent(1)
         if not samples:
             return None
-        return max(0.0, (samples[0].tick_ms - self._scope_start_tick_ms) / 1000.0)
+        return self._seq_delta(samples[0].seq, self._scope_start_seq) / self._current_stream_nominal_fps()
 
     @staticmethod
     def _seq_delta(seq: int, origin: int) -> int:
@@ -2747,6 +2846,32 @@ class HostMainWindow(QMainWindow):
         samples = ring.get_all()
         if not samples:
             return [], {ch: [] for ch in channels}
+
+        if self._scope_start_seq is None:
+            self._scope_start_seq = samples[0].seq
+        if self._scope_start_tick_ms is None:
+            self._scope_start_tick_ms = samples[0].tick_ms
+
+        fps = self._current_stream_nominal_fps()
+        max_points = self.CURRENT_STREAM_PLOT_MAX_POINTS
+
+        if self._scope_follow_latest:
+            visible_count = int(max(1.0, self._scope_window_s) * max(1.0, fps)) + max_points
+            samples = samples[-min(len(samples), visible_count):]
+
+        if len(samples) > max_points:
+            stride = max(1, math.ceil(len(samples) / max_points))
+            decimated = samples[::stride]
+            if decimated[-1] is not samples[-1]:
+                decimated.append(samples[-1])
+            samples = decimated
+
+        times = [self._sample_time_s(s, fps) for s in samples]
+        series = {
+            ch: [self._sample_value(s, ch) for s in samples]
+            for ch in channels
+        }
+        return times, series
 
         n = len(samples)
         if n <= MAX_PLOT_POINTS:
@@ -2806,20 +2931,25 @@ class HostMainWindow(QMainWindow):
 
         return times, series
 
-    def _sample_time_s(self, s) -> float:
+    def _sample_time_s(self, s, fps: float | None = None) -> float:
         """Compute relative time (seconds) for a CurrentSample."""
-        if self._scope_start_seq is not None and self._scope_start_tick_ms is not None:
-            return self._seq_delta(s.seq, self._scope_start_seq) / max(1.0, self._measured_fps())
+        if self._scope_start_seq is not None:
+            if fps is None:
+                fps = self._current_stream_nominal_fps()
+            return self._seq_delta(s.seq, self._scope_start_seq) / max(1.0, fps)
         if self._scope_start_tick_ms is not None:
             return (s.tick_ms - self._scope_start_tick_ms) / 1000.0
         return 0.0
 
-    def _measured_fps(self) -> float:
-        """Estimate current stream frames per second from seq and tick deltas."""
-        worker = getattr(self, "_serial_worker", None)
-        if worker is None:
-            return 1000.0
-        samples = worker.current_ring().get_all()
+    def _current_stream_nominal_fps(self) -> float:
+        index = self.cur_mode_combo.currentIndex() if hasattr(self, "cur_mode_combo") else 0
+        if index == 1:
+            return 200.0
+        if index == 3:
+            return 2000.0
+        return 1000.0
+
+    def _estimate_current_stream_fps(self, samples: list) -> float:
         if len(samples) < 2:
             return 1000.0
         first = samples[0]
@@ -2829,6 +2959,14 @@ class HostMainWindow(QMainWindow):
         if seq_span > 0 and tick_span_s > 0.0:
             return seq_span / tick_span_s
         return 1000.0
+
+    def _measured_fps(self) -> float:
+        """Estimate current stream frames per second from seq and tick deltas."""
+        worker = getattr(self, "_serial_worker", None)
+        if worker is None:
+            return 1000.0
+        samples = worker.current_ring().get_all()
+        return self._estimate_current_stream_fps(samples)
 
     @staticmethod
     def _sample_value(s, ch: str) -> float:
@@ -2893,6 +3031,7 @@ class HostMainWindow(QMainWindow):
             self._scope_start_seq = None
             self._scope_start_tick_ms = None
             self._cur_stats_prev_total = 0
+            self._cur_stats_prev_at_s = None
             self._scope_follow_latest = True
             self._scope_auto_y = True
             self.scope_follow_check.setChecked(True)
@@ -2906,20 +3045,26 @@ class HostMainWindow(QMainWindow):
                 parser = worker.current_parser()
                 parser.reset_stats()
             if pg is not None:
-                self._scope_suppress_range_change = True
-                self.plot_widget.setXRange(0.0, self._scope_window_s, padding=0.0)
-                self._scope_suppress_range_change = False
+                self._set_plot_x_range(0.0, self._scope_window_s)
             # Set origin from first arriving data
         else:
             for curve in self._plot_curves.values():
                 curve.setData([], [])
             self._plot_buffer = RollingPlotBuffer()
             if pg is not None:
-                self.plot_widget.setXRange(0, self._scope_window_s, padding=0.0)
+                self._set_plot_x_range(0.0, self._scope_window_s)
 
     def _on_scope_pause_toggled(self, checked: bool):
         """V1.2: freeze plot display without stopping firmware data flow."""
         self._scope_paused = bool(checked)
+
+    def _set_plot_x_range(self, lo: float, hi: float):
+        if pg is None:
+            return
+        self._scope_suppress_range_change = True
+        self._scope_ignore_manual_range_until_ms = time.monotonic() * 1000.0 + 250.0
+        self.plot_widget.setXRange(lo, hi, padding=0.0)
+        self._scope_suppress_range_change = False
 
     def _on_scope_wake(self):
         """Back to latest: re-enable follow-latest and jump to current window."""
@@ -2931,7 +3076,7 @@ class HostMainWindow(QMainWindow):
         if elapsed is not None:
             lo = max(0.0, elapsed - self._scope_window_s)
             hi = lo + self._scope_window_s
-            self.plot_widget.setXRange(lo, hi, padding=0.0)
+            self._set_plot_x_range(lo, hi)
 
     def _on_scope_window_changed(self, text: str):
         try:
@@ -2950,6 +3095,8 @@ class HostMainWindow(QMainWindow):
         """User manually zoomed/panned → disable follow-latest."""
         if self._scope_suppress_range_change:
             return
+        if time.monotonic() * 1000.0 < self._scope_ignore_manual_range_until_ms:
+            return
         if self._scope_follow_latest:
             self._scope_follow_latest = False
             self.scope_follow_check.blockSignals(True)
@@ -2960,6 +3107,10 @@ class HostMainWindow(QMainWindow):
         self._plot_refresh_pending = True
 
     def _flush_pending_plot_refresh(self):
+        if self._scope_enabled and getattr(self, "cur_stream_group", None) is not None and self.cur_stream_group.isChecked():
+            self._plot_refresh_pending = False
+            self._refresh_plot()
+            return
         if not self._plot_refresh_pending:
             return
         self._plot_refresh_pending = False
@@ -2969,6 +3120,8 @@ class HostMainWindow(QMainWindow):
 
     def _on_cur_stream_toggled(self, checked: bool):
         if checked:
+            self._select_current_stream_plot_channels()
+            self._reset_current_stream_scope_origin()
             self._cur_stream_stats_timer.start()
             if self.scope_window_combo.currentText() == "5s":
                 self.scope_window_combo.setCurrentText("1s")
@@ -2984,6 +3137,31 @@ class HostMainWindow(QMainWindow):
             # Send OFF command via CommandBuilder
             self.command_requested.emit(CommandBuilder.telem_cur_off())
             self.cur_mode_combo.setCurrentIndex(0)
+
+    def _select_current_stream_plot_channels(self):
+        for channel, checkbox in self.plot_channel_checks.items():
+            should_enable = channel in {"Ia", "Ib", "Ic"}
+            if checkbox.isChecked() == should_enable:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(should_enable)
+            checkbox.blockSignals(False)
+
+    def _reset_current_stream_scope_origin(self):
+        self._scope_start_timestamp = None
+        self._scope_start_seq = None
+        self._scope_start_tick_ms = None
+        self._cur_stats_prev_total = 0
+        self._cur_stats_prev_at_s = None
+        self._plot_buffer = RollingPlotBuffer()
+        worker = getattr(self, "_serial_worker", None)
+        if worker is not None:
+            ring = worker.current_ring()
+            ring.clear()
+            parser = worker.current_parser()
+            parser.reset_stats()
+        if pg is not None:
+            self._set_plot_x_range(0.0, self._scope_window_s)
 
     def _on_cur_mode_changed(self, index: int):
         if not self.cur_stream_group.isChecked():
@@ -3001,7 +3179,7 @@ class HostMainWindow(QMainWindow):
 
     def _on_current_samples_batch(self, samples: list):
         """Receive batch of CurrentSample from serial worker.
-        Set scope origin on first sample; trigger deferred plot refresh."""
+        Set scope origin on first sample. Plot refresh is timer-driven."""
         if not self._scope_enabled or not samples:
             return
         # Set origin from first sample if not yet set
@@ -3009,8 +3187,6 @@ class HostMainWindow(QMainWindow):
             self._scope_start_seq = samples[0].seq
         if self._scope_start_tick_ms is None:
             self._scope_start_tick_ms = samples[0].tick_ms
-        # Request plot refresh for current stream channels
-        self._request_plot_refresh()
 
     def _refresh_cur_stream_stats(self):
         """Update current stream stats label (called at 20Hz)."""
@@ -3028,9 +3204,17 @@ class HostMainWindow(QMainWindow):
         pct = (fill / cap * 100) if cap > 0 else 0
 
         # Approximate fps: delta since last tick
+        now_s = time.monotonic()
         prev = getattr(self, "_cur_stats_prev_total", 0)
+        prev_s = getattr(self, "_cur_stats_prev_at_s", None)
         self._cur_stats_prev_total = total
+        self._cur_stats_prev_at_s = now_s
         fps = (total - prev) * 20  # 20Hz timer → multiply by 20 for fps
+
+        if prev_s is None or now_s <= prev_s:
+            fps = 0
+        else:
+            fps = int((total - prev) / (now_s - prev_s))
 
         self.cur_stats_label.setText(
             f"rx: {fps} fps | gap: {stats['seq_gaps']} | CRC: {stats['crc_errors']} | "

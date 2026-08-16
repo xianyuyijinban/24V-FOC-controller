@@ -156,13 +156,16 @@ $FOC_SOURCES = @(
     "MDK-ARM/code/demo_button_control.c",
     "MDK-ARM/code/drv8350s.c",
     "MDK-ARM/code/foc_app.c",
+    "MDK-ARM/code/foc_profiler.c",
     "MDK-ARM/code/foc_core.c",
+    "MDK-ARM/code/foc_observer.c",
     "MDK-ARM/code/motor_identify.c",
     "MDK-ARM/code/param_storage.c",
     "MDK-ARM/code/tle5012.c",
     "MDK-ARM/code/uart_upload.c",
     "MDK-ARM/code/current_stream.c",
-    "MDK-ARM/code/can_protocol.c"
+    "MDK-ARM/code/can_protocol.c",
+    "MDK-ARM/code/wheel_input.c"
 )
 
 $ASM_SOURCES = @(

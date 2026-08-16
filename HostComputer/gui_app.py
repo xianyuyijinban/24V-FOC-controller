@@ -1,7 +1,7 @@
 import sys
 
-from PyQt6.QtCore import QMetaObject, Qt, QThread
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtCore import QMetaObject, Qt, QThread
+from PySide6.QtWidgets import QApplication
 
 from .main_window import HostMainWindow
 from .serial_worker import SerialWorker

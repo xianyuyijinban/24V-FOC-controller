@@ -11,7 +11,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from PyQt6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from data_parser import CurrentSample, FOCDataPacket, CommandBuilder
 from main_window import HostMainWindow
@@ -398,6 +398,8 @@ class TestHostMainWindow(unittest.TestCase):
         window = self._window()
         commands = []
         window.command_requested.connect(commands.append)
+        window.plot_channel_checks["angle"].setChecked(True)
+        window.plot_channel_checks["speed"].setChecked(True)
 
         window.cur_stream_group.setChecked(True)
 
@@ -406,6 +408,11 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(window.scope_window_combo.currentText(), "1s")
         self.assertEqual(window.cur_mode_combo.currentIndex(), 2)
         self.assertIn(CommandBuilder.telem_cur_bin(1000), commands)
+        self.assertTrue(window.plot_channel_checks["Ia"].isChecked())
+        self.assertTrue(window.plot_channel_checks["Ib"].isChecked())
+        self.assertTrue(window.plot_channel_checks["Ic"].isChecked())
+        self.assertFalse(window.plot_channel_checks["angle"].isChecked())
+        self.assertFalse(window.plot_channel_checks["speed"].isChecked())
 
     def test_current_stream_mode_change_starts_scope_when_enabled(self):
         window = self._window()
@@ -449,6 +456,92 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(series["Ia"], [123.0, 125.0])
         self.assertEqual(series["Ib"], [-45.0, -47.0])
         self.assertEqual(series["Ic"], [-78.0, -79.0])
+
+    def test_current_stream_plot_time_uses_configured_rate_not_payload_tick(self):
+        window = self._window()
+
+        class FakeRing:
+            def __init__(self):
+                self._samples = [
+                    CurrentSample(seq=100, tick_ms=5000, ia=0.001, ib=0.0, ic=0.0),
+                    CurrentSample(seq=101, tick_ms=9000, ia=0.002, ib=0.0, ic=0.0),
+                ]
+
+            def get_all(self):
+                return list(self._samples)
+
+        class FakeWorker:
+            def __init__(self):
+                self._ring = FakeRing()
+
+            def current_ring(self):
+                return self._ring
+
+        window._serial_worker = FakeWorker()
+        window.cur_mode_combo.setCurrentIndex(2)  # BIN 1kHz
+        window._scope_start_seq = 100
+
+        times, _ = window._get_current_stream_plot_data(["Ia"])
+
+        self.assertEqual(times, [0.0, 0.001])
+
+    def test_current_stream_plot_data_uses_one_ring_snapshot(self):
+        window = self._window()
+        samples = [
+            CurrentSample(seq=i, tick_ms=i, ia=0.001 * i, ib=0.0, ic=0.0)
+            for i in range(5000)
+        ]
+
+        class FakeRing:
+            def __init__(self):
+                self.calls = 0
+
+            def get_all(self):
+                self.calls += 1
+                return list(samples)
+
+        class FakeWorker:
+            def __init__(self):
+                self._ring = FakeRing()
+
+            def current_ring(self):
+                return self._ring
+
+        worker = FakeWorker()
+        window._serial_worker = worker
+        window._scope_start_seq = 0
+        window._scope_start_tick_ms = 0
+
+        times, series = window._get_current_stream_plot_data(["Ia"])
+
+        self.assertEqual(worker.current_ring().calls, 1)
+        self.assertLessEqual(len(times), window.CURRENT_STREAM_PLOT_MAX_POINTS + 1)
+        self.assertEqual(len(series["Ia"]), len(times))
+
+    def test_current_stream_batches_do_not_directly_request_plot_refresh(self):
+        window = self._window()
+        window._scope_enabled = True
+        window._plot_refresh_pending = False
+
+        window._on_current_samples_batch([
+            CurrentSample(seq=1, tick_ms=1000, ia=0.001, ib=0.0, ic=0.0)
+        ])
+
+        self.assertEqual(window._scope_start_seq, 1)
+        self.assertFalse(window._plot_refresh_pending)
+
+    def test_current_stream_timer_refreshes_without_pending_flag(self):
+        window = self._window()
+        window._scope_enabled = True
+        window._plot_refresh_pending = False
+        window.cur_stream_group.blockSignals(True)
+        window.cur_stream_group.setChecked(True)
+        window.cur_stream_group.blockSignals(False)
+
+        with mock.patch.object(window, "_refresh_plot") as refresh_plot:
+            window._flush_pending_plot_refresh()
+
+        refresh_plot.assert_called_once()
 
     def test_current_stream_diagnostics_report_window_metrics(self):
         samples = [
@@ -797,7 +890,7 @@ class TestHostMainWindow(unittest.TestCase):
         window._state.encoder_detected = True
         window.app_arm_button.clicked.emit()
         # V1.2+: sequence emits APP_MODE first; rest waits for ACK advancement
-        self.assertEqual(commands, ["CMD:APP_MODE,RAW"])
+        self.assertEqual(commands, ["CMD:APP_MODE,RAW\n"])
 
         commands.clear()
         window._state.power_unlocked = True  # V1.2: simulate ACK
@@ -808,7 +901,7 @@ class TestHostMainWindow(unittest.TestCase):
         # Top enable stays legacy; app enable emits APP_MODE first
         self.assertEqual(
             commands,
-            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n", "CMD:APP_MODE,RAW"],
+            ["CMD:STALL_MODE,1\n", "CMD:ENABLE,1\n", "CMD:APP_MODE,RAW\n"],
         )
 
     def test_app_enable_preserves_stall_mode_confirmation_sequence(self):
@@ -842,7 +935,7 @@ class TestHostMainWindow(unittest.TestCase):
         window.joint_pos_target_spin.setValue(20.0)
 
         window.joint_pos_start_btn.clicked.emit()
-        self.assertEqual(commands, ["CMD:APP_MODE,JOINT_POS"])
+        self.assertEqual(commands, ["CMD:APP_MODE,JOINT_POS\n"])
 
     def test_detent_cfg_reasserts_app_mode_even_when_host_thinks_detent(self):
         window = self._window()
@@ -854,6 +947,7 @@ class TestHostMainWindow(unittest.TestCase):
         window.detent_count_spin.setValue(12)
         window.detent_strength_spin.setValue(1.0)
         window.detent_width_spin.setValue(0.13)
+        window.detent_damping_spin.setValue(0.08)
         window.detent_limit_spin.setValue(0.25)
 
         window.detent_cfg_set_btn.clicked.emit()
@@ -868,8 +962,8 @@ class TestHostMainWindow(unittest.TestCase):
         window._state.app_mode = "DETENT"
 
         window.detent_preset_std_btn.clicked.emit()
-        self.assertEqual(commands, ["CMD:APP_MODE,DETENT"])
-        self.assertEqual(commands, ["CMD:APP_MODE,DETENT"])
+        self.assertEqual(commands, ["CMD:APP_MODE,DETENT\n"])
+        self.assertEqual(commands, ["CMD:APP_MODE,DETENT\n"])
 
     def test_hold_panel_status_uses_runtime_telemetry(self):
         window = self._window()
@@ -883,16 +977,31 @@ class TestHostMainWindow(unittest.TestCase):
         self.assertEqual(window.hold_angle_label.text(), "295.70 deg")
         self.assertEqual(window.hold_speed_label.text(), "0.02 rad/s")
 
+    def test_hold_lock_button_dispatches_hold_app_mode(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.power_unlocked = True
+        window._state.motor_enabled = True
+        window._state.identify_active = False
+        window._state.fault_active = False
+
+        window.hold_lock_btn.clicked.emit()
+
+        self.assertEqual(commands, ["CMD:APP_MODE,HOLD\n"])
+
     # ── V1.2 Chinese display tests ──
 
     def test_app_mode_combo_shows_chinese_labels_with_protocol_userdata(self):
         window = self._window()
         combo = window.app_mode_combo
-        self.assertEqual(combo.count(), 6)
+        self.assertEqual(combo.count(), 7)
         labels = [combo.itemText(i) for i in range(combo.count())]
-        self.assertEqual(labels, ["原始控制", "关节位置", "云台速度", "位置保持", "弹簧阻尼", "卡点旋钮"])
+        self.assertEqual(labels, ["原始控制", "关节位置", "云台速度", "位置保持", "弹簧阻尼", "卡点旋钮", "滚轮鼠标"])
         tokens = [combo.itemData(i) for i in range(combo.count())]
-        self.assertEqual(tokens, ["RAW", "JOINT_POS", "GIMBAL_SPEED", "HOLD", "SPRING_DAMPER", "DETENT"])
+        self.assertEqual(tokens, ["RAW", "JOINT_POS", "GIMBAL_SPEED", "HOLD", "SPRING_DAMPER", "DETENT", "SCROLL_WHEEL"])
 
     def test_app_mode_set_button_uses_currentData(self):
         window = self._window()
@@ -905,13 +1014,65 @@ class TestHostMainWindow(unittest.TestCase):
         window.app_mode_set_button.clicked.emit()
         self.assertIn("CMD:APP_MODE,HOLD\n", commands)
 
-    def test_app_mode_ack_reselects_combo_via_findData(self):
+    def test_scroll_wheel_mode_cannot_bypass_bridge_session(self):
+        window = self._window()
+        commands = []
+        window.command_requested.connect(commands.append)
+        window.update_connection_state(True)
+        commands.clear()
+        window._state.power_unlocked = True
+        window._state.motor_enabled = False
+        window._state.motor_identified = True
+        window._state.encoder_detected = True
+
+        idx = window.app_mode_combo.findData("SCROLL_WHEEL")
+        window.app_mode_combo.setCurrentIndex(idx)
+        window._apply_control_enable_state()
+
+        self.assertFalse(window.app_enable_button.isEnabled())
+        self.assertFalse(window.app_arm_button.isEnabled())
+        self.assertFalse(window.app_mode_set_button.isEnabled())
+        window._on_app_mode_set()
+        self.assertNotIn("CMD:APP_MODE,SCROLL_WHEEL\n", commands)
+
+    def test_scroll_wheel_panel_controls_bridge_session(self):
+        window = self._window()
+        requests = []
+        window.bridge_wheel_enable_requested.connect(requests.append)
+
+        window.update_bridge_state({
+            "state": "CONNECTED_IDLE",
+            "port": "COM7",
+            "baud": 1000000,
+        })
+        self.assertTrue(window.wheel_bridge_enable_btn.isEnabled())
+        self.assertFalse(window.wheel_bridge_disable_btn.isEnabled())
+        window.wheel_bridge_enable_btn.clicked.emit()
+        self.assertEqual(requests, [True])
+
+        window.update_bridge_state({
+            "state": "WHEEL_ACTIVE",
+            "port": "COM7",
+            "baud": 1000000,
+        })
+        self.assertFalse(window.wheel_bridge_enable_btn.isEnabled())
+        self.assertTrue(window.wheel_bridge_disable_btn.isEnabled())
+        window.wheel_bridge_disable_btn.clicked.emit()
+        self.assertEqual(requests, [True, False])
+
+    def test_app_mode_ack_does_not_overwrite_user_selection(self):
         window = self._window()
         window.update_connection_state(True)
-        self.assertEqual(window.app_mode_combo.currentIndex(), 0)
+        scroll_idx = window.app_mode_combo.findData("SCROLL_WHEEL")
+        window.app_mode_combo.setCurrentIndex(scroll_idx)
+
         window.handle_log_line("RX", "APP_MODE,OK,HOLD")
-        self.assertEqual(window.app_mode_combo.currentText(), "位置保持")
-        self.assertEqual(window.app_mode_combo.currentData(), "HOLD")
+
+        self.assertEqual(window._state.app_mode, "HOLD")
+        self.assertEqual(window._state.app_mode_selected, "SCROLL_WHEEL")
+        self.assertEqual(window.app_mode_combo.currentData(), "SCROLL_WHEEL")
+        self.assertEqual(window.mode_panel_stack.currentIndex(), scroll_idx)
+        self.assertIn("待同步：滚轮鼠标", window.advanced_mode_value.text())
 
     def test_app_control_status_shows_chinese_format_raw(self):
         window = self._window()
@@ -927,6 +1088,15 @@ class TestHostMainWindow(unittest.TestCase):
         text = window._app_control_status_text()
         self.assertIn("产品：弹簧阻尼", text)
         self.assertIn("底层：位置", text)
+
+    def test_scroll_wheel_app_mode_is_reported_as_position_control(self):
+        window = self._window()
+        window.update_connection_state(True)
+        window.handle_log_line("RX", "APP_MODE,OK,SCROLL_WHEEL")
+
+        self.assertEqual(window._state.app_mode_ctrl, 2)
+        self.assertIn("产品：滚轮鼠标", window.advanced_mode_value.text())
+        self.assertIn("底层：位置", window.advanced_mode_value.text())
 
     def test_enable_and_arm_buttons_disable_during_fault_or_identify(self):
         window = self._window()

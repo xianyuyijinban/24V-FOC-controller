@@ -103,11 +103,15 @@ $(CODE_DIR)/adc_sampling.c \
 $(CODE_DIR)/drv8350s.c \
 $(CODE_DIR)/demo_button_control.c \
 $(CODE_DIR)/foc_app.c \
+$(CODE_DIR)/foc_profiler.c \
 $(CODE_DIR)/foc_core.c \
 $(CODE_DIR)/motor_identify.c \
 $(CODE_DIR)/param_storage.c \
 $(CODE_DIR)/tle5012.c \
 $(CODE_DIR)/uart_upload.c \
+$(CODE_DIR)/current_stream.c \
+$(CODE_DIR)/can_protocol.c \
+$(CODE_DIR)/wheel_input.c \
 $(HAL_SOURCES)
 
 # ASM sources (GNU startup file)

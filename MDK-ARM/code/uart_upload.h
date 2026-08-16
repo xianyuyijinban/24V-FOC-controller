@@ -304,6 +304,12 @@ void DrvUart_SendTextP1(const char *text);
 bool DrvUart_SendBytesP1(const uint8_t *data, uint16_t len);
 
 /**
+ * @brief Send raw bytes with P0 priority (wheel events, STOP, ACK — never dropped,
+ *        but will fail with false when TX ring has no space; caller must retry/coalesce)
+ */
+bool DrvUart_SendBytesP0(const uint8_t *data, uint16_t len);
+
+/**
  * @brief Enable/disable legacy ASCII C-frame phase current telemetry
  * @note  When binary current stream is active, legacy C-frame should be
  *        suppressed to avoid wasted bandwidth and command-channel contention.
@@ -324,6 +330,12 @@ bool DrvUart_IsEnabled(void);
  * @brief 获取统计信息
  */
 void DrvUart_GetStatistics(DrvUart_Statistics_t* stats);
+
+/**
+ * @brief Get cumulative TX admission-drop counters by priority.
+ * @note Counters are accumulated from boot and are copied atomically.
+ */
+void DrvUart_GetTxDropCounts(uint32_t* p0Drop, uint32_t* p1Drop, uint32_t* p2Drop);
 
 /**
  * @brief 清除故障历史

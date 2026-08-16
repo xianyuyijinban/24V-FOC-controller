@@ -35,6 +35,7 @@
 #include "demo_button_control.h"
 #include "can_protocol.h"
 #include "current_stream.h"
+#include "foc_profiler.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -235,6 +236,7 @@ int main(void)
     Main_BootUartSend("BOOT,CLOCK_HSI_FALLBACK\r\n", 25U);
   }
   Main_BootUartSend("BOOT,CLOCK_READY\r\n", 18U);
+  FOC_Profiler_Init();
 
   /* USER CODE BEGIN SysInit */
 
@@ -387,6 +389,19 @@ int main(void)
 
     /* V1.1: Binary current stream drain (after telemetry, P1 priority) */
     CurStream_Process();
+
+    /* V1.3: Wheel event drain + session timeout check (P0 priority) */
+    {
+        uint8_t wheel_expired = WheelInput_Process();
+        if (wheel_expired) {
+            /* Session lost — immediate STOP, disable, return to RAW */
+            FOC_App_Disable(&g_foc_app);
+            /* Force back to RAW mode so normal commands work again */
+            FOC_App_SetAppMode(&g_foc_app, APP_MODE_RAW);
+            /* Also lock power for safety */
+            g_foc_app.power_unlocked = 0U;
+        }
+    }
 
     /* Phase 6: CAN protocol heartbeat check */
     CanProtocol_Process();

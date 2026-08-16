@@ -1110,7 +1110,7 @@ static const char *UART_CommandMapAlias(const char *cmd, char *buf, size_t bufSi
 static void UART_CommandExecute(const char *cmd)
 {
     long int int_arg;
-    float f1, f2;
+    float f1, f2, f3, f4;
     char mapped_buf[UART_CMD_LINE_MAX];
     const char *mapped;
 
@@ -1170,6 +1170,7 @@ static void UART_CommandExecute(const char *cmd)
             " MOTION: MOTION_CFG? MOTION_CFG,s,a,c MOTION_CFG,RESET\r\n"
             " POS_DIRECT: POS_DIRECT? POS_DIRECT,0|1 POS_DIRECT_GAIN,Kp,Kd POS_DIRECT_KI,Ki\r\n"
             " FRIC_COMP: FRIC_COMP? FRIC_COMP,pos,neg DIR? (诊断方向锁存/积分/力矩指令)\r\n"
+            " OBS: OBS? (omega_hat vs 差分) OBS_CFG,w0,use_d (速度观测器调参)\r\n"
             " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
             " JOINT: LIMIT? LIMIT,min_deg,max_deg LIMIT,OFF\r\n"
             " GIMBAL: RAMP? RAMP,accel\r\n"
@@ -1728,6 +1729,74 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
 
+    /* ── OBS: 低速速度观测器 (线性ESO) ── */
+    if (strcmp(cmd, "CMD:OBS?") == 0) {
+        char resp[224];
+        char obs_str[20], lpf_str[20], diff_str[20], t_str[20], w0_str[20];
+        float enc_dir_fq = (g_foc_app.motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        DrvUart_FormatFixed(obs_str, sizeof(obs_str), g_foc_app.speed_obs.omega_hat * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(lpf_str, sizeof(lpf_str), g_foc_app.speed_obs.omega_lpf * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(diff_str, sizeof(diff_str),
+                            g_foc_app.speed_mech * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(t_str, sizeof(t_str), g_foc_app.speed_obs.T_hat, 6U);
+        DrvUart_FormatFixed(w0_str, sizeof(w0_str), g_foc_app.obs_w0, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "OBS,OK,w0=%s,t_gain=%.1f,use_d=%u,use_speed=%u,valid=%u,omega_hat=%s,omega_lpf=%s,diff=%s,T_hat=%s\r\n",
+                 w0_str, (double)g_foc_app.speed_obs.t_gain,
+                 (unsigned int)g_foc_app.obs_use_d,
+                 (unsigned int)g_foc_app.obs_use_speed,
+                 (unsigned int)g_foc_app.speed_obs.valid,
+                 obs_str, lpf_str, diff_str, t_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f,%f,%f", &f1, &f2, &f3, &f4) == 4) {
+        /* w0 带宽, use_d = D项用观测器, use_speed = 速度环反馈用观测器,
+         * t_gain = T_hat 学习增益(L3放大) */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        uint8_t use_speed = (f3 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f && f4 >= 0.0f && f4 <= 1000.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            g_foc_app.obs_use_speed = use_speed;
+            g_foc_app.obs_t_gain = f4;
+            g_foc_app.speed_obs.t_gain = f4;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f,%f", &f1, &f2, &f3) == 3) {
+        /* 兼容 3 参数 (w0, use_d, use_speed), t_gain 保持不变 */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        uint8_t use_speed = (f3 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            g_foc_app.obs_use_speed = use_speed;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f", &f1, &f2) == 2) {
+        /* 兼容旧 2 参数 (w0, use_d), use_speed 保持不变 */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+
     /* ── FRIC_COMP: 静摩擦补偿运行时幅值 ── */
     if (strcmp(cmd, "CMD:DIR?") == 0) {
         char resp[160];
@@ -1761,6 +1830,17 @@ static void UART_CommandExecute(const char *cmd)
             UART_CommandSendText("FRIC_COMP,OK\r\n");
         } else {
             UART_CommandSendText("FRIC_COMP,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:FRIC_CFG,%f,%f", &f1, &f2) == 2) {
+        /* Stribeck 运行时调参: vs 特征速度(0.1°/s 需小 VS 让运动衰减到动摩擦), kin 动摩擦比例 */
+        if (f1 >= 0.0001f && f1 <= 1.0f && f2 >= 0.0f && f2 <= 1.0f) {
+            g_foc_app.fric_vs = f1;
+            g_foc_app.fric_kin = f2;
+            UART_CommandSendText("FRIC_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("FRIC_CFG,FAIL,range\r\n");
         }
         return;
     }

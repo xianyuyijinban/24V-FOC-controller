@@ -16,7 +16,7 @@ extern SPI_HandleTypeDef hspi3;
 TLE5012_Data_t tle5012_sensor = {0};
 
 /* 函数前置声明 */
-static uint8_t TLE5012_CalculateCRC8(const uint16_t *words, uint8_t word_count);
+static uint8_t TLE5012_CalculateCRC8(const uint8_t *bytes, uint8_t byte_count);
 static void TLE5012_AssertCS(void);
 static void TLE5012_ReleaseCS(void);
 static void TLE5012_HandleCommFault(TLE5012_Fault_t fault);
@@ -285,7 +285,6 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
 {
     uint16_t raw_data;
     uint16_t safety_word;
-    uint16_t crc_words[3];
     uint8_t received_crc;
     uint8_t calculated_crc;
     uint8_t safety_ok;
@@ -312,17 +311,22 @@ void TLE5012_ProcessData(uint16_t *rx_buf)
 
     raw_data = rx_buf[0];
     safety_word = rx_buf[1];
-    crc_words[0] = TLE5012_READ_CMD;
-    crc_words[1] = raw_data;
-    crc_words[2] = safety_word & 0xFF00U;
 
     received_crc = (uint8_t)(safety_word & 0x00FFU);
-    // TLE5012B datasheet: CRC in safety word covers data transmitted by slave
-    // For a read operation, the slave transmits: data word + safety word
-    // The CRC covers the data word only (the word before the safety word).
-    // Try: 1 word (raw_data), or 2 words (CMD+DATA), or 3 words (CMD+DATA+SAFETY_STATUS)
-    // Current best guess: CRC over data word only (1 word)
-    calculated_crc = TLE5012_CalculateCRC8(&raw_data, 1U);
+    /* TLE5012B CRC8 coverage (SSC mode, per Infineon User Manual §5.2.4):
+     * - Command word (2 bytes, MSB first: 0x80, 0x21)
+     * - Data word (2 bytes, MSB first)
+     * The STAT/RESP upper byte of the safety word is NOT included.
+     * Total: 4 bytes. Polynomial: 0x1D, Seed: 0xFF, Final XOR: 0xFF.
+     */
+    {
+        uint8_t crc_bytes[4];
+        crc_bytes[0] = (uint8_t)(TLE5012_READ_CMD >> 8);     /* cmd MSB: 0x80 */
+        crc_bytes[1] = (uint8_t)(TLE5012_READ_CMD & 0xFFU);  /* cmd LSB: 0x21 */
+        crc_bytes[2] = (uint8_t)(raw_data >> 8);              /* data MSB */
+        crc_bytes[3] = (uint8_t)(raw_data & 0xFFU);           /* data LSB */
+        calculated_crc = TLE5012_CalculateCRC8(crc_bytes, 4U);
+    }
     tle5012_sensor.raw_word = raw_data;
     tle5012_sensor.safety_word = safety_word;
     tle5012_sensor.received_crc = received_crc;
@@ -460,31 +464,24 @@ uint8_t TLE5012_IsGpioDiagActive(void)
     return tle5012_gpio_diag.active;
 }
 
-static uint8_t TLE5012_CalculateCRC8(const uint16_t *words, uint8_t word_count)
+static uint8_t TLE5012_CalculateCRC8(const uint8_t *bytes, uint8_t byte_count)
 {
     uint8_t crc = 0xFFU;
-    uint8_t poly = 0x1DU;
-    uint8_t word_index;
-    uint8_t byte_index;
+    const uint8_t poly = 0x1DU;
+    uint8_t i;
+    uint8_t bit;
 
-    if (words == NULL) {
+    if (bytes == NULL) {
         return 0U;
     }
 
-    for (word_index = 0U; word_index < word_count; ++word_index) {
-        for (byte_index = 0U; byte_index < 2U; ++byte_index) {
-            uint8_t data = (byte_index == 0U)
-                               ? (uint8_t)(words[word_index] >> 8)
-                               : (uint8_t)(words[word_index] & 0x00FFU);
-            uint8_t bit;
-
-            crc ^= data;
-            for (bit = 0U; bit < 8U; ++bit) {
-                if ((crc & 0x80U) != 0U) {
-                    crc = (uint8_t)((crc << 1) ^ poly);
-                } else {
-                    crc <<= 1;
-                }
+    for (i = 0U; i < byte_count; ++i) {
+        crc ^= bytes[i];
+        for (bit = 0U; bit < 8U; ++bit) {
+            if ((crc & 0x80U) != 0U) {
+                crc = (uint8_t)((crc << 1) ^ poly);
+            } else {
+                crc <<= 1;
             }
         }
     }

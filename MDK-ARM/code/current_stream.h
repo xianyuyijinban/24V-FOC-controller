@@ -61,6 +61,21 @@ void CurStream_PushSample(const CurStreamSample_t *s);
 /* Called from main loop — drains ring, sends frames (P1 priority) */
 void CurStream_Process(void);
 
+/* ── Shared binary frame builder ─────────────────────────────────── */
+/**
+ * @brief Build a binary envelope frame: A5 5A | type | payload_len | payload | CRC-8
+ * @param type         Frame type byte ('C' = current, 'W' = wheel event, etc.)
+ * @param payload      Payload bytes to pack
+ * @param payload_len  Number of payload bytes
+ * @param buf_out      Output buffer, must be at least (payload_len + 5) bytes
+ * @return Total frame length written to buf_out (payload_len + 5)
+ */
+uint8_t CurStream_BuildFrame(uint8_t type, const uint8_t *payload,
+                             uint8_t payload_len, uint8_t *buf_out);
+
+/* CRC-8 (poly 0x07) — exposed for shared use by wheel_input, etc. */
+uint8_t CurStream_CRC8(const uint8_t *data, uint16_t len);
+
 /* Statistics */
 uint32_t CurStream_GetSentCount(void);
 uint32_t CurStream_GetDropCount(void);

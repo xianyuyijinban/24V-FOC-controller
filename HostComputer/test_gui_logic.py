@@ -23,6 +23,7 @@ from gui_logic import (
     apply_command_effects,
     apply_packet_effects,
     build_current_ref_command,
+    build_app_mode_command,
     build_loop_gain_command,
     build_motor_pn_command,
     build_position_ref_command,
@@ -78,6 +79,7 @@ class TestGuiLogic(unittest.TestCase):
         self.assertEqual(build_current_ref_command("0.25", "1.5"), "CMD:IREF,0.250,1.500\n")
         self.assertEqual(build_speed_ref_command("5.0"), "CMD:SREF,5.000\n")
         self.assertEqual(build_position_ref_command("180"), "CMD:PREF,3.142\n")
+        self.assertEqual(build_app_mode_command("DETENT"), "CMD:APP_MODE,DETENT\n")
         self.assertEqual(build_vbus_limit_command("9.0", "15.5"), "CMD:VBUS_LIMIT,9.000,15.500\n")
         self.assertEqual(build_motor_pn_command("7"), "CMD:MOTOR_PN,7\n")
 

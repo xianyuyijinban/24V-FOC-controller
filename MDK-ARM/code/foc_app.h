@@ -18,6 +18,7 @@ extern "C" {
 #include "adc_sampling.h"
 #include "tle5012.h"
 #include "drv8350s.h"
+#include "foc_observer.h"
 
 /*==================== 配置参数 ====================*/
 
@@ -38,6 +39,10 @@ extern "C" {
 #define FOC_FF_OBSERVER_GAIN_L   50.0f /* 观测器收敛率 rad/s */
 #define FOC_FF_OBSERVER_LPF_HZ   10.0f /* 观测器输出LPF截止频率 Hz */
 #define FOC_FF_OBSERVER_MAX_A    1.0f  /* 观测器前馈最大补偿电流 A */
+
+/* 低速速度观测器 (线性ESO, foc_observer.c/h) */
+#define FOC_OBSERVER_W0_DEFAULT   12.0f /* 观测器带宽默认 rad/s (10~15 建议区间) */
+#define FOC_OBSERVER_T_GAIN_DEFAULT 1.0f /* T_hat 学习增益默认 (L3 放大倍数) */
 
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
@@ -302,6 +307,17 @@ typedef struct {
     float speed_elec;           /* 电转速 rad/s */
     float speed_theta_prev;     /* 速度估算上一拍机械角度 rad */
     uint32_t theta_sample_seq;  /* 机械角度样本序号 */
+
+    /* 低速速度观测器 (线性ESO) */
+    FOC_SpeedObserver_t speed_obs;   /* 增广Luenberger [theta,omega,T] (机械帧) */
+    float obs_w0;                    /* 观测器带宽 rad/s (运行时调参) */
+    float obs_t_gain;                /* T_hat 学习增益 (L3 放大倍数) */
+    uint8_t obs_use_d;               /* 1 = POS_DIRECT D项用观测器速度 */
+    uint8_t obs_use_speed;           /* 1 = 速度环反馈用观测器速度 (低速平滑) */
+    float fric_vs;                   /* Stribeck 特征速度 rad/s (运行时, 低速衰减调参) */
+    float fric_kin;                  /* Stribeck 动摩擦比例 (运行时) */
+    float speed_obs_mech;            /* 观测器速度(机械帧) 诊断 */
+    float speed_obs_user;            /* 观测器速度(用户帧) 诊断 */
     
     /* 参考值 */
     float Id_ref;

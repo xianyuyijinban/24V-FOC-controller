@@ -37,6 +37,7 @@ APP_MODE_CN = {
     "HOLD": "位置保持",
     "SPRING_DAMPER": "弹簧阻尼",
     "DETENT": "卡点旋钮",
+    "SCROLL_WHEEL": "滚轮鼠标",
 }
 
 APP_MODE_TOKENS = list(APP_MODE_CN.keys())  # canonical display order
@@ -578,6 +579,7 @@ def button_enable_state(state: HostAppState) -> dict[str, bool]:
     identify_active = bool(state.identify_active)
     fault_active = bool(state.fault_active or state.foc_state == FOC_STATE_FAULT)
     pending = bool(state.pending_command)
+    bridge_managed_wheel = (state.app_mode_selected or "RAW") == "SCROLL_WHEEL"
     can_quick_arm = connected and not enabled and not identify_active and not fault_active and not pending
     return {
         "can_unlock": connected and not unlocked and not pending,
@@ -597,8 +599,8 @@ def button_enable_state(state: HostAppState) -> dict[str, bool]:
         "motion_target": connected and unlocked and enabled and not identify_active and not fault_active and not pending,
         "hold_button": connected and unlocked and enabled and not identify_active and not fault_active and not pending,
         # V1.2+ -- Product-mode-aware enable/arm
-        "app_enable": connected and unlocked and not enabled and not identify_active and not fault_active and not pending,
-        "app_arm": can_quick_arm,
+        "app_enable": connected and unlocked and not enabled and not identify_active and not fault_active and not pending and not bridge_managed_wheel,
+        "app_arm": can_quick_arm and not bridge_managed_wheel,
     }
 
 
@@ -702,7 +704,7 @@ def is_app_mode_synced(state: HostAppState) -> bool:
     return state.app_mode_selected == (state.app_mode or "RAW")
 
 
-HAPTIC_MODES = frozenset({"SPRING_DAMPER", "DETENT"})
+HAPTIC_MODES = frozenset({"SPRING_DAMPER", "DETENT", "SCROLL_WHEEL"})
 POSITION_MODES = frozenset({"JOINT_POS", "HOLD"})
 
 def get_app_mode_prerequisites(state: HostAppState, app_mode: str) -> tuple[bool, str]:
@@ -734,7 +736,7 @@ def get_app_mode_prerequisites(state: HostAppState, app_mode: str) -> tuple[bool
 
 def build_app_mode_command(app_mode: str) -> str:
     """Build CMD:APP_MODE,<token> from a mode token."""
-    return f"CMD:APP_MODE,{app_mode}"
+    return CommandBuilder.app_mode_set(app_mode)
 
 
 def build_app_enable_sequence(app_mode: str, state: HostAppState) -> list[str]:
@@ -875,6 +877,12 @@ def apply_command_effects(state: HostAppState, command: str):
         state.joint_limit_enabled = False
         state.joint_limit_min = None
         state.joint_limit_max = None
+    elif text.startswith("DETENT:CFG,") or text.startswith("CMD:DETENT_CFG,"):
+        state.pending_command = "DETENT:CFG"
+        state.pending_command_value = text
+    elif text.startswith("SPRING:CFG,") or text.startswith("CMD:CFG,"):
+        state.pending_command = "SPRING:CFG"
+        state.pending_command_value = text
 
 
 def apply_ack_effects(state: HostAppState, ack: AckResult, now_ms: int = 0):
@@ -1009,9 +1017,9 @@ SPRING_PRESETS = {
 }
 
 DETENT_PRESETS = {
-    "light":    (12, 0.50, 0.18, 0.15),   # 轻卡点
-    "standard": (12, 1.00, 0.13, 0.25),   # 标准
-    "dense":    (24, 1.20, 0.10, 0.30),   # 密集
+    "light":    (12, 3.00, 0.24, 0.08, 0.40),   # 轻卡点
+    "standard": (12, 6.00, 0.24, 0.10, 0.60),   # 标准
+    "dense":    (24, 7.00, 0.16, 0.10, 0.70),   # 密集
 }
 
 
@@ -1059,9 +1067,9 @@ def parse_spring_cfg_response(line: str) -> Optional[dict]:
 
 
 def parse_detent_cfg_response(line: str) -> Optional[dict]:
-    """Parse 'DETENT:CFG,OK,count=12,strength=1.000,width=0.130,limit=0.250'."""
+    """Parse 'DETENT:CFG,OK,count=12,strength=3.000,width=0.220,damping=0.080,limit=0.300'."""
     m = re.search(
-        r'^DETENT:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),limit=([\d.]+)',
+        r'^DETENT:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),damping=([\d.]+),limit=([\d.]+)',
         line.strip(),
     )
     if m:
@@ -1069,9 +1077,32 @@ def parse_detent_cfg_response(line: str) -> Optional[dict]:
             "count": int(m.group(1)),
             "strength": float(m.group(2)),
             "width": float(m.group(3)),
-            "limit": float(m.group(4)),
+            "damping": float(m.group(4)),
+            "limit": float(m.group(5)),
         }
     return None
+
+
+def parse_wheel_cfg_response(line: str) -> Optional[dict]:
+    """Parse 'WHEEL:CFG,OK,count=24,strength=6.000,width=0.160,damping=0.100,limit=0.300'."""
+    m = re.search(
+        r'^WHEEL:CFG,OK,count=(\d+),strength=([\d.]+),width=([\d.]+),damping=([\d.]+),limit=([\d.]+)',
+        line.strip(),
+    )
+    if m:
+        return {
+            "count": int(m.group(1)),
+            "strength": float(m.group(2)),
+            "width": float(m.group(3)),
+            "damping": float(m.group(4)),
+            "limit": float(m.group(5)),
+        }
+    return None
+
+
+def build_wheel_cfg_command(count: int, strength: float, width: float, damping: float, limit: float) -> str:
+    """Build WHEEL:CFG,<count>,<strength>,<width>,<damping>,<limit> command."""
+    return f"WHEEL:CFG,{int(count)},{strength:.3f},{width:.3f},{damping:.3f},{limit:.3f}\n"
 
 
 def packet_snapshot(packet: FOCDataPacket) -> dict[str, str]:

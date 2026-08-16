@@ -1,5 +1,6 @@
 import unittest
 import sys
+import struct
 from pathlib import Path
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -787,6 +788,33 @@ class TestBinaryCurrentParser(unittest.TestCase):
         samples, text = parser.feed(b"UNLOCK,OK,1\r\n")
         self.assertEqual(samples, [])
         self.assertEqual(text, b"UNLOCK,OK,1\r\n")
+
+    def test_valid_wheel_frame_decodes(self):
+        parser = BinaryCurrentParser()
+        payload = struct.pack('<H I h i h H', 7, 1234, -2, 41, -350, 0x000B)
+        body = b'\xA5\x5A' + bytes([parser.TYPE_WHEEL, len(payload)]) + payload
+        frame = body + bytes([parser._compute_crc8(body)])
+
+        samples, events, residual = parser.feed_all(frame)
+
+        self.assertEqual(samples, [])
+        self.assertEqual(residual, b"")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].delta_steps, -2)
+        self.assertEqual(events[0].position_steps, 41)
+        self.assertTrue(events[0].session_active)
+
+    def test_known_type_with_wrong_payload_length_is_rejected(self):
+        parser = BinaryCurrentParser()
+        payload = bytes(15)
+        body = b'\xA5\x5A' + bytes([parser.TYPE_WHEEL, len(payload)]) + payload
+        frame = body + bytes([parser._compute_crc8(body)])
+
+        samples, events, _residual = parser.feed_all(frame)
+
+        self.assertEqual(samples, [])
+        self.assertEqual(events, [])
+        self.assertEqual(parser.length_errors, 1)
 
 
 if __name__ == "__main__":

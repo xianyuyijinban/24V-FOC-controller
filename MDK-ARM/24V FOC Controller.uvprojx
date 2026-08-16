@@ -137,7 +137,7 @@
             <DriverSelection>4101</DriverSelection>
           </Flash1>
           <bUseTDR>1</bUseTDR>
-          <Flash2>BIN\UL2V8M.DLL</Flash2>
+          <Flash2>BIN\UL2CM3.DLL</Flash2>
           <Flash3>"" ()</Flash3>
           <Flash4></Flash4>
           <pFcarmOut></pFcarmOut>
@@ -1328,6 +1328,16 @@
               <FilePath>.\code\foc_app.h</FilePath>
             </File>
             <File>
+              <FileName>foc_profiler.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\foc_profiler.c</FilePath>
+            </File>
+            <File>
+              <FileName>foc_profiler.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\foc_profiler.h</FilePath>
+            </File>
+            <File>
               <FileName>foc_core.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\foc_core.c</FilePath>
@@ -1336,6 +1346,16 @@
               <FileName>foc_core.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\foc_core.h</FilePath>
+            </File>
+            <File>
+              <FileName>foc_observer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\foc_observer.c</FilePath>
+            </File>
+            <File>
+              <FileName>foc_observer.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\foc_observer.h</FilePath>
             </File>
             <File>
               <FileName>motor_identify.c</FileName>
@@ -1356,6 +1376,36 @@
               <FileName>param_storage.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\param_storage.h</FilePath>
+            </File>
+            <File>
+              <FileName>can_protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\can_protocol.c</FilePath>
+            </File>
+            <File>
+              <FileName>can_protocol.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\can_protocol.h</FilePath>
+            </File>
+            <File>
+              <FileName>current_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\current_stream.c</FilePath>
+            </File>
+            <File>
+              <FileName>current_stream.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\current_stream.h</FilePath>
+            </File>
+            <File>
+              <FileName>wheel_input.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\wheel_input.c</FilePath>
+            </File>
+            <File>
+              <FileName>wheel_input.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\wheel_input.h</FilePath>
             </File>
           </Files>
         </Group>

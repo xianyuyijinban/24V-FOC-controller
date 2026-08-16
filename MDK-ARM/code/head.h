@@ -10,6 +10,7 @@
 #include "param_storage.h"
 #include "foc_app.h"
 #include "uart_upload.h"
+#include "wheel_input.h"
 
 	extern volatile uint16_t adc_data[8];
 	extern volatile uint16_t urT_data[8];
@@ -22,4 +23,6 @@
 	extern FOC_AppHandle_t g_foc_app;
 
 	void UART_Command_ProcessPending(void);
+	void UART_CommandQueuePushFromCan(const char *line);
+	void UART_CommandExecuteMuted(const char *cmd);
 #endif

@@ -41,7 +41,7 @@ static const uint8_t s_crc8_table[256] = {
     0xDE,0xD9,0xD0,0xD7,0xC2,0xC5,0xCC,0xCB,0xE6,0xE1,0xE8,0xEF,0xFA,0xFD,0xF4,0xF3
 };
 
-static uint8_t CurStream_CRC8(const uint8_t *data, uint16_t len)
+uint8_t CurStream_CRC8(const uint8_t *data, uint16_t len)
 {
     uint8_t crc = 0x00U;
     uint16_t i;
@@ -49,6 +49,31 @@ static uint8_t CurStream_CRC8(const uint8_t *data, uint16_t len)
         crc = s_crc8_table[crc ^ data[i]];
     }
     return crc;
+}
+
+/**
+ * @brief Build a binary envelope frame: A5 5A | type | payload_len | payload | CRC-8
+ * @return Total frame length (payload_len + 5)
+ */
+uint8_t CurStream_BuildFrame(uint8_t type, const uint8_t *payload,
+                             uint8_t payload_len, uint8_t *buf_out)
+{
+    uint8_t crc;
+    uint8_t i;
+
+    buf_out[0] = CUR_STREAM_SYNC0;
+    buf_out[1] = CUR_STREAM_SYNC1;
+    buf_out[2] = type;
+    buf_out[3] = payload_len;
+
+    for (i = 0U; i < payload_len; i++) {
+        buf_out[4U + i] = payload[i];
+    }
+
+    crc = CurStream_CRC8(buf_out, (uint16_t)(4U + payload_len));
+    buf_out[4U + payload_len] = crc;
+
+    return (uint8_t)(5U + payload_len);
 }
 
 /* ── Ring buffer ─────────────────────────────────────────────────── */
@@ -184,7 +209,6 @@ void CurStream_Process(void)
 {
     uint8_t buf[FRAME_BUF_SIZE];
     uint8_t burst;
-    uint8_t crc;
 
     if (s_mode == CUR_STREAM_OFF || s_rate_hz == 0U) {
         return;
@@ -194,34 +218,32 @@ void CurStream_Process(void)
     while (s_read_idx != s_write_idx && burst < 32U) {
         if (s_mode == CUR_STREAM_BIN) {
             CurStreamSample_t *samp = &s_ring[s_read_idx];
+            uint8_t payload[CUR_STREAM_PAYLOAD_LEN];
 
-            /* Pack 25-byte binary frame */
-            buf[0]  = CUR_STREAM_SYNC0;
-            buf[1]  = CUR_STREAM_SYNC1;
-            buf[2]  = CUR_STREAM_TYPE;
-            buf[3]  = CUR_STREAM_PAYLOAD_LEN;
-            buf[4]  = (uint8_t)(samp->seq & 0xFFU);
-            buf[5]  = (uint8_t)((samp->seq >> 8) & 0xFFU);
-            buf[6]  = (uint8_t)(samp->tick_ms & 0xFFU);
-            buf[7]  = (uint8_t)((samp->tick_ms >> 8) & 0xFFU);
-            buf[8]  = (uint8_t)((samp->tick_ms >> 16) & 0xFFU);
-            buf[9]  = (uint8_t)((samp->tick_ms >> 24) & 0xFFU);
-            buf[10] = (uint8_t)(samp->ia_mA & 0xFFU);
-            buf[11] = (uint8_t)((samp->ia_mA >> 8) & 0xFFU);
-            buf[12] = (uint8_t)(samp->ib_mA & 0xFFU);
-            buf[13] = (uint8_t)((samp->ib_mA >> 8) & 0xFFU);
-            buf[14] = (uint8_t)(samp->ic_mA & 0xFFU);
-            buf[15] = (uint8_t)((samp->ic_mA >> 8) & 0xFFU);
-            buf[16] = (uint8_t)(samp->id_mA & 0xFFU);
-            buf[17] = (uint8_t)((samp->id_mA >> 8) & 0xFFU);
-            buf[18] = (uint8_t)(samp->iq_mA & 0xFFU);
-            buf[19] = (uint8_t)((samp->iq_mA >> 8) & 0xFFU);
-            buf[20] = (uint8_t)(samp->vbus_mV & 0xFFU);
-            buf[21] = (uint8_t)((samp->vbus_mV >> 8) & 0xFFU);
-            buf[22] = (uint8_t)(samp->flags & 0xFFU);
-            buf[23] = (uint8_t)((samp->flags >> 8) & 0xFFU);
-            crc     = CurStream_CRC8(buf, 24U);
-            buf[24] = crc;
+            /* Pack 20-byte payload (little-endian) */
+            payload[0]  = (uint8_t)(samp->seq & 0xFFU);
+            payload[1]  = (uint8_t)((samp->seq >> 8) & 0xFFU);
+            payload[2]  = (uint8_t)(samp->tick_ms & 0xFFU);
+            payload[3]  = (uint8_t)((samp->tick_ms >> 8) & 0xFFU);
+            payload[4]  = (uint8_t)((samp->tick_ms >> 16) & 0xFFU);
+            payload[5]  = (uint8_t)((samp->tick_ms >> 24) & 0xFFU);
+            payload[6]  = (uint8_t)(samp->ia_mA & 0xFFU);
+            payload[7]  = (uint8_t)((samp->ia_mA >> 8) & 0xFFU);
+            payload[8]  = (uint8_t)(samp->ib_mA & 0xFFU);
+            payload[9]  = (uint8_t)((samp->ib_mA >> 8) & 0xFFU);
+            payload[10] = (uint8_t)(samp->ic_mA & 0xFFU);
+            payload[11] = (uint8_t)((samp->ic_mA >> 8) & 0xFFU);
+            payload[12] = (uint8_t)(samp->id_mA & 0xFFU);
+            payload[13] = (uint8_t)((samp->id_mA >> 8) & 0xFFU);
+            payload[14] = (uint8_t)(samp->iq_mA & 0xFFU);
+            payload[15] = (uint8_t)((samp->iq_mA >> 8) & 0xFFU);
+            payload[16] = (uint8_t)(samp->vbus_mV & 0xFFU);
+            payload[17] = (uint8_t)((samp->vbus_mV >> 8) & 0xFFU);
+            payload[18] = (uint8_t)(samp->flags & 0xFFU);
+            payload[19] = (uint8_t)((samp->flags >> 8) & 0xFFU);
+
+            (void)CurStream_BuildFrame(CUR_STREAM_TYPE, payload,
+                                       CUR_STREAM_PAYLOAD_LEN, buf);
 
             if (!DrvUart_SendBytesP1(buf, FRAME_BUF_SIZE)) {
                 break;  /* TX ring full — stop draining, try next cycle */

@@ -472,7 +472,7 @@ ParamStatus_t Param_EraseSector(void)
 ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t size)
 {
     uint32_t offset = 0U;
-    __attribute__((aligned(32))) uint8_t flashword_buf[32];
+    static uint8_t flashword_buf[32] __attribute__((aligned(32)));
     const uint8_t *src;
 
     if ((data == NULL) || (size == 0U)) {

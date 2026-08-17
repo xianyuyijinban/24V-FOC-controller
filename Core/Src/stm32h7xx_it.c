@@ -1728,6 +1728,16 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
+    if (sscanf(cmd, "CMD:POS_INTEGR_ERR,%f", &f1) == 1) {
+        /* 条件积分误差阈值 rad (默认0.035=2°)。0.5°/s 误差~3.5°冻结积分 → 提高阈值让积分工作 */
+        if (f1 >= 0.0f && f1 <= 0.5f) {
+            g_foc_app.pos_integral_err_rad = f1;
+            UART_CommandSendText("POS_INTEGR_ERR,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_INTEGR_ERR,FAIL,range\r\n");
+        }
+        return;
+    }
 
     /* ── OBS: 低速速度观测器 (线性ESO) ── */
     if (strcmp(cmd, "CMD:OBS?") == 0) {

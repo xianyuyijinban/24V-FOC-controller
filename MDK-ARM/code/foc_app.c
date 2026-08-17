@@ -170,6 +170,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->pos_direct_iq_cmd = 0.0f;
     handle->pos_direct_ki = FOC_POS_DIRECT_KI_DEFAULT;
     handle->pos_integral = 0.0f;
+    handle->pos_integral_err_rad = FOC_POS_INTEGRAL_ERR_RAD;
     handle->pos_cmd_dir = 0.0f;
     handle->pos_cmd_dir_hold = 0U;
     handle->pos_ref_prev = handle->pos_ref;
@@ -1506,7 +1507,7 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
                 &handle->pos_pd_direct, pos_error, speed_mech_user_pos);
             uint8_t pd_sat = ((pd_out >= handle->pos_pd_direct.output_max) ||
                               (pd_out <= handle->pos_pd_direct.output_min)) ? 1U : 0U;
-            if ((pd_sat == 0U) && (fabsf(pos_error) < FOC_POS_INTEGRAL_ERR_RAD)) {
+            if ((pd_sat == 0U) && (fabsf(pos_error) < handle->pos_integral_err_rad)) {
                 handle->pos_integral += pos_error * FOC_POS_LOOP_TS;
             }
             float ki_out = handle->pos_direct_ki * handle->pos_integral;

@@ -1128,16 +1128,9 @@ ff_layers:
                     float coulomb = coulomb_dir * fric;
                     /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。
                      * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
-                     * 直连位置模式: 平滑速度用指令速率 pos_cmd_rate (speed_ref 被清 0,
-                     * 否则 smooth 恒 1 满额前馈, 0.5°/s 处与积分打架实测蠕动 33%)。 */
+                     * 直连位置模式: 不用 pos_cmd_rate 衰减 (实测 2°/s 衰减后 105→82%,
+                     * 2°/s 需要满额 comp 持续驱动; 0.5°/s 的 comp 反噬由 COG OFF 解决)。 */
                     float v_smooth = fabsf(omega_smooth);
-                    if ((handle->control_mode == FOC_MODE_POSITION) &&
-                        (handle->pos_direct != 0U)) {
-                        v_smooth = handle->pos_cmd_rate;
-                        if (v_smooth < 1e-5f) {
-                            v_smooth = fabsf(omega_smooth);
-                        }
-                    }
                     float stick = expf(-v_smooth / handle->fric_vs);
                     float smooth = handle->fric_kin
                                    + (1.0f - handle->fric_kin) * stick;

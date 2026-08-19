@@ -173,18 +173,17 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->pos_integral_err_rad = FOC_POS_INTEGRAL_ERR_RAD;
     handle->pos_cmd_dir = 0.0f;
     handle->pos_cmd_dir_hold = 0U;
-    handle->pos_cmd_rate = 0.0f;
     handle->pos_loop_skip_integral = 0U;
-    handle->pos_aw_mode = 0U;
-    handle->pos_aw_rate = 0.05f;
+    handle->pos_aw_mode = 1U;      /* 积分抗饱和律定版: 1=超阈值回拉 (2026-08-20 台架) */
+    handle->pos_aw_rate = 0.03f;   /* 回拉速率定版 (0.5°/s 98.8%, 阶跃剩 3.5%) */
     handle->pos_aw_decay_diag = 0.0f;
     handle->pos_ref_prev = handle->pos_ref;
-    
+
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
 
     /* P0 cogging runtime defaults (overridable via CMD:COG_CFG) */
-    handle->cogging_lut.gain = 0.25f;
+    handle->cogging_lut.gain = 0.0f;
     handle->cogging_lut.phase_offset_rad = FOC_PI / 3.0f;  /* +60 deg */
 
     /* 静摩擦补偿运行时幅值默认 (overridable via CMD:FRIC_COMP) */
@@ -197,7 +196,7 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     memcpy(handle->cogging_lut.table, COGGING_LUT_CAL, sizeof(float) * FOC_COGGING_LUT_SIZE);
     handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
     handle->cogging_lut.valid = 1U;
-    handle->cogging_lut.gain = 1.0f;
+    handle->cogging_lut.gain = 0.0f;  /* 定版 OFF (错相 LUT 0.5°/s 反噬; 精确标定后可运行时 COG_CFG 开) */
     FOC_App_UpdateIdentifyState(handle);
     
     /* 如果参数有效，更新控制环参数 */
@@ -1128,8 +1127,8 @@ ff_layers:
                     float coulomb = coulomb_dir * fric;
                     /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。
                      * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
-                     * 直连位置模式: 不用 pos_cmd_rate 衰减 (实测 2°/s 衰减后 105→82%,
-                     * 2°/s 需要满额 comp 持续驱动; 0.5°/s 的 comp 反噬由 COG OFF 解决)。 */
+                     * 直连位置模式保持 omega_smooth (实测 2°/s 用指令速率衰减后 105→82%,
+                     * 2°/s 需要满额 comp; 0.5°/s 的 comp 反噬由 COG OFF 解决)。 */
                     float v_smooth = fabsf(omega_smooth);
                     float stick = expf(-v_smooth / handle->fric_vs);
                     float smooth = handle->fric_kin
@@ -1510,17 +1509,6 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
             handle->pos_cmd_dir = 0.0f;
         } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
             handle->pos_cmd_dir = 0.0f;
-        }
-        /* 指令速率估计(用户帧 rad/s): PREF 增量除周期, 斜坡活跃时非零。
-         * 直连模式 speed_ref 被清 0, FF 层 Stribeck 平滑速度需用它,
-         * 否则 smooth 恒 1 → 满额静摩擦前馈在 0.5°/s 与积分打架(蠕动)。 */
-        {
-            float rate = ref_delta / FOC_POS_LOOP_TS;
-            if (handle->pos_cmd_dir != 0.0f) {
-                handle->pos_cmd_rate = fabsf(rate);
-            } else {
-                handle->pos_cmd_rate *= 0.8f;  /* 指数衰减, 短间歇后归零 */
-            }
         }
 
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */

@@ -66,8 +66,8 @@ def main():
     ap.add_argument("--comp", type=float, default=0.022)
     ap.add_argument("--ierr", type=float, default=0.035)
     ap.add_argument("--aw", default="", help="积分抗饱和律 'mode,rate' (空=不动)")
-    ap.add_argument("--cog-gain", type=float, default=0.25,
-                    help="COG LUT 增益固定值 (默认0.25=定版; 实验前强制设置, 防 flash 后回 1.0)")
+    ap.add_argument("--cog-gain", type=float, default=0.0,
+                    help="COG LUT 增益 (默认0=固件定版OFF; 实验前强制设置)")
     ap.add_argument("--enc-dir", type=float, default=-1.0,
                     help="编码器方向 (仅用于把 control 帧 err 换算成 sensor 帧滞后)")
     ap.add_argument("--out", default="", help="JSON 输出路径 (空=不存)")

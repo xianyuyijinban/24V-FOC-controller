@@ -356,7 +356,6 @@ typedef struct {
     float   pos_aw_rate;            /* mode1 回拉速率(比例/拍) / mode3 泄放速率 */
     float   pos_aw_decay_diag;      /* POSDBG: 本拍积分泄放量 A */
     float   pos_cmd_dir;            /* 位置指令方向锁存 -1/0/+1 (慢摇连续静摩擦补偿方向源) */
-    float   pos_cmd_rate;           /* 位置指令速率估计(用户帧 rad/s, 斜坡活跃时) — FF层Stribeck平滑用 */
     float   pos_ref_prev;           /* 上一周期 pos_ref (计算指令方向增量) */
     uint16_t pos_cmd_dir_hold;      /* 指令方向保持计数 @200Hz (ref静止后仍保持, 防PC步进间歇清方向) */
     uint8_t  pos_loop_skip_integral;/* 1=本拍位置环只更新PD不积分 (PREF处理器手动即时拍用,

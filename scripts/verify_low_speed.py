@@ -26,7 +26,8 @@ def main():
     ap.add_argument("--kp", type=float, default=0.49)
     ap.add_argument("--kd", type=float, default=0.007)
     ap.add_argument("--comp", type=float, default=0.022)
-    ap.add_argument("--cog-gain", type=float, default=0.25)
+    ap.add_argument("--cog-gain", type=float, default=0.0,
+                    help="COG LUT 增益 (默认0=固件定版OFF; 覆盖会改默认行为)")
     ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")
     args = ap.parse_args()
     if not args.power_ok:
@@ -188,11 +189,11 @@ def main():
             results["step_pos"] = r
         else:
             print("  采样不足!")
-        # 回起点并测稳态
+        # 回起点并测稳态: 回位后稳定 5s 再测 2s pp (排除回程余振, 解释 002136 轮 4.18°)
         ser.write(b"CMD:PREF,%.5f\n" % (a1 * DEG2RAD))
-        time.sleep(2.0)
+        time.sleep(5.0)
         a2 = read_angle()
-        print("\n=== 稳态(2s) @%.2f° ===" % (a2 if a2 else -1), flush=True)
+        print("\n=== 稳态(回位+5s后, 2s窗口) @%.2f° ===" % (a2 if a2 else -1), flush=True)
         stab_t = track(a2 * DEG2RAD, 2.0, a2, is_step=True)
         if len(stab_t) >= 5:
             pp = max(s[1] for s in stab_t) - min(s[1] for s in stab_t)

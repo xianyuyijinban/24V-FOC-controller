@@ -1,5 +1,108 @@
 # PROGRESS
 
+## [2026-08-20] 定版门通过：FF 库仑方向反噬 bug 修复 + 阶跃回归达标 + 定版配置确认
+
+### Problem / Task
+- 阶段 3 定版前置门（6° 阶跃回归）执行中暴露**第四层根因——FF 库仑方向反噬**：
+  - `pos_cmd_dir` 是传感器帧方向（+1=传感器正向），FF 库仑直接当 control 帧力矩方向用，**漏乘 enc_dir** → enc_dir=-1 时补偿方向恒反（实测 0.5°/s 斜坡 dir=+1 时 ff_total +0.03A 在反向推）。
+  - 这解释全部残局：comp=0.022 时 0.5°/s 只有 58%（FF 反噬吃指令）、6° 阶跃走 1° 就停（FF 反向抵消 P 项）、comp 越大越差。
+  - comp=0 时 97.6% 是因为 FF 关闭掩盖了 bug（0.5°/s 斜坡组当时 comp=0）。
+  - **COG LUT 是阶跃卡死的第二元凶**：错相 LUT 在当前位置恒推 +0.03A（该位置相位错误），抵消 P 项 30%，电机走 1.8° 后 P 项衰减到摩擦线下卡住。
+
+### Resolution
+1. **FF 库仑方向修复**（foc_app.c 直连 + 级联两处）：`coulomb_dir = pos_cmd_dir × enc_dir`（传感器帧方向转 control 帧力矩）。
+2. **COG LUT 定版 OFF**：0.5°/s 处错相 LUT 恒推 +0.03A 造成 ±6° 振荡（COG ON err std 0.9° vs OFF 0.3°）与阶跃卡死；COG OFF 后阶跃恢复正常。LUT 待精确标定（相位对齐）后再启用。
+3. **定版配置（验证通过）**：AW mode=1 rate=0.03 + comp=0.022 + COG OFF + FF 方向修复。
+
+### Verification（台架实测）
+| 场景 | 结果 |
+|---|---|
+| 0.5°/s 40s 斜坡（COG OFF + FF 修复 + AW1 + comp 0.022） | **98.8%**，err ±1° 内（std 0.32-0.89°），无振荡无死锁 |
+| 6° 阶跃（同上） | **0.3s 到 4.3°、1.0s 到 5.6°、2.8s 到 5.8°（剩 3.5%）**，过冲 2.1° |
+| 0.5°/s 40s 斜坡（COG ON 0.25 + FF 修复 + AW1 + comp 0.022） | 108% 但 err ±6° 振荡（COG 污染）→ COG OFF 胜出 |
+| 2°/s 斜坡（AW1 + comp 0.022 + COG 0.25） | 105.3%（微超为 comp 满额，smooth bug 修复后回落） |
+
+- 阶跃回归（verify_low_speed.py 参数化：--kp/--kd/--comp/--aw/--cog-gain + PREF 步进 0.05s + 斜坡前重锚 a0）。
+- 稳态 pp 4.18° 为 verify 统计口径问题（含回程前瞬态），到位后轨迹 pp 0.23° 干净。
+
+### Prevention / Follow-up
+- **smooth 恒 1 bug（顺手续）**：`pos_cmd_rate` 字段已备好，Stribeck v_smooth 源换过去 → 2°/s comp 衰减到设计值。
+- COG LUT 精确标定后再启用（相位对齐 + 多转重采 + 谐波滤波，独立任务）。
+- 固件默认翻转：`pos_aw_mode=1, rate=0.03`（当前 Init 仍 mode=0/rate=0.05）待用户确认翻转。
+
+### Commit
+- 待提交：`Core/Src/stm32h7xx_it.c`（POS_AW_MODE+POSDBG v2）、`MDK-ARM/code/foc_app.c/h`（FF 方向修复+积分律+pos_cmd_rate）、`scripts/verify_low_speed.py`（参数化）、`scripts/limit_cycle_capture.py`（v2 采集）。
+
+
+
+### Problem / Task
+- 0.5°/s 匀速跟踪 ~40% 封顶的最终根因链（三层嵌套，台架逐层剥离）：
+  1. **积分泄放死锁（核心）**：条件积分（|err|<2° 才积分）在 err 恒 9.9° 时冻结——积分保持陈旧方向 -0.06A 顶住，P 项 +0.082A 被抵消 75%，净力矩只剩 +0.022A 贴摩擦线 → 掉队锁定。
+  2. **comp 前馈反噬（放大镜）**：Stribeck smooth 在直连模式恒 1（pos_direct 清 speed_ref 致 v_smooth=0 的 bug），comp 0.022A 满额输出与积分打架。
+  3. **COG LUT 满增益残留**：实验污染（非设计状态），增益未恢复。
+- 由此修正 08-17 的"积分-摩擦极限环"定性：实测形态是**积分顶死/陈旧积分 + 净力矩不足的持续掉队**，err 全程单号不过零。
+
+### Resolution
+1. **新增 `CMD:POS_AW_MODE,mode[,rate]` 积分抗饱和律**（foc_app.c:1541-1567，POSDBG 同步输出 `pos_aw_decay_diag`）：
+   - 0=条件冻结（旧行为）；1=超阈值回拉（超阈值积分按比例/拍泄向 0）；2=Clegg 复位（误差与积分异号清零）；3=非对称泄放（4× 速率）。
+2. **A/B 结果（40s 斜坡，LSQ 跟踪率）**：
+   | 配置 | 0.5°/s | 0.1°/s | 2°/s |
+   |---|---|---|---|
+   | 旧（条件冻结+comp 0.022） | 33-73% | 95-101% | 82% |
+   | **AW1 rate0.03 + comp 0** | **97.6%** | — | — |
+   | AW1 rate0.03 + comp 0.022 | 58.3% | 103.9% | 107.3% |
+   - 0.5°/s 需 comp=0（前馈在该速段反噬）；0.1°/s 与 2°/s 保持 comp 0.022 无害（2°/s 107.3% 微超为 comp 满额所致，见 Follow-up）。
+3. **建议定版（用户裁定方向）**：`POS_AW_MODE mode=1 rate=0.03` 写固件默认（当前 Init 默认 mode=0/rate=0.05）；comp 默认保持 0.022，0.5°/s 场景运行时 `FRIC_COMP,0,0`。
+4. **阶段 2（位置环提频 200→2kHz）裁定：挂起**——瓶颈是积分律与 FF 反噬非环延迟，验收线已过，提频留作未来加刚跟踪的储备手段。
+
+### Prevention / Follow-up
+- **定版前置门（唯一未覆盖象限）**：6° 阶跃过冲回归（`verify_low_speed.py`，AW1×comp0.022 与 comp0 各一遍）——条件积分当年为阶跃过冲（5.4°→0.58°）而生，理论推演 AW1 对阶跃只会更保守（大误差期积分泄向零），但必须实测确认后方可翻转固件默认。
+- mode2 Clegg 注释与实现不符（判据是"误差与积分异号"非严格过零，以积分符号作代理）；逻辑不动（mode1 胜出），注释待修。
+- **smooth 恒 1 bug 修复（顺手项）**：`foc_app.h:356` 已有 `pos_cmd_rate` 字段，把 Stribeck v_smooth 源从 `speed_ref_temp`（pos_direct 下恒 0）换成它 → 2°/s comp 从满额 0.022A 衰减到设计值 ~0.005A，预计 2°/s 107.3% 回落 ~100%，0.5°/s 或能重新耐受小 comp。改后配同一套 A/B 复测。
+- 0.5°/s 场景配置卡：`POS_AW_MODE,1,0.03` + `FRIC_COMP,0,0`（写进 LOW_SPEED 文档 §3.21）。
+
+### Verification
+- 台架 A/B 三轮 40s 斜坡（LSQ 斜率，v2 采集链路）：0.5°/s 33-73%→97.6%（comp=0）；0.1°/s 103.9%、2°/s 107.3%（comp 0.022，无害）。
+- 阶跃回归未跑（定版前置门）；固件默认未翻转（Init 仍 mode=0）。
+- 根因链逐层剥离实验：积分冻结死锁复现（err 9.9°/积分 -0.06A/P 项被抵消 75%）、comp 满额反噬（smooth=1）、COG 增益残留识别。
+
+### Commit
+- Branch: `foc-public-0817`：M `Core/Src/stm32h7xx_it.c`（POS_AW_MODE 命令+查询）、`MDK-ARM/code/foc_app.c/h`（积分律+diag 字段）。台架数据为 v2 采集链路 JSON（scripts/limit_cycle_0p5_v5+）。
+
+## [2026-08-19] 观测链路与采集脚本全面修正：0.5°/s "跟踪率154-174%"系坐标系 bug（实际 26-46%）+ 固件 PDB v2/PREF 积分耦合修复
+
+### Problem / Task
+- 0.5°/s 攻坚中发现测试脚本与观测方式多处失真，导致读数不可信、A/B 判别被混淆：
+  1. **帧 bug（最伤）**：`limit_cycle_capture.py` 角度重建用 sensor 帧 PREF 减 control 帧 PDB err；enc_dir=-1 时重建角 = 2pref−θ，跟踪率显示为 **200−真实%**。v1-v4 报告 154-174%（物理不可能），按公式换算真实 26-46%，与 err 末值反推（R+err_end）逐点吻合。
+  2. `_diag_ff_chain.py` 分块打印"Iq"列实为 **Id**（`fmean(r[3])*0.0` 运算优先级被清零）；阶段锚点不重置（COG OFF 后首帧 PREF 是回 a0 的反向大阶跃，"动了"可能是阶跃响应而非摘帽证据）；`COG_CFG` 固件无 OK 回显 expect 恒 False，且 `COG_CFG,0,0` 清掉标定相位、`COG_CFG,0.25,0` 猜值恢复 = 污染标定。
+  3. 两脚本主循环内 `ser.reset_input_buffer()` 每轮丢弃 sleep 期间到达行（PDB 200Hz 下 ~40% 样本），且无行缓冲，跨读断行被静默吞。
+  4. PDB 第 6 列标 comp 实为 `fric_comp_pos` **配置常数**，瞬时补偿在第 7 列 `ff_diag.friction_iq`。
+  5. `_obs_pos_slow.py` 默认参数还是探索期旧值（kp=2.0/kd=0.05/ki=1.5/comp=0.09），与 08-17 定版（0.49/0.007/0.37/0.022）不一致。
+  6. **固件-台架耦合**：PREF 处理器同步多调一次 `FOC_App_PositionLoop`（stm32h7xx_it.c:2210），每发一条 PREF 积分多走一拍（Ts=5ms 计）→ PREF 流率 20Hz ≈ 等效 ki +10%，不同流率脚本测的不是同一套系统。
+- 同期确认：四次 capture 中 err 全程单号、过零 0 次——0.5°/s 是**持续掉队**非振荡态；PDB `iq_cmd`（FF前）与 N 帧 `p[19]` Iq_ref（FF后）之差即 ff_total，卡死判别不需 COG 开关实验。
+
+### Resolution
+1. **固件（GCC 构建 0 错 0 警）**：
+   - PDB 行扩到 10 列：追加 `ff_total`（FF层总注入）与 `theta`（sensor 帧归零角度 rad），注释逐列写明帧/单位/语义（含第 6 列是配置常数）。
+   - 新增 `pos_loop_skip_integral` 标志（foc_app.h 结构体 + foc_app.c 积分条件 + Init 默认 0）；PREF 处理器手动即时拍置位调用，只刷新 PD 输出不多积一拍——积分节拍回到纯 200Hz TIM1。
+2. **`scripts/limit_cycle_capture.py` 全量重写 v2**：行缓冲 + 循环内不 reset；PDB theta 列（缺则 N 帧 p[3]）直读真实角度不再重建；跟踪率改**最小二乘斜率**；err 过零 <2 判定"非振荡态（持续掉队）"不算周期；新增 ff_total 均值与 `p19−iq_cmd` 交验列、Iq_meas 均值列；`--enc-dir` 参数把 control 帧 err 换算 sensor 帧滞后；JSON 增存全序列。
+3. **`scripts/_diag_ff_chain.py` 全量重写 v2**：修 Id/Iq 列；每阶段开始重锚 a0；`COG_CFG?` 先查原值（响应格式 `COG_CFG,gain=..,phase_deg=..`）、gain→0 时**相位保持原值**、结束照原值恢复并查询确认；配置失败硬中止；LSQ 斜率 + ff_total 直读 + 三阶段对比判定 LUT 反噬。
+4. **`scripts/_obs_pos_slow.py`**：默认参数定版化（kp=0.49/kd=0.007/ki=0.37/comp=0.022，w0=12，use-d=0）；行缓冲同录 N 帧+OBS 响应；跟踪率改 LSQ 斜率（保留总漂移作参考）。
+
+### Prevention / Follow-up
+- 帧约定已写进三脚本 docstring：**PDB err = control 帧（= enc_dir × sensor 误差）；PREF / N 帧 p[3] / p[18] = sensor 帧；p[19] = FF 后**。新采集脚本一律行缓冲、禁循环内 reset。
+- COG_CFG 任何改动必须先 `COG_CFG?` 记录原值（gain+phase），恢复照原值；gain 与 phase 不可分开假设。
+- 待台架（烧录含 PDB v2 固件后）：① `limit_cycle_capture.py` 跑 v5 采集 → 0.5°/s 真实画像 + ff_total 直读；② `_diag_ff_chain.py` 三阶段 → LUT 反噬判别；③ 视结果回到攻坚路线（直连位置环提频 200→2kHz / 积分律改造 back-calc·Clegg·非对称泄放 / 正反向摩擦独立标定）。
+- v1-v4 历史 capture 的 track_pct 全部作废（显示值=200−真实%）；err/ki_raw/iq_cmd 列不受影响仍可用。
+
+### Verification
+- `python -m py_compile` 三脚本通过；`build.ps1` GCC 构建 0 错 0 警（foc_app.c / stm32h7xx_it.c 均重编 OK，elf 224956B）。
+- 帧 bug 数值验算：v1-v4 报告 153.8/164.7/163.3/174.2% → 换算 46/35/37/26%，与 err 末值反推（15°+err_end）6.8/4.9/4.9/4.2° 一致。
+- 台架烧录与 v5 采集未做（待用户在场）。
+
+### Commit
+- Branch: `foc-public-0817`（工作区改动未提交）：M `Core/Src/stm32h7xx_it.c`、`MDK-ARM/code/foc_app.c`、`MDK-ARM/code/foc_app.h`；重写 `scripts/limit_cycle_capture.py`、`scripts/_diag_ff_chain.py`、`scripts/_obs_pos_slow.py`；build/gcc 产物重生成。
+
 ## [2026-08-14] 台架实跑：板子恢复 + POS_DIRECT 判别/调优/COG 评估（首次硬件闭环验证）
 
 ### Problem / Task

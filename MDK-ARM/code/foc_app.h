@@ -349,9 +349,18 @@ typedef struct {
     float   pos_direct_ki;          /* 直连位置环积分增益 A/(rad·s), 运行时CMD:POS_DIRECT_KI调 */
     float   pos_integral;           /* 直连位置环积分状态 rad·s */
     float   pos_integral_err_rad;   /* 条件积分误差阈值 rad (运行时 CMD:POS_INTEGR_ERR 调; 默认0.035=2°防阶跃过冲) */
+    float   pos_ki_out_prev;        /* 上拍积分输出 A — POSDBG 极限环量化: 0=顶死(±0.10A) 1=未饱和 */
+    float   pos_ki_raw_diag;        /* POSDBG: 饱和前原始积分输出 A (量化积分饱和深度) */
+    float   pos_cmd_dir_diag;       /* POSDBG: 指令方向锁存 -1/0/+1 */
+    uint8_t pos_aw_mode;            /* 积分抗饱和律: 0=条件冻结 1=超阈值回拉 2=Clegg过零复位 3=非对称泄放 */
+    float   pos_aw_rate;            /* mode1 回拉速率(比例/拍) / mode3 泄放速率 */
+    float   pos_aw_decay_diag;      /* POSDBG: 本拍积分泄放量 A */
     float   pos_cmd_dir;            /* 位置指令方向锁存 -1/0/+1 (慢摇连续静摩擦补偿方向源) */
+    float   pos_cmd_rate;           /* 位置指令速率估计(用户帧 rad/s, 斜坡活跃时) — FF层Stribeck平滑用 */
     float   pos_ref_prev;           /* 上一周期 pos_ref (计算指令方向增量) */
     uint16_t pos_cmd_dir_hold;      /* 指令方向保持计数 @200Hz (ref静止后仍保持, 防PC步进间歇清方向) */
+    uint8_t  pos_loop_skip_integral;/* 1=本拍位置环只更新PD不积分 (PREF处理器手动即时拍用,
+                                         防止PC PREF流率调制等效ki: 积分只允许200Hz TIM1拍) */
 
     /* 前馈数据 */
     FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */

@@ -173,6 +173,11 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->pos_integral_err_rad = FOC_POS_INTEGRAL_ERR_RAD;
     handle->pos_cmd_dir = 0.0f;
     handle->pos_cmd_dir_hold = 0U;
+    handle->pos_cmd_rate = 0.0f;
+    handle->pos_loop_skip_integral = 0U;
+    handle->pos_aw_mode = 0U;
+    handle->pos_aw_rate = 0.05f;
+    handle->pos_aw_decay_diag = 0.0f;
     handle->pos_ref_prev = handle->pos_ref;
     
     /* 初始化Rs在线估计器 */
@@ -1088,14 +1093,26 @@ ff_layers:
                 }
                 float friction_total = 0.0f;
                 /* Coulomb: 高速用速度方向, 低速用指令方向兜底
-                 * - POSITION: pos_cmd_dir (方向锁存, 连续斜坡)
+                 * - POSITION: pos_cmd_dir (方向锁存, 连续斜坡) — 直连模式下
+                 *   完全不用速度方向: 低速抖动时差分速度噪声主导, 速度方向
+                 *   导致前馈随噪声高频翻转放大抖动 (0.5°/s 实测 ±24°/s 跳变)。
                  * - SPEED: SREF 指令符号 (差分速度噪声淹没 0.1°/s 信号, 速度方向不可靠) */
                 float coulomb_dir;
-                if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
+                if ((handle->control_mode == FOC_MODE_POSITION) &&
+                    (handle->pos_direct != 0U)) {
+                    /* 直连位置模式: 方向只锁指令方向, 速度方向永不参与。
+                     * pos_cmd_dir 是传感器帧方向, FF 输出需转 control 帧力矩
+                     * (×enc_dir), 否则 enc_dir=-1 时补偿反向(反噬实测 +0.03A
+                     * 抵消 P 项, 阶跃/0.5°/s 全被吃)。 */
+                    float enc_dir_ff = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                    coulomb_dir = handle->pos_cmd_dir * enc_dir_ff;
+                } else if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
                     coulomb_dir = (omega > 0.0f) ? 1.0f : -1.0f;
                 } else if ((handle->control_mode == FOC_MODE_POSITION) &&
                            (handle->pos_cmd_dir != 0.0f)) {
-                    coulomb_dir = handle->pos_cmd_dir;
+                    /* 级联低速兜底: pos_cmd_dir 是传感器帧方向, 转 control 帧 (同直连修正) */
+                    float enc_dir_ff = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                    coulomb_dir = handle->pos_cmd_dir * enc_dir_ff;
                 } else if ((handle->control_mode == FOC_MODE_SPEED) &&
                            (fabsf(speed_ref_temp) > 1e-5f)) {
                     coulomb_dir = (speed_ref_temp > 0.0f) ? 1.0f : -1.0f;
@@ -1111,8 +1128,17 @@ ff_layers:
                     float coulomb = coulomb_dir * fric;
                     /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。
                      * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
-                     * fric_vs 运行时校准(0.1°/s 需更小 VS 让运动时衰减到动摩擦, 否则过驱动)。 */
-                    float stick = expf(-fabsf(omega_smooth) / handle->fric_vs);
+                     * 直连位置模式: 平滑速度用指令速率 pos_cmd_rate (speed_ref 被清 0,
+                     * 否则 smooth 恒 1 满额前馈, 0.5°/s 处与积分打架实测蠕动 33%)。 */
+                    float v_smooth = fabsf(omega_smooth);
+                    if ((handle->control_mode == FOC_MODE_POSITION) &&
+                        (handle->pos_direct != 0U)) {
+                        v_smooth = handle->pos_cmd_rate;
+                        if (v_smooth < 1e-5f) {
+                            v_smooth = fabsf(omega_smooth);
+                        }
+                    }
+                    float stick = expf(-v_smooth / handle->fric_vs);
                     float smooth = handle->fric_kin
                                    + (1.0f - handle->fric_kin) * stick;
                     friction_total += coulomb * smooth;
@@ -1492,6 +1518,17 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
             handle->pos_cmd_dir = 0.0f;
         }
+        /* 指令速率估计(用户帧 rad/s): PREF 增量除周期, 斜坡活跃时非零。
+         * 直连模式 speed_ref 被清 0, FF 层 Stribeck 平滑速度需用它,
+         * 否则 smooth 恒 1 → 满额静摩擦前馈在 0.5°/s 与积分打架(蠕动)。 */
+        {
+            float rate = ref_delta / FOC_POS_LOOP_TS;
+            if (handle->pos_cmd_dir != 0.0f) {
+                handle->pos_cmd_rate = fabsf(rate);
+            } else {
+                handle->pos_cmd_rate *= 0.8f;  /* 指数衰减, 短间歇后归零 */
+            }
+        }
 
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
         float pos_pd_out = FOC_PositionPD_Update(&handle->pos_pd, pos_error, speed_mech_user_pos);
@@ -1507,19 +1544,52 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
                 &handle->pos_pd_direct, pos_error, speed_mech_user_pos);
             uint8_t pd_sat = ((pd_out >= handle->pos_pd_direct.output_max) ||
                               (pd_out <= handle->pos_pd_direct.output_min)) ? 1U : 0U;
-            if ((pd_sat == 0U) && (fabsf(pos_error) < handle->pos_integral_err_rad)) {
+            /* 积分律 (CMD:POS_AW_MODE):
+             * 0=条件冻结 (旧): |err|<阈值 才积分, 超阈值冻结 → 死锁(实测 err 9.9°
+             *   积分反向 -0.06A 顶住, 净力矩被抵消, 掉队锁定)
+             * 1=超阈值回拉: 超阈值时积分以 pos_aw_rate 比例泄放(按误差方向回拉)
+             * 2=Clegg 过零复位: err 过零时积分清零 (描述函数相位 -90°→-38°)
+             * 3=非对称泄放: 积分与误差反向时 4× 速率泄放, 同向正常充电 */
+            float aw_decay = 0.0f;
+            if (handle->pos_aw_mode != 0U) {
+                if (handle->pos_aw_mode == 2U) {
+                    /* Clegg: 误差过零复位 (用上一拍 err 符号检测过零) */
+                    if ((handle->pos_integral != 0.0f) &&
+                        ((pos_error * handle->pos_integral) < 0.0f)) {
+                        handle->pos_integral = 0.0f;
+                    }
+                } else if (fabsf(pos_error) >= handle->pos_integral_err_rad) {
+                    /* 超阈值: 1=回拉 3=非对称泄放 */
+                    float rate = (handle->pos_aw_mode == 3U) ?
+                                 (4.0f * handle->pos_aw_rate) : handle->pos_aw_rate;
+                    aw_decay = handle->pos_integral * rate;
+                    handle->pos_integral -= aw_decay;
+                } else if ((handle->pos_aw_mode == 3U) &&
+                           (handle->pos_integral != 0.0f) &&
+                           ((pos_error * handle->pos_integral) < 0.0f)) {
+                    /* mode3: 阈值内但符号反向 → 快速泄放 */
+                    handle->pos_integral -= handle->pos_integral * (4.0f * handle->pos_aw_rate);
+                }
+            }
+            if ((handle->pos_loop_skip_integral == 0U) &&
+                (pd_sat == 0U) && (fabsf(pos_error) < handle->pos_integral_err_rad)) {
                 handle->pos_integral += pos_error * FOC_POS_LOOP_TS;
             }
             float ki_out = handle->pos_direct_ki * handle->pos_integral;
+            float ki_raw  = ki_out;
             if (ki_out > FOC_POS_INTEGRAL_LIMIT_A) {
                 ki_out = FOC_POS_INTEGRAL_LIMIT_A;
             } else if (ki_out < -FOC_POS_INTEGRAL_LIMIT_A) {
                 ki_out = -FOC_POS_INTEGRAL_LIMIT_A;
             }
+            handle->pos_aw_decay_diag = aw_decay;
             handle->pos_direct_iq_cmd = FOC_Saturate(
                 pd_out + ki_out,
                 handle->pos_pd_direct.output_max,
                 handle->pos_pd_direct.output_min);
+            handle->pos_ki_out_prev = ki_out;          /* POSDBG: 饱和后的积分输出 */
+            handle->pos_ki_raw_diag = ki_raw;          /* POSDBG: 饱和前原始积分输出(量化饱和深度) */
+            handle->pos_cmd_dir_diag = handle->pos_cmd_dir;  /* POSDBG: 指令方向锁存 */
             handle->speed_ref = 0.0f;
             handle->speed_ref_ramped = 0.0f;
             handle->position_loop_error_diag = pos_error;

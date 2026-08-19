@@ -124,6 +124,10 @@ static uint32_t s_adcNoiseTimeoutMs = 0U;
 static uint32_t s_adcNoiseLastFrameSequence = 0U;
 static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
 
+/* POSDBG: 极限环量化诊断流 (CMD:POSDBG,1|0) — 主循环钩子 200Hz 输出一行 */
+static uint8_t  s_posdbg_stream = 0U;
+static uint16_t s_posdbg_acc = 0U;
+
 static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
 {
     FOC_FaultCode_t voltageFault = FOC_FAULT_NONE;
@@ -464,6 +468,44 @@ static void UART_CommandServiceFocProfilerSnapshot(void)
     s_focProfilerTxLine++;
     if (s_focProfilerTxLine > ((uint8_t)FOC_PROBE_COUNT + 1U)) {
         s_focProfilerTxActive = 0U;
+    }
+}
+
+static void UART_CommandServicePosdbg(void)
+{
+    char line[128];
+    int len;
+    const FOC_AppHandle_t *h = &g_foc_app;
+
+    if (s_posdbg_stream == 0U) {
+        return;
+    }
+
+    /* ~200Hz: 主循环约 1kHz, 每 5 拍输出一行 */
+    s_posdbg_acc++;
+    if (s_posdbg_acc < 5U) {
+        return;
+    }
+    s_posdbg_acc = 0U;
+
+    /* 极限环量化: err(位置误差 rad, control帧) ki_out(饱和后积分输出 A) ki_raw(饱和前)
+     * pd_sat(PD饱和) comp_cfg(摩擦补偿配置常数 A, 非瞬时量) fric(FF库仑瞬时 A)
+     * iq_cmd(FF前位置环指令 A) cmd_dir(指令方向锁存)
+     * ff_total(FF层总注入 A: N帧p19 Iq_ref = iq_cmd + ff_total) theta(sensor帧归零角度 rad) */
+    len = snprintf(line, sizeof(line),
+        "PDB,%.5f,%.5f,%.5f,%u,%.5f,%.5f,%.5f,%.1f,%.5f,%.5f\r\n",
+        (double)h->position_loop_error_diag,
+        (double)h->pos_ki_out_prev,
+        (double)h->pos_ki_raw_diag,
+        (unsigned int)h->position_loop_pd_sat_diag,
+        (double)h->fric_comp_pos,
+        (double)h->ff_diag.friction_iq,
+        (double)h->pos_direct_iq_cmd,
+        (double)h->pos_cmd_dir_diag,
+        (double)h->ff_diag.ff_total_iq,
+        (double)FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset));
+    if ((len > 0) && ((size_t)len < sizeof(line))) {
+        DrvUart_SendTextP1(line);
     }
 }
 
@@ -1110,6 +1152,7 @@ static const char *UART_CommandMapAlias(const char *cmd, char *buf, size_t bufSi
 static void UART_CommandExecute(const char *cmd)
 {
     long int int_arg;
+    unsigned long uint_arg;
     float f1, f2, f3, f4;
     char mapped_buf[UART_CMD_LINE_MAX];
     const char *mapped;
@@ -1176,7 +1219,7 @@ static void UART_CommandExecute(const char *cmd)
             " GIMBAL: RAMP? RAMP,accel\r\n"
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
-            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1\r\n"
+            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG?\r\n"
         );
         return;
     }
@@ -1738,6 +1781,55 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
+    if (sscanf(cmd, "CMD:POS_AW_MODE,%u,%f", &uint_arg, &f1) == 2) {
+        /* 积分抗饱和律: mode 0=条件冻结 1=超阈值回拉 2=Clegg过零复位 3=非对称泄放
+         * rate 为回拉/泄放比例 (0~1/拍), 默认 0.05 */
+        if (uint_arg <= 3U && f1 >= 0.0f && f1 <= 1.0f) {
+            g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
+            g_foc_app.pos_aw_rate = f1;
+            UART_CommandSendText("POS_AW_MODE,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_AW_MODE,%u", &uint_arg) == 1) {
+        if (uint_arg <= 3U) {
+            g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
+            UART_CommandSendText("POS_AW_MODE,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:POS_AW_MODE?") == 0) {
+        char resp[80];
+        (void)snprintf(resp, sizeof(resp), "POS_AW_MODE,OK,mode=%u,rate=%.3f\r\n",
+                       (unsigned int)g_foc_app.pos_aw_mode, (double)g_foc_app.pos_aw_rate);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:POSDBG?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp), "POSDBG,OK,stream=%u\r\n",
+                       (unsigned int)s_posdbg_stream);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POSDBG,%u", &uint_arg) == 1) {
+        /* 极限环量化诊断流: 1=开 0=关。主循环服务钩子按 200Hz 输出一行文本 */
+        if (uint_arg <= 1U) {
+            s_posdbg_stream = (uint8_t)uint_arg;
+            if (s_posdbg_stream == 0U) {
+                s_posdbg_acc = 0U;
+            }
+            UART_CommandSendText("POSDBG,OK\r\n");
+        } else {
+            UART_CommandSendText("POSDBG,FAIL,range\r\n");
+        }
+        return;
+    }
 
     /* ── OBS: 低速速度观测器 (线性ESO) ── */
     if (strcmp(cmd, "CMD:OBS?") == 0) {
@@ -2148,7 +2240,11 @@ static void UART_CommandExecute(const char *cmd)
         float pos_before = g_foc_app.pos_ref;
         __disable_irq();
         FOC_App_SetPositionRef(&g_foc_app, f1);
+        /* 手动即时拍：只刷新PD输出让PREF即时生效，但不多积一拍 —
+         * 否则积分节拍 = 200Hz TIM1 + PREF流率，等效ki被PC脚本流率调制 */
+        g_foc_app.pos_loop_skip_integral = 1U;
         FOC_App_PositionLoop(&g_foc_app);
+        g_foc_app.pos_loop_skip_integral = 0U;
         g_foc_app.position_pref_cmd_count_diag++;
         g_foc_app.position_pref_raw_diag = f1;
         g_foc_app.position_pref_mapped_diag = g_foc_app.pos_ref;
@@ -2629,6 +2725,7 @@ void UART_Command_ProcessPending(void)
 
     UART_CommandServiceAdcNoise();
     UART_CommandServiceFocProfilerSnapshot();
+    UART_CommandServicePosdbg();
     TLE5012_GpioDiagService();
     s_uartCmdSourceCan = 0U;
 }

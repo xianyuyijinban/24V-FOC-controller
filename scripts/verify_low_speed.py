@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """新固件低速摩擦验证：斜坡滞后 + 阶跃过冲 + 稳态 pp（带轨迹打印诊断）
-DIRECT kp=0.5/kd=0.03, 摩擦补偿 0.12A, COG OFF, POS_DIRECT_KI 运行时设。
-用法: python scripts/verify_low_speed.py --port COM10 --power-ok
+DIRECT kp=0.49/kd=0.007, 摩擦补偿 --comp, COG --cog-gain, POS_DIRECT_KI 运行时设。
+用法: python scripts/verify_low_speed.py --port COM10 --power-ok [--comp 0.022] [--aw 1,0.03]
 """
 import argparse
 import json
@@ -22,7 +22,12 @@ def main():
     ap.add_argument("--power-ok", action="store_true")
     ap.add_argument("--step", type=float, default=6.0)
     ap.add_argument("--ramp-deg-s", type=float, default=2.0)
-    ap.add_argument("--ki", type=float, default=1.5)
+    ap.add_argument("--ki", type=float, default=0.37)
+    ap.add_argument("--kp", type=float, default=0.49)
+    ap.add_argument("--kd", type=float, default=0.007)
+    ap.add_argument("--comp", type=float, default=0.022)
+    ap.add_argument("--cog-gain", type=float, default=0.25)
+    ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: need --power-ok")
@@ -73,7 +78,7 @@ def main():
             ser.write(b"CMD:PREF,%.5f\n" % target_rad)
         dl = t0 + duration
         while time.time() < dl:
-            if (not is_step) and (time.time() - last_sent >= 0.2):
+            if (not is_step) and (time.time() - last_sent >= 0.05):
                 frac = min((time.time() - t0) / dur, 1.0) if dur > 0 else 1.0
                 cur = a0 * DEG2RAD + (target_rad - a0 * DEG2RAD) * frac
                 ser.write(b"CMD:PREF,%.5f\n" % cur)
@@ -94,10 +99,12 @@ def main():
 
     ser.write(b"CMD:UNLOCK,1\n")
     expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK")
-    expect("CMD:POS_DIRECT_GAIN,%.4f,0.0300" % 0.5, "POS_DIRECT_GAIN,OK")
+    expect("CMD:POS_DIRECT_GAIN,%.4f,%.4f" % (args.kp, args.kd), "POS_DIRECT_GAIN,OK")
     expect("CMD:POS_DIRECT_KI,%.2f" % args.ki, "POS_DIRECT_KI,OK")
-    ser.write(b"CMD:COG_CFG,0.00,0.0\n")
-    expect("CMD:FRIC_COMP,0.120,0.120", "FRIC_COMP,OK")
+    ser.write(b"CMD:COG_CFG,%.3f,60.0\n" % args.cog_gain)
+    expect("CMD:FRIC_COMP,%.3f,%.3f" % (args.comp, args.comp), "FRIC_COMP,OK")
+    aw_mode, aw_rate = args.aw.split(",")
+    expect("CMD:POS_AW_MODE,%s,%s" % (aw_mode, aw_rate), "POS_AW_MODE,OK")
     expect("CMD:MODE,2", "MODE,OK")
     if not expect("CMD:ENABLE,1", "ENABLE,OK"):
         print("ENABLE fail")
@@ -151,7 +158,10 @@ def main():
         return " ".join(out)
 
     try:
-        # 1) 斜坡 +6°
+        # 1) 斜坡 +6° (重新锚定 a0, 钉住后位置可能漂移)
+        a0 = read_angle()
+        if a0 is None:
+            raise RuntimeError("no angle for ramp")
         print("\n=== 斜坡 +%.1f° @%.1f°/s ===" % (step, ramp_s), flush=True)
         pos = track((a0 + step) * DEG2RAD, 3.0 + 3.0, a0, is_step=False)
         r = sp(pos, step)

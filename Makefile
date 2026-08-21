@@ -64,7 +64,7 @@ CXXFLAGS = $(CFLAGS) -std=c++11 -fno-rtti -fno-exceptions
 ASFLAGS = $(MCU_FLAGS) -Wall -fdata-sections -ffunction-sections
 
 # Linker flags
-LDFLAGS = $(MCU_FLAGS) -specs=nano.specs -specs=nosys.specs \
+LDFLAGS = $(MCU_FLAGS) -specs=nano.specs -specs=nosys.specs -u _scanf_float -u _printf_float \
 -TSTM32H743VITX_FLASH.ld \
 -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref \
 -Wl,--gc-sections \
@@ -105,6 +105,7 @@ $(CODE_DIR)/demo_button_control.c \
 $(CODE_DIR)/foc_app.c \
 $(CODE_DIR)/foc_profiler.c \
 $(CODE_DIR)/foc_core.c \
+$(CODE_DIR)/foc_observer.c \
 $(CODE_DIR)/motor_identify.c \
 $(CODE_DIR)/param_storage.c \
 $(CODE_DIR)/tle5012.c \

@@ -2555,10 +2555,9 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
         if (cogging_status == PARAM_OK && cogging_size > 0U) {
             handle->cogging_lut.valid_size = cogging_size;
             handle->cogging_lut.valid = 1U;
-        } else {
-            handle->cogging_lut.valid_size = 0U;
-            handle->cogging_lut.valid = 0U;
         }
+        /* 加载失败保留 Init 的编译版 LUT (2026-08-21: 旧逻辑 else 置 valid=0
+         * 会把编译版一并废掉 — Flash 为空时 COG 永久关闭, 属静默陷阱) */
     }
 #endif
 
@@ -2656,6 +2655,25 @@ void FOC_App_LoadParam(FOC_AppHandle_t *handle)
     }
     FOC_App_ApplyKnownMotorConstants(handle);
     FOC_App_UpdateIdentifyState(handle);
+}
+
+/**
+ * @brief 恢复编译版齿槽 LUT 到运行时表 (覆盖 Flash/辨识 LUT)
+ * @param handle FOC应用层句柄指针
+ * @note  2026-08-21: Flash 旧 LUT (内部电压拖拽辨识, 幅值标尺任意) 在启动时
+ *        遮蔽编译版 — 台架实测注入 22 阶 ~0.068A vs 编译版 0.0089A (~7x 过驱动)。
+ *        本函数把脚本标定+谐波重构的编译版 LUT 换回运行时表 (仅 RAM)。
+ */
+void FOC_App_CoggingUseCompiled(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+    memcpy(handle->cogging_lut.table, COGGING_LUT_CAL,
+           sizeof(float) * FOC_COGGING_LUT_SIZE);
+    handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
+    handle->cogging_lut.valid = 1U;
+    handle->cogging_lut.pending = 0U;
 }
 
 /**

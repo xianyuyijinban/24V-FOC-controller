@@ -29,11 +29,11 @@ def main():
     ap.add_argument("--port", default="COM10")
     ap.add_argument("--baud", type=int, default=1000000)
     ap.add_argument("--power-ok", action="store_true")
-    ap.add_argument("--kp", type=float, default=0.5)
-    ap.add_argument("--kd", type=float, default=0.03)
+    ap.add_argument("--kp", type=float, default=0.49)
+    ap.add_argument("--kd", type=float, default=0.007)
     ap.add_argument("--deg-s", type=float, default=5.0)
     ap.add_argument("--sweep", type=float, default=350.0, help="单圈扫动 deg(避开wrap)")
-    ap.add_argument("--comp", type=float, default=0.12, help="摩擦补偿 A")
+    ap.add_argument("--comp", type=float, default=0.022, help="摩擦补偿 A")
     ap.add_argument("--bins", type=int, default=264)
     ap.add_argument("--start-deg", type=float, default=100.0, help="起始角 deg")
     args = ap.parse_args()
@@ -77,6 +77,7 @@ def main():
     expect("CMD:POS_DIRECT_GAIN,%.4f,%.4f" % (args.kp, args.kd), "POS_DIRECT_GAIN,OK")
     ser.write(b"CMD:COG_CFG,0.00,0.0\n")  # 关闭现有LUT
     expect("CMD:FRIC_COMP,%.3f,%.3f" % (args.comp, args.comp), "FRIC_COMP,OK")
+    expect("CMD:POS_AW_MODE,1,0.03", "POS_AW_MODE,OK")
     expect("CMD:MODE,2", "MODE,OK")
     if not expect("CMD:ENABLE,1", "ENABLE,OK"):
         print("ENABLE fail")
@@ -100,7 +101,7 @@ def main():
     last_sent = 0.0
     samples = []  # (t, angle, iq_ref, iq)
     while time.time() - t0 < dur + 1.0:
-        if time.time() - last_sent >= 0.2:
+        if time.time() - last_sent >= 0.05:
             frac = min((time.time() - t0) / dur, 1.0)
             cur = args.start_deg + args.sweep * frac
             ser.write(b"CMD:PREF,%.5f\n" % (cur * DEG2RAD))

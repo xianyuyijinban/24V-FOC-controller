@@ -504,6 +504,7 @@ float FOC_App_PositionControlToSensorFrame(const FOC_AppHandle_t *handle, float 
 /* 参数管理 */
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);
 void FOC_App_SaveParam(FOC_AppHandle_t *handle);
+void FOC_App_CoggingUseCompiled(FOC_AppHandle_t *handle);
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle);
 void FOC_App_StopIdentify(FOC_AppHandle_t *handle);
 uint8_t FOC_App_IsIdentifyComplete(FOC_AppHandle_t *handle);

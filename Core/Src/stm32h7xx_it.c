@@ -127,6 +127,7 @@ static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
 /* POSDBG: 极限环量化诊断流 (CMD:POSDBG,1|0) — 主循环钩子 200Hz 输出一行 */
 static uint8_t  s_posdbg_stream = 0U;
 static uint16_t s_posdbg_acc = 0U;
+static volatile uint32_t s_foc_tick_2khz = 0U;  /* 速度环节拍计数 (2kHz, TIM1 ISR) — PDB 行硬件时基 */
 
 static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
 {
@@ -491,9 +492,10 @@ static void UART_CommandServicePosdbg(void)
     /* 极限环量化: err(位置误差 rad, control帧) ki_out(饱和后积分输出 A) ki_raw(饱和前)
      * pd_sat(PD饱和) comp_cfg(摩擦补偿配置常数 A, 非瞬时量) fric(FF库仑瞬时 A)
      * iq_cmd(FF前位置环指令 A) cmd_dir(指令方向锁存)
-     * ff_total(FF层总注入 A: N帧p19 Iq_ref = iq_cmd + ff_total) theta(sensor帧归零角度 rad) */
+     * ff_total(FF层总注入 A: N帧p19 Iq_ref = iq_cmd + ff_total) theta(sensor帧归零角度 rad)
+     * tick2k(速度环 2kHz 节拍计数: 硬件时基, PC 端 t=tick/2000, 消除 PC 收讫时间戳差分伪影) */
     len = snprintf(line, sizeof(line),
-        "PDB,%.5f,%.5f,%.5f,%u,%.5f,%.5f,%.5f,%.1f,%.5f,%.5f\r\n",
+        "PDB,%.5f,%.5f,%.5f,%u,%.5f,%.5f,%.5f,%.1f,%.5f,%.5f,%lu\r\n",
         (double)h->position_loop_error_diag,
         (double)h->pos_ki_out_prev,
         (double)h->pos_ki_raw_diag,
@@ -503,7 +505,8 @@ static void UART_CommandServicePosdbg(void)
         (double)h->pos_direct_iq_cmd,
         (double)h->pos_cmd_dir_diag,
         (double)h->ff_diag.ff_total_iq,
-        (double)FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset));
+        (double)FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset),
+        (unsigned long)s_foc_tick_2khz);
     if ((len > 0) && ((size_t)len < sizeof(line))) {
         DrvUart_SendTextP1(line);
     }
@@ -1214,12 +1217,12 @@ static void UART_CommandExecute(const char *cmd)
             " POS_DIRECT: POS_DIRECT? POS_DIRECT,0|1 POS_DIRECT_GAIN,Kp,Kd POS_DIRECT_KI,Ki\r\n"
             " FRIC_COMP: FRIC_COMP? FRIC_COMP,pos,neg DIR? (诊断方向锁存/积分/力矩指令)\r\n"
             " OBS: OBS? (omega_hat vs 差分) OBS_CFG,w0,use_d (速度观测器调参)\r\n"
-            " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
+            " FF: COG? COG,gain,deg COG_LUT,USE_COMPILED COG_LUT,SAVE BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
             " JOINT: LIMIT? LIMIT,min_deg,max_deg LIMIT,OFF\r\n"
             " GIMBAL: RAMP? RAMP,accel\r\n"
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
-            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG?\r\n"
+            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG? CH_CFG,gain,recon CH_CFG?\r\n"
         );
         return;
     }
@@ -1721,6 +1724,63 @@ static void UART_CommandExecute(const char *cmd)
     }
     if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
         g_foc_app.cogging_lut.phase_offset_rad = f1;
+        return;
+    }
+
+    /* ── COG_LUT: LUT 来源管理 ──
+     * Flash 旧 LUT (内部电压拖拽辨识, 幅值标尺任意) 在启动时遮蔽编译版;
+     * USE_COMPILED 换回编译版 (纯 RAM, 即时); SAVE 把当前运行时表写入 Flash
+     * (擦整扇区, 须停电机; 之后每次上电即编译版内容)。 */
+    if (strcmp(cmd, "CMD:COG_LUT,USE_COMPILED") == 0) {
+        char resp[80];
+        float cmin, cmax;
+        int ci;
+        FOC_App_CoggingUseCompiled(&g_foc_app);
+        cmin = cmax = g_foc_app.cogging_lut.table[0];
+        for (ci = 1; ci < (int)FOC_COGGING_LUT_SIZE; ci++) {
+            float v = g_foc_app.cogging_lut.table[ci];
+            if (v < cmin) cmin = v;
+            if (v > cmax) cmax = v;
+        }
+        (void)snprintf(resp, sizeof(resp),
+                       "COG_LUT,OK,compiled_active,min=%.4f,max=%.4f\r\n",
+                       (double)cmin, (double)cmax);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:COG_LUT,SAVE") == 0) {
+        char resp[64];
+        if (g_foc_app.enable_pwm != 0U) {
+            UART_CommandSendText("COG_LUT,SAVE,FAIL,motor_running\r\n");
+            return;
+        }
+        g_foc_app.cogging_lut.pending = 1U;
+        FOC_App_SaveParam(&g_foc_app);
+        (void)snprintf(resp, sizeof(resp),
+                       "COG_LUT,SAVE,attempted=%u (1=OK,2=fail,3=magic)\r\n",
+                       (unsigned)g_foc_app.cogging_lut.save_attempted);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    /* ── CH_CFG: C 通道运行时补救 (C 缩水 41% 临时措施, 硬件修复后复归) ── */
+    if (strcmp(cmd, "CMD:CH_CFG?") == 0) {
+        char resp[64];
+        float gc = 1.0f;
+        uint8_t rc = 0U;
+        ADC_Sampling_GetChCfg(&gc, &rc);
+        (void)snprintf(resp, sizeof(resp), "CH_CFG,OK,gain_c=%.3f,recon=%u\r\n",
+                       (double)gc, (unsigned int)rc);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:CH_CFG,%f,%u", &f1, &uint_arg) == 2) {
+        if (f1 >= 0.2f && f1 <= 3.0f && uint_arg <= 1U) {
+            ADC_Sampling_SetChCfg(f1, (uint8_t)uint_arg);
+            UART_CommandSendText("CH_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("CH_CFG,FAIL,range\r\n");
+        }
         return;
     }
 
@@ -3050,6 +3110,7 @@ void TIM1_UP_IRQHandler(void)
     {
         uint32_t speed_loop_start;
         speed_loop_div_counter = 0;
+        s_foc_tick_2khz++;  /* PDB 硬件时基: PC 端 t = tick/2000, 与主循环发送抖动无关 */
         speed_loop_start = FOC_Profiler_Begin();
         FOC_App_SpeedLoop(&g_foc_app);
         FOC_Profiler_End(FOC_PROBE_SPEED_LOOP, speed_loop_start);

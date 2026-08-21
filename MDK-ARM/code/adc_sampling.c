@@ -107,6 +107,8 @@ int8_t ADC_Sampling_Init(ADC_HandleTypeDef* hadc)
     s_adcData.offsetA = (int16_t)ADC_HALF;
     s_adcData.offsetB = (int16_t)ADC_HALF;
     s_adcData.offsetC = (int16_t)ADC_HALF;
+    s_adcData.gain_c = 1.0f;    /* CH_CFG 默认: 无补救 */
+    s_adcData.recon_c = 0U;
     ADC_Sampling_ResetTimingState();
     
     return 0;
@@ -136,6 +138,14 @@ void ADC_Sampling_Process(void)
     s_adcData.currentB = ADC_CalcCurrent(s_adcData.rawCurrentB, s_adcData.offsetB);
     s_adcData.currentC = ADC_CalcCurrent(s_adcData.rawCurrentC, s_adcData.offsetC);
     s_adcData.vbus = ADC_CalcVoltage(s_adcData.rawVbus, K_VBUS_DIV);
+
+    /* CH_CFG: C 通道补救 — recon 优先: 丢弃实测用 A+B 重构 (KCL);
+     * 否则按需增益垫。默认 gain=1.0/recon=0 即原行为。 */
+    if (s_adcData.recon_c != 0U) {
+        s_adcData.currentC = -(s_adcData.currentA + s_adcData.currentB);
+    } else if (s_adcData.gain_c != 1.0f) {
+        s_adcData.currentC = s_adcData.currentC * s_adcData.gain_c;
+    }
     
     /* 更新标志 */
     s_adcData.pwmPeriod = (uint16_t)__HAL_TIM_GET_AUTORELOAD(&htim1);
@@ -276,6 +286,28 @@ int8_t ADC_Sampling_Calibrate(uint16_t samples)
     s_adcData.calibStatus = ADC_CALIB_OK;
     
     return 0;
+}
+
+/**
+ * @brief CH_CFG: 设置 C 通道补救 (增益垫 / 两相重构)
+ */
+void ADC_Sampling_SetChCfg(float gain_c, uint8_t recon_c)
+{
+    s_adcData.gain_c = gain_c;
+    s_adcData.recon_c = recon_c;
+}
+
+/**
+ * @brief CH_CFG: 查询 C 通道补救状态
+ */
+void ADC_Sampling_GetChCfg(float *gain_c, uint8_t *recon_c)
+{
+    if (gain_c != NULL) {
+        *gain_c = s_adcData.gain_c;
+    }
+    if (recon_c != NULL) {
+        *recon_c = s_adcData.recon_c;
+    }
 }
 
 /**

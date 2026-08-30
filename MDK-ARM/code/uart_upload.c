@@ -16,6 +16,14 @@
 static UART_HandleTypeDef* s_huart = NULL;
 static DRV8350S_Handle_t* s_drvHandle = NULL;
 
+/* ── TX 泵模式开关 (2026-08-30 任务卡 T1) ──
+ * 1 = DMA 突发泵 (HAL_UART_Transmit_DMA, 每字节一次中断 -> 一个 256B 段一次中断)
+ * 0 = 原 IT 每字节中断路径 (回退用, IT 代码保留不应删除)
+ */
+#ifndef UART_TX_USE_DMA
+#define UART_TX_USE_DMA 1   /* 定版: DMA 突发泵 (IT=0 回退) */
+#endif
+
 /* ── Phase 2: UART TX Ring Buffer (IT-based, no DMA) ────────── */
 #define UART_TX_RING_SIZE       1024U
 #define UART_TX_P0_RESERVE       128U
@@ -29,8 +37,10 @@ typedef enum {
 
 static uint8_t s_txBuf[DRV_UART_BUF_SIZE];       /* staging buffer for format+enqueue */
 static uint8_t s_txITBuf[DRV_UART_BUF_SIZE];      /* dedicated IT transmission buffer (Phase 2b fix) */
+static uint8_t s_txDmaBuf[256U];                  /* DMA staging — H2: 专用静态缓冲, DMA 进行期间禁止复写 */
 static uint8_t s_faultDetailBuf[DRV_UART_BUF_SIZE];
 static volatile bool s_txITActive = false;
+static volatile bool s_txDmaActive = false;
 static uint8_t  s_txRing[UART_TX_RING_SIZE];
 static volatile uint16_t s_txRingHead = 0U;
 static volatile uint16_t s_txRingTail = 0U;
@@ -89,6 +99,7 @@ HAL_StatusTypeDef DrvUart_Init(UART_HandleTypeDef* huart, DRV8350S_Handle_t* drv
     s_huart = huart;
     s_drvHandle = drvHandle;
     s_txITActive = false;
+    s_txDmaActive = false;
     s_txRingHead = 0U;
     s_txRingTail = 0U;
     s_txDropCount[0] = 0U; s_txDropCount[1] = 0U; s_txDropCount[2] = 0U;
@@ -121,13 +132,14 @@ HAL_StatusTypeDef DrvUart_Init(UART_HandleTypeDef* huart, DRV8350S_Handle_t* drv
  */
 void DrvUart_DeInit(void)
 {
-    if (s_huart != NULL && s_txITActive) {
+    if (s_huart != NULL && (s_txITActive || s_txDmaActive)) {
         (void)HAL_UART_AbortTransmit(s_huart);
     }
-    
+
     s_huart = NULL;
     s_drvHandle = NULL;
     s_txITActive = false;
+    s_txDmaActive = false;
     s_enabled = false;
     s_faultDetailLen = 0U;
     s_faultDetailOffset = 0U;
@@ -1185,14 +1197,76 @@ static void UartTx_StartIT(void)
     }
 }
 
-/* Called from main loop to kick IT if data is waiting */
+#if UART_TX_USE_DMA
+/* Start DMA burst pump from ring buffer. Call with IRQ disabled or from ISR.
+ * 2026-08-30 任务卡 T1: 从 ring 尾取最长连续段 (<=256B, wrap 处理同 UartTx_StartIT),
+ * 拷贝进 s_txDmaBuf 后 HAL_UART_Transmit_DMA 发出; 完成回调清 active 并立即再 kick。
+ * 2026-08-30 终审修复: 拷贝不推进 tail, HAL OK 才 tail+=chunk; 失败 tail 不动重试
+ * (旧版先推进再 HAL, HAL 失败字节已出队丢失 — G1 97/100 泄漏源)。 */
+static void UartTx_StartDma(void)
+{
+    uint16_t avail;
+    uint16_t chunk;
+    uint16_t i;
+    uint16_t new_tail;
+
+    if (s_txDmaActive || s_huart == NULL) {
+        return;
+    }
+
+    if (s_txRingHead == s_txRingTail) {
+        return;  /* empty */
+    }
+
+    if (s_txRingHead > s_txRingTail) {
+        avail = (uint16_t)(s_txRingHead - s_txRingTail);
+    } else {
+        avail = (uint16_t)(UART_TX_RING_SIZE - s_txRingTail);
+    }
+
+    if (avail == 0U) {
+        return;
+    }
+
+    s_txDmaActive = true;   /* 拷贝期即防重入 (DMA IRQ 路径 TxCplt 可能同时进入) */
+
+    chunk = (avail > (uint16_t)sizeof(s_txDmaBuf)) ? (uint16_t)sizeof(s_txDmaBuf) : avail;
+    new_tail = s_txRingTail;
+    for (i = 0U; i < chunk; i++) {
+        s_txDmaBuf[i] = s_txRing[new_tail];
+        new_tail = (uint16_t)((new_tail + 1U) % UART_TX_RING_SIZE);
+    }
+
+    if (HAL_UART_Transmit_DMA(s_huart, s_txDmaBuf, chunk) != HAL_OK) {
+        /* HAL_BUSY (gState 非 READY) 或配置错误: tail 未动, 字节仍在 ring, 下次重试 */
+        s_txDmaActive = false;
+        s_stats.txErrors++;
+        return;
+    }
+    s_txRingTail = new_tail;   /* HAL 接受后才出队 */
+}
+#endif /* UART_TX_USE_DMA */
+
+/* Called from main loop to kick TX if data is waiting */
 static void UartTx_Service(void)
 {
-    if (!s_txITActive && s_txRingHead != s_txRingTail) {
+    if (s_txRingHead == s_txRingTail) {
+        return;
+    }
+#if UART_TX_USE_DMA
+    if (!s_txDmaActive) {
+        __disable_irq();
+        /* DMA 忙时不抢 (H2: 不会敲掉 in-flight frame); IT 路径仅在回退模式使用 */
+        UartTx_StartDma();
+        __enable_irq();
+    }
+#else
+    if (!s_txITActive) {
         __disable_irq();
         UartTx_StartIT();
         __enable_irq();
     }
+#endif
 }
 
 /**
@@ -1208,12 +1282,7 @@ static bool DrvUart_StartSend(uint16_t len)
         return false;
     }
 
-    /* Kick IT from main context */
-    if (!s_txITActive) {
-        __disable_irq();
-        UartTx_StartIT();
-        __enable_irq();
-    }
+    UartTx_Service();
     return true;
 }
 
@@ -1228,11 +1297,7 @@ static bool DrvUart_StartSendPrio(uint16_t len, UartTxPrio prio)
         return false;
     }
 
-    if (!s_txITActive) {
-        __disable_irq();
-        UartTx_StartIT();
-        __enable_irq();
-    }
+    UartTx_Service();
     return true;
 }
 
@@ -1539,9 +1604,9 @@ void DrvUart_UploadImmediate(void)
         return;
     }
     
-    /* Wait for the current transfer with a timeout. */
+    /* Wait for the current transfer with a timeout (DMA 或 IT 活跃都等). */
     waitStart = HAL_GetTick();
-    while (s_txITActive) {
+    while (s_txITActive || s_txDmaActive) {
         if ((HAL_GetTick() - waitStart) > 100U) {
             s_stats.txErrors++;
             return;
@@ -1677,14 +1742,16 @@ void DrvUart_QueryCogCfg(void)
 
 /**
  * @brief UART transmit complete callback
+ * @note  IT 路径和 DMA 路径共享 (HAL_UART_TxCpltCallback 由 DMA IRQ 链或 UART IT 链调用)
  */
 void DrvUart_TxCpltCallback(UART_HandleTypeDef* huart)
 {
     if (huart == s_huart) {
         s_txITActive = false;
+        s_txDmaActive = false;
         s_stats.isTxBusy = 0;
         /* Dequeue next chunk from ring buffer */
-        UartTx_StartIT();
+        UartTx_Service();
     }
 }
 

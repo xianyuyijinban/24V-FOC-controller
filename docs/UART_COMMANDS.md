@@ -154,6 +154,41 @@ Failure reasons: `parse` | `range` | `state` | `busy` | `fault` | `unsupported`
 
 ---
 
+## PDBBIN — 二进制调试流 (2026-08-30, 24V 项目专有)
+
+| Command | Params | Description |
+|---------|--------|-------------|
+| `CMD:PDBBIN,0\|1` | `int` | 开/关 PDBBIN 二进制调试流 (默认 0) |
+
+### DBG_TYPE_PDB2 帧格式 (type = 0x20)
+
+```
+A5 5A | 0x20 | 0x25 (37) | payload(37B) | CRC-8(poly 0x07)
+```
+
+Payload 小端 packed:
+
+| Offset | Size | Field | 单位/语义 |
+|--------|------|-------|-----------|
+| 0 | 1 | `seq` | 发射点递增, 丢帧定位核心 (mod 256) |
+| 1 | 4 | `tick_2khz` | 硬件时基 tick, t=tick/2000 (s) |
+| 5 | 4 | `flags` | 保留, 恒 0 |
+| 9 | 4 | `pos_err_rad` | 位置误差 rad (control 帧, =文本 PDB p[1]) |
+| 13 | 4 | `iq_cmd` | FF 前位置环指令 A (= p[7]) |
+| 17 | 4 | `ff_total` | FF 层总注入 A (= p[9]) |
+| 21 | 4 | `theta_user_rad` | 用户帧机械角 rad (= p[10]) |
+| 25 | 4 | `iq_act` | 实测 q 电流 A |
+| 29 | 4 | `v_mech_rad_s` | 实测机械速度 rad/s |
+| 33 | 4 | `pos_ref_rad` | 位置给定 rad (control 帧) |
+
+核心理由: 文本 PDB 无帧序号/校验, 高速段丢窗无法区分"固件没发" vs "主机丢了"。
+PDBBIN 带 seq (固件发射点递增, 丢帧定位) + CRC8 (传输校验), 200Hz 与文本 PDB 同 gate。
+
+> 帧构建复用 `current_stream.c` 的 `CurStream_BuildFrame` / `CurStream_CRC8`。
+> 主机解析脚本: `scripts/foclink.py` (MixedStreamParser, 移植 HostComputer/data_parser.py 状态机)。
+
+---
+
 ## 12V Standard Baseline
 
 ```text

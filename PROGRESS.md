@@ -1,5 +1,58 @@
 # PROGRESS
 
+## [2026-08-30] 调试链路 v1 任务卡（T1-T4: DMA TX 泵 + PDBBIN 二进制流 + 主机层）
+
+### Problem / Task
+- 20kHz 时代暴露串口短板: (1) 高速段 PDB 丢窗不可定位 (无 seq/CRC); (2) TX IT 每个字节
+  一次中断, 与 40kHz 控制 ISR 共存。任务卡 (Kimi 下达) 要求: TX 泵 DMA 化 (可一键回退) +
+  新增 PDBBIN 二进制流 + 主机解析层 + speed_sweep 移植, 门 G1-G5。
+
+### Resolution
+- **T1 TX 泵 DMA 化** (uart_upload.c): `UartTx_StartDma()` 从 ring 尾取最长连续段 (≤256B)
+  拷入 `s_txDmaBuf[256]`, `HAL_UART_Transmit_DMA` 发出; 编译期开关 `UART_TX_USE_DMA`
+  (默认 1, 置 0 回退原 IT 路径, IT 代码保留)。DMA 配置复用 usart.c 已配好的
+  DMA2_Stream0 (NORMAL/BYTE/FIFO关); IRQ 优先级 7 > TIM1_UP 的 1。HAL_BUSY 时不清 ring 重试。
+- **T2 PDBBIN** (debug_stream.c/h): A5 5A | 0x20 | 37 | payload | CRC8; payload 含
+  seq(发射点递增) + tick_2khz + pos_err/iq_cmd/ff_total/theta_user/iq_act/v_mech/pos_ref;
+  200Hz 与文本 PDB 同 gate; CMD:PDBBIN,0|1; 复用 CurStream_BuildFrame/CRC8。
+- **T3 主机层** (scripts/foclink.py + speed_sweep --pdbbin): MixedStreamParser 移植
+  data_parser.py 状态机 (sync->type->len->CRC->分发), 每 channel rx/crc_err/seq_gap;
+  speed_sweep 加 --pdbbin 数据源 (v 不再差分, 直接固件 v_mech), JSON 存 pdbbin 统计。
+- **T4 文档**: 修正 20khz 报告 (50°/s 行标实测速度/覆盖范围声明/归因 fault 闩锁);
+  UART_COMMANDS.md 增 PDBBIN 命令 + 帧格式; 本 PROGRESS 条目。
+
+### Verification
+- T1/T2 GCC build.ps1 通过 (text 183296 / bss 40120)。
+- foclink.py 自检全过: 半帧/粘连/CRC错/seq gap 合成帧全 PASS。
+- speed_sweep.py --pdbbin dry-run 通过。
+
+### 验证矩阵终局 (2026-08-30, G1-G5 全绿)
+- **G1 通信回归** PASS: `CMD:FW_INFO?` 200/200 (无 reset 伪影时 0 丢; 早期 97/100 为 B2
+  出队 bug + reset_input_buffer 测法双因); N 帧 500/10s=50Hz; UART_RX err=0 drops=0。
+- **G2 BIN1000** PASS: rx=9999/10s, crc_err=0, seq_gap=0, 查询 50/50。
+- **G3 PDBBIN 单体** PASS: 200Hz, crc_err=0, seq_gap=0, theta 对照 0.000°。
+- **G4 全速域扫频** (speed_sweep v5, PREF 钉 20Hz 步长=v/率) PASS:
+  140 窗 **coverage_ok=True** (v_prog max 56.9 ≥ 0.7×57.3), PDBBIN rx=7002 crc=0 gap=0,
+  高速窗 v_prog≥40 十个 反应真实 (travel 40-53°), 低速 0.1°/s 停留 16 窗 err_std
+  0.01-0.06°, 滞回表全档 v实测≈锚点 (50.0→52.6/51.9, 30→30.0/29.6, ... 0.1→0.1/0.1)。
+- **G5a FOC_TIME** PASS: DMA 版 CURRENT_PATH avg 800cyc (vs IT 基线 804, Δ=-0.5% ≤5%),
+  TIM1_ISR avg 4717cyc (vs 4757, Δ=-0.8%), overrun=0。T1 无预算回流。
+- **G5b verify_low_speed** PASS: DMA 修复后复跑 斜坡 97.3% / 阶跃 2.0s 97.8%, pp 0.03°。
+- **关键教训 (入 skill/memory)**: (1) "电机不动"假象根因是 `CMD:ON` N 帧压制 PDBBIN
+  212→100Hz, 叠加 PREF 密集时 ~6Hz → 滑窗凑不够 → 0 窗, 不是固件/电机/参数 —
+  测量准备动作 (get_angle→CMD:ON) 是被测量本身; (2) PREF 率对 PDBBIN 有 -0.55%/Hz
+  线性压制, 判决实验 F=20Hz 读写分离后仍压 11% → 纯固件/链路机制, 主机侧无肉可割,
+  高速档修法改为 profile 参数化 (率钉 20Hz) 零固件改动; (3) B2 出队 bug 修复后
+  G1 从 97/100 升满。
+
+**挂账 (三条, 待专项)**: 固件"不该贵的活很贵"同族疑点 — (1) N 帧 50Hz 压主循环 50%
+(纸面 ~1% CPU); (2) PREF 处理 -0.55%/Hz 压 PDBBIN (纸面 20Hz 应 <1%); (3) ISR 随转速
+暴涨 8-14× (控制环数学是固定成本)。共用嫌疑结构: 随负载伸缩的 ms 级黑洞未被现有探针
+覆盖 — 主循环分段 DWT 此时才有烧的价值。
+
+### Commits
+- 工作区 (用户自管 git, 提交归用户)。
+
 ## [2026-08-30] 20kHz 升频移植 + 复验判读复核（DeepSeek 报告裁定：PASS 不成立）
 
 ### Problem / Task

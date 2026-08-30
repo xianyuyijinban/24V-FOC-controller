@@ -1398,6 +1398,16 @@
               <FilePath>.\code\current_stream.h</FilePath>
             </File>
             <File>
+              <FileName>debug_stream.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\debug_stream.c</FilePath>
+            </File>
+            <File>
+              <FileName>debug_stream.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\debug_stream.h</FilePath>
+            </File>
+            <File>
               <FileName>wheel_input.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\wheel_input.c</FilePath>

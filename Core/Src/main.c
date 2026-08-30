@@ -35,6 +35,7 @@
 #include "demo_button_control.h"
 #include "can_protocol.h"
 #include "current_stream.h"
+#include "debug_stream.h"
 #include "foc_profiler.h"
 /* USER CODE END Includes */
 
@@ -265,6 +266,7 @@ int main(void)
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
   CurStream_Init();  /* V1.1: binary current stream */
+  DebugStream_Init();  /* PDBBIN binary debug stream */
   CanProtocol_Init(CAN_NODE_ID_DEFAULT);  /* Phase 6 */
   Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   
@@ -376,6 +378,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* 主循环整体 DWT 探针 (2026-08-30 任务卡调试: 区分命令服务/PREF/PDB发射/其余) */
+    uint32_t main_loop_start = FOC_Profiler_Begin();
     /* 处理上位机下发命令 */
     UART_Command_ProcessPending();
 
@@ -419,6 +423,8 @@ int main(void)
     }
     
     /* USER CODE END WHILE */
+
+    FOC_Profiler_End(FOC_PROBE_MAIN_LOOP, main_loop_start);
 
     /* USER CODE BEGIN 3 */
   }

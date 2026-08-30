@@ -18,6 +18,9 @@ typedef enum {
     FOC_PROBE_POSITION_LOOP,
     FOC_PROBE_TIM1_ISR,
     FOC_PROBE_IRQ_PERIOD,
+    FOC_PROBE_MAIN_LOOP,       /* 主循环整体 (while 1 体) */
+    FOC_PROBE_CMD_PREF,        /* PREF 命令分支单独 */
+    FOC_PROBE_POSDBG,          /* PDBBIN/PDB 发射服务 */
     FOC_PROBE_COUNT
 } FOC_ProfilerProbe_t;
 

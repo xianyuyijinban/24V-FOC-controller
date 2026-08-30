@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "head.h"
 #include "uart_upload.h"
+#include "debug_stream.h"
 #include "adc_sampling.h"
 #include "can_protocol.h"
 #include "fdcan.h"
@@ -128,6 +129,7 @@ static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
 static uint8_t  s_posdbg_stream = 0U;
 static uint16_t s_posdbg_acc = 0U;
 static volatile uint32_t s_foc_tick_2khz = 0U;  /* 速度环节拍计数 (2kHz, TIM1 ISR) — PDB 行硬件时基 */
+static uint8_t  s_pdbbin_stream = 0U;           /* PDBBIN: 文本 PDB 的二进制孪生 (CMD:PDBBIN,1|0) */
 
 static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
 {
@@ -478,16 +480,20 @@ static void UART_CommandServicePosdbg(void)
     int len;
     const FOC_AppHandle_t *h = &g_foc_app;
 
-    if (s_posdbg_stream == 0U) {
+    if ((s_posdbg_stream == 0U) && (s_pdbbin_stream == 0U)) {
         return;
     }
 
-    /* ~200Hz: 主循环约 1kHz, 每 5 拍输出一行 */
+    /* ~200Hz: 主循环实测 ~2.5kHz (20kHz 固件), 每 13 拍输出一次 (~192Hz)。
+     * 2026-08-30 修正: 原 ÷5 在 1kHz 主循环下是 200Hz, 20kHz 固件主循环提速到
+     * 2.5kHz 后变 500Hz — PDBBIN 500Hz×42B=21KB/s 超 P1 容量致 seq_gap, 回收 200Hz 设计。 */
     s_posdbg_acc++;
-    if (s_posdbg_acc < 5U) {
+    if (s_posdbg_acc < 13U) {
         return;
     }
     s_posdbg_acc = 0U;
+
+    uint32_t posdbg_start = FOC_Profiler_Begin();
 
     /* 极限环量化: err(位置误差 rad, control帧) ki_out(饱和后积分输出 A) ki_raw(饱和前)
      * pd_sat(PD饱和) comp_cfg(摩擦补偿配置常数 A, 非瞬时量) fric(FF库仑瞬时 A)
@@ -510,6 +516,22 @@ static void UART_CommandServicePosdbg(void)
     if ((len > 0) && ((size_t)len < sizeof(line))) {
         DrvUart_SendTextP1(line);
     }
+
+    /* PDBBIN: 与文本 PDB 同一 gate 同拍发射 (独立开关, seq 丢帧定位) */
+    if (s_pdbbin_stream != 0U) {
+        PdbBinPayload_t p;
+        p.seq = 0U;  /* PushPdb 内自递增 */
+        /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
+        p.pos_err_rad    = h->position_loop_error_diag;
+        p.iq_cmd         = h->pos_direct_iq_cmd;
+        p.ff_total       = h->ff_diag.ff_total_iq;
+        p.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
+        p.iq_act         = h->foc.Idq.q;
+        p.v_mech_rad_s   = h->speed_mech;
+        p.pos_ref_rad    = h->pos_ref;
+        DebugStream_PushPdb(s_foc_tick_2khz, &p);
+    }
+    FOC_Profiler_End(FOC_PROBE_POSDBG, posdbg_start);
 }
 
 static void UART_CommandConsumeByte(uint8_t ch)
@@ -1890,6 +1912,19 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
+    if (sscanf(cmd, "CMD:PDBBIN,%u", &uint_arg) == 1) {
+        /* PDBBIN 二进制调试流: 1=开 0=关 (文本 PDB 二进制孪生, seq+CRC8) */
+        if (uint_arg <= 1U) {
+            s_pdbbin_stream = (uint8_t)uint_arg;
+            if (s_pdbbin_stream == 0U) {
+                s_posdbg_acc = 0U;
+            }
+            UART_CommandSendText("PDBBIN,OK\r\n");
+        } else {
+            UART_CommandSendText("PDBBIN,FAIL,range\r\n");
+        }
+        return;
+    }
 
     /* ── OBS: 低速速度观测器 (线性ESO) ── */
     if (strcmp(cmd, "CMD:OBS?") == 0) {
@@ -2298,6 +2333,7 @@ static void UART_CommandExecute(const char *cmd)
     if (UART_CommandParseFloat1(cmd, "CMD:PREF,", &f1)) {
         char resp[48];
         float pos_before = g_foc_app.pos_ref;
+        uint32_t pref_start = FOC_Profiler_Begin();
         __disable_irq();
         FOC_App_SetPositionRef(&g_foc_app, f1);
         /* 手动即时拍：只刷新PD输出让PREF即时生效，但不多积一拍 —
@@ -2312,6 +2348,7 @@ static void UART_CommandExecute(const char *cmd)
         g_foc_app.position_pref_after_diag = g_foc_app.pos_ref;
         g_foc_app.position_pref_user_set_diag = g_foc_app.position_ref_user_set;
         __enable_irq();
+        FOC_Profiler_End(FOC_PROBE_CMD_PREF, pref_start);
         (void)snprintf(resp, sizeof(resp), "PREF,OK,%.3f\r\n", (double)f1);
         UART_CommandSendText(resp);
         return;

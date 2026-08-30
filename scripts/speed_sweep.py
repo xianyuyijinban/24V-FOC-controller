@@ -4,7 +4,10 @@
 目的 (2026-08-21): COG LUT 定版 (平滑版 + phi*=0°) + CH_CFG 重构后的全速域体检。
   - 指数扫频: 每数量级等时, 低速过渡区 (粘滑/环带宽穿越) 分辨率与高速段一致
   - 下行 vs 上行同速档配对: 滞回 (Stribeck/方向依赖) 检测
-  - PREF 步长自适应 (20-100Hz, 步长<=0.3°): 消除阶梯伪影的速度缩放
+  - PREF 率钉死 20Hz, 步长=v/率 (2026-08-30 判决实验: 读写分离后 F=20Hz 仍压 PDBBIN 11%,
+    压制是纯固件/链路机制且随率放大; 旧"高速升率"逻辑在 50°/s 档率~167Hz 把 PDBBIN
+    压到窗数不足 — 同一机制的高速放大。低速 v<=6°/s 步长<=0.3° 与旧行为完全一致;
+    高速步长变大 (2.5°/步) 会向 e_p99 注入 20Hz 台阶分量, 但高速无历史有效基线, 无碍)
 
 指标 (PDB 流, 2kHz tick 硬件时基, 1s 窗/0.5s 步):
   - err_*    : 位置环跟随误差 (PDB p[1], control 帧 rad->deg) — 低速段主判据
@@ -14,7 +17,10 @@
 
 用法: python scripts/speed_sweep.py COM10 --power-ok
       [--vmin 0.1 --vmax 57.3] [--t-sweep 40] [--hold 8]
-      [--cog-off] [--skip-recon] [--out xxx.json]
+      [--cog-off] [--skip-recon] [--pdbbin] [--out xxx.json]
+
+--pdbbin: 数据源切到 PDBBIN 二进制流 (200Hz, seq+CRC8, v 不用差分, 直接给 v_mech;
+          高速段丢窗可定位: seq_gap>0=固件侧, gap=0 但行数少=主机侧)。
 """
 import argparse
 import json
@@ -25,6 +31,9 @@ import time
 
 import numpy as np
 import serial
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import foclink  # noqa: E402  MixedStreamParser / PdbBinSample
 
 DEG2RAD = math.pi / 180.0
 RAD2DEG = 180.0 / math.pi
@@ -59,6 +68,60 @@ class Capturer:
                         pass
 
 
+class PdbBinCapture:
+    """PDBBIN 二进制流采集 (@200Hz, seq 由固件发射点递增)。
+
+    rows 格式与文本路径一致: (label, tick_2khz, theta_user_rad, pos_err_rad,
+    iq_cmd, ff_total, v_mech_rad_s, iq_act, pos_ref_rad)
+    """
+
+    def __init__(self, ser):
+        self.ser = ser
+        self.parser = foclink.MixedStreamParser(pdb2_cb=self._on_pdb2)
+        self.rows = []   # (label, tick, theta, err, iq_cmd, ff_total, v_mech, iq_act, pos_ref)
+        self.label = ""
+        self._reader = None
+        self._stop = False
+
+    def _on_pdb2(self, s: foclink.PdbBinSample):
+        self.rows.append((self.label, s.tick_2khz, s.theta_user_rad, s.pos_err_rad,
+                          s.iq_cmd, s.ff_total, s.v_mech_rad_s, s.iq_act, s.pos_ref_rad))
+
+    def drain(self):
+        n = self.ser.in_waiting
+        if not n:
+            return
+        self.parser.feed(self.ser.read(n))
+
+    def start_reader(self):
+        """独立读线程全速排水 (2026-08-30 08-14 教训修复: PREF 写与 PDBBIN 读同线程
+        互相饿死 — 读写分离, 读线程独占 in_waiting 轮询)。"""
+        import threading
+        self._stop = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def _read_loop(self):
+        while not self._stop:
+            try:
+                n = self.ser.in_waiting
+                if n:
+                    self.drain()
+                else:
+                    time.sleep(0.001)
+            except Exception:
+                break
+
+    def stop_reader(self):
+        self._stop = True
+        if self._reader:
+            self._reader.join(timeout=2.0)
+
+    def stats(self):
+        st = self.parser.stats[foclink.TYPE_PDB2]
+        return {"rx": st.rx, "crc_err": st.crc_err, "seq_gap": st.seq_gap}
+
+
 def unwrap_arr(a, period):
     d = np.diff(a)
     d[d > period / 2.0] -= period
@@ -67,7 +130,12 @@ def unwrap_arr(a, period):
 
 
 def analyze_win(rows):
-    """单个窗口 PDB rows -> dict 或 None"""
+    """单个窗口 PDBBIN rows -> dict 或 None。
+
+    rows 元组: (label, tick, theta_user_rad, pos_err_rad, iq_cmd, ff_total,
+                v_mech_rad_s, iq_act, pos_ref_rad)
+    v_mech 直接来自固件 (实测速度), 不再差分 (PDBBIN 路径优势)。
+    """
     tick = np.array([r[1] for r in rows], dtype=float)
     th = np.array([r[2] for r in rows], dtype=float)
     err = np.array([r[3] for r in rows], dtype=float)
@@ -120,6 +188,10 @@ def main():
     ap.add_argument("--spin", type=float, default=2.0, help="起步加速/收尾减速时长 s")
     ap.add_argument("--cog-off", action="store_true", help="对照组: COG 关闭")
     ap.add_argument("--skip-recon", action="store_true", help="C 通道硬件已修时用")
+    ap.add_argument("--pdbbin", action="store_true",
+                    help="数据源切到 PDBBIN 二进制流 (200Hz, seq+CRC8, v 不用差分)")
+    ap.add_argument("--pref-rate", type=float, default=20.0,
+                    help="PREF 命令率 Hz (默认 20 — 2026-08-30 判决实验安全点; 步长=v/率)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -154,19 +226,20 @@ def main():
 
     def abort(msg):
         print("ABORT: %s" % msg)
-        for c in ("CMD:COG_CFG,0.000,0.0", "CMD:SREF,0", "CMD:POSDBG,0",
-                  "TELEM:ON", "CMD:STOP"):
+        for c in ("CMD:COG_CFG,0.000,0.0", "CMD:SREF,0", "CMD:PDBBIN,0",
+                  "CMD:POSDBG,0", "TELEM:ON", "CMD:STOP"):
             send(c)
         ser.close()
         sys.exit(1)
 
-    cap = Capturer(ser)
+    cap = Capturer(ser) if not args.pdbbin else PdbBinCapture(ser)
 
-    # ── 配置前先停 N/C 流: 20kHz 下 N/C 帧密集, 会淹没 expect 响应 ──
+    # ── 配置前先停 N/C/PDBBIN 流: 20kHz 下 N/C 帧密集, 会淹没 expect 响应 ──
     # (2026-08-30 实测: UNLOCK/FRIC_COMP 等 expect 在流开时超时失败)
     send("CMD:OFF")
     send("TELEM:CUR,OFF")
     send("CMD:POSDBG,0")
+    send("CMD:PDBBIN,0")   # PDBBIN 也是 P1 流, 不停会挤掉 expect 响应 (G4 教训)
     time.sleep(0.3)
 
     # ── 配置 (当前定版) ──
@@ -245,8 +318,12 @@ def main():
         else:
             abort("JDIAG 无响应 — live LUT 身份未确认, COG ON 中止")
 
-    send("CMD:ON")
-    send("CMD:POSDBG,1")
+    # CMD:ON 开 N 帧主遥测 — 但 N 帧会把 PDBBIN 从 ~212Hz 压到 ~100Hz (2026-08-30 实测),
+    # 叠加 PREF 密集时 PDBBIN 掉到 ~6Hz -> 滑窗凑不够 60 行 -> 0 窗, "电机不动" 假象。
+    # --pdbbin 路径不需要 N 帧 (数据源是 PDBBIN), 保持 CMD:OFF 让 PDBBIN 全速;
+    # 文本 PDB 路径才开 N 帧。
+    if not args.pdbbin:
+        send("CMD:ON")
     time.sleep(0.3)
 
     send("CMD:STOP")
@@ -259,8 +336,14 @@ def main():
     time.sleep(0.8)
     expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK")
     time.sleep(0.5)
+    # 采集流在模态/使能全部就绪后开 (H8: PDBBIN 开启期间禁止增量 startswith 判响应,
+    # 因此在 MODE/ENABLE/POS_DIRECT 的 expect 全部完成后再开, 否则响应被流挤掉超时)
+    if args.pdbbin:
+        send("CMD:PDBBIN,1")
+    else:
+        send("CMD:POSDBG,1")
+    time.sleep(0.3)
     cap.drain()
-
     # ── 速度剖面 (解析积分, 绝对 PREF, 无累积漂移) ──
     # 阶段: spin(线性加速 0->vmax) -> down(指数 vmax->vmin) -> hold(vmin)
     #       -> up(指数 vmin->vmax) -> decel(线性 vmax->0)
@@ -306,15 +389,19 @@ def main():
 
     windows = []
     try:
-        # 锚点
+        # 锚点 (PDBBIN 路径 rows 同构: [2]=theta_user_rad)
         anchor = None
-        for row in reversed(cap.pdb):
+        src_rows = cap.rows if args.pdbbin else cap.pdb
+        for row in reversed(src_rows):
             anchor = row[2]
             break
         if anchor is None:
-            abort("PDB 流空, 无起始角度")
+            abort("数据流为空, 无起始角度")
 
         cap.label = "sweep"
+        # 08-14 教训修复: PDBBIN 路径用独立读线程 (PREF 写与 drain 同线程会饿死读)
+        if args.pdbbin:
+            cap.start_reader()
         t0 = time.time()
         last_send = 0.0
         last_prog = -10.0
@@ -323,25 +410,31 @@ def main():
             th_off, v_dps = profile(t)
             if t > t_total:
                 break
-            # PREF 步长自适应: 步长 <= 0.3°, 率 20-100Hz
-            rate = min(100.0, max(20.0, abs(v_dps) / 0.3))
+            # PREF 率钉死 args.pref_rate (默认 20Hz), 步长=|v|/率随速度缩放。
+            # 2026-08-30 判决实验: 压制随率线性(-0.55%/Hz), 高速"升率"逻辑在
+            # 50°/s 档率~167Hz 把 PDBBIN 压到窗数不足 — 同一机制的高速放大。
+            rate = abs(args.pref_rate)
             if t - last_send >= 1.0 / rate:
                 ser.write(("CMD:PREF,%.6f\n" % (anchor + th_off)).encode())
                 last_send = t
-            cap.drain()
+            if not args.pdbbin:
+                cap.drain()
             if t - last_prog >= 10.0:
                 print("  t=%4.0fs  v=%8.3f°/s ..." % (t, v_dps), flush=True)
                 last_prog = t
             time.sleep(0.001)
         cap.drain()
+        if args.pdbbin:
+            cap.stop_reader()
         send("CMD:STOP")
         time.sleep(0.3)
-        print("采集完成, PDB 行数 %d" % len(cap.pdb))
+        print("采集完成, %s 行数 %d" % ("PDBBIN" if args.pdbbin else "PDB",
+                                        len(cap.rows if args.pdbbin else cap.pdb)))
 
         # ── 滑窗分析 (1s 窗 / 0.5s 步) ──
-        rows = [x for x in cap.pdb if x[0] == "sweep"]
+        rows = [x for x in (cap.rows if args.pdbbin else cap.pdb) if x[0] == "sweep"]
         if len(rows) < 200:
-            abort("PDB 样本不足 (%d)" % len(rows))
+            abort("%s 样本不足 (%d)" % ("PDBBIN" if args.pdbbin else "PDB", len(rows)))
         tick0 = rows[0][1]
         ticks = np.array([x[1] for x in rows], dtype=float)
         n = len(rows)
@@ -434,18 +527,23 @@ def main():
             print("掉队/卡死嫌疑窗口: %d 个" % nsusp)
     finally:
         print("\n清理: COG OFF, 流关, STOP")
-        for c in ("CMD:COG_CFG,0.000,0.0", "CMD:SREF,0", "CMD:POSDBG,0",
-                  "TELEM:ON", "CMD:STOP"):
+        for c in ("CMD:COG_CFG,0.000,0.0", "CMD:SREF,0", "CMD:PDBBIN,0",
+                  "CMD:POSDBG,0", "TELEM:ON", "CMD:STOP"):
             send(c)
         ser.close()
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "speed_sweep_%s.json" % ts)
+    jdoc = {"args": vars(args), "jdiag": jdiag_line, "coverage_ok": coverage_ok,
+            "pairs": pairs, "windows": windows}
+    if args.pdbbin:
+        st = cap.stats()
+        jdoc["pdbbin"] = st
+        print("\nPDBBIN 统计: rx=%d crc_err=%d seq_gap=%d (gap>0=固件丢, gap=0少行=主机丢)"
+              % (st["rx"], st["crc_err"], st["seq_gap"]))
     with open(out, "w", encoding="utf-8") as f:
-        json.dump({"args": vars(args), "jdiag": jdiag_line, "coverage_ok": coverage_ok,
-                   "pairs": pairs, "windows": windows}, f,
-                  ensure_ascii=False, indent=1)
+        json.dump(jdoc, f, ensure_ascii=False, indent=1)
     print("JSON: %s (%d 窗)" % (out, len(windows)))
     return 0
 

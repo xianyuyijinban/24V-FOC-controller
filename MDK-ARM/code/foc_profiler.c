@@ -162,7 +162,10 @@ const char *FOC_Profiler_ProbeName(FOC_ProfilerProbe_t probe)
         "SPEED_LOOP",
         "POSITION_LOOP",
         "TIM1_ISR",
-        "IRQ_PERIOD"
+        "IRQ_PERIOD",
+        "MAIN_LOOP",
+        "CMD_PREF",
+        "POSDBG"
     };
 
     if ((uint32_t)probe >= (uint32_t)FOC_PROBE_COUNT) {

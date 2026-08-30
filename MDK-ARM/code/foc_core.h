@@ -26,7 +26,7 @@ extern "C" {
 
 /*==================== 自适应 Rs 前馈参数 ====================*/
 #ifndef FOC_CONTROL_FREQ
-#define FOC_CONTROL_FREQ            10000   /* 电流环控制频率 (Hz)，需与 foc_app.h 保持一致 */
+#define FOC_CONTROL_FREQ            20000   /* 电流环控制频率 (Hz)，需与 foc_app.h 保持一致 */
 #endif
 #define FOC_RS_FF_CONF_INIT         1.0f    /* 初始/空闲置信度 */
 #define FOC_RS_FF_DIQDT_THRESH      2000.0f /* dIq/dt 阈值 (A/s)，超出按比例降权 */
@@ -35,7 +35,7 @@ extern "C" {
 #define FOC_RS_FF_SAT_RATIO_THRESH  0.95f   /* 饱和比阈值，低于此值乘 sat_ratio（保留） */
 #define FOC_RS_FF_SIGN_REF_THRESH    0.08f   /* sign-kill: |Iq_ref| 最小门限 (A) */
 #define FOC_RS_FF_SIGN_FB_THRESH     0.06f   /* sign-kill: |Iq_fb| 最小门限 (A) */
-#define FOC_RS_FF_SIGN_HOLD_CYCLES   50U     /* sign-kill: 连续反符号周期数 (~5ms@10kHz) */
+#define FOC_RS_FF_SIGN_HOLD_CYCLES   100U    /* sign-kill: 连续反符号周期数 (~5ms@20kHz) */
 #define FOC_RS_FF_SIGN_THRESH        0.01f   /* 符号反转检测 Iq_ref 门限 (A)（保留） */
 #define FOC_RS_FF_RECOVER_TAU       0.3f    /* 置信度恢复 LPF 时间常数 (s) */
 #define FOC_RS_FF_RECOVER_ALPHA     (1.0f / (1.0f + FOC_RS_FF_RECOVER_TAU * (float)FOC_CONTROL_FREQ))

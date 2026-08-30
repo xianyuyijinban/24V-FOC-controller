@@ -40,30 +40,53 @@ def main():
     time.sleep(0.4)
     ser.reset_input_buffer()
 
+    # 20kHz 固件预清理: 停 N/C 流, 否则 ENABLE/MODE 响应被 40kHz 遥测流淹没,
+    # expect 超时误报 "ENABLE fail" (2026-08-30 实测: 响应实际 ENABLE,OK,1 但 2.5s 未到)。
+    # CMD:OFF 停主遥测(N 帧), TELEM:CUR,OFF 停电流流, POSDBG,0 停 PDB 流。
+    for c in (b"CMD:OFF\n", b"TELEM:CUR,OFF\n", b"CMD:POSDBG,0\n", b"CMD:STOP\n", b"CMD:CLEAR_FAULT\n"):
+        ser.write(c)
+        time.sleep(0.15)
+    ser.reset_input_buffer()
+
+    class LineBuffer:
+        """累积式行缓存: 串口数据可能被切成任意片段, 跨迭代累积直到换行符, 保证每行完整。"""
+        def __init__(self):
+            self.buf = ""
+
+        def _drain(self):
+            n = ser.in_waiting
+            if not n:
+                return []
+            self.buf += ser.read(n).decode(errors="replace")
+            if "\n" not in self.buf:
+                return []
+            lines = self.buf.split("\n")
+            self.buf = lines.pop()
+            return lines
+
+    lb = LineBuffer()
+
     def expect(cmd, prefix, timeout=1.5):
         ser.reset_input_buffer()
+        lb.buf = ""
         ser.write((cmd + "\n").encode())
         dl = time.time() + timeout
         while time.time() < dl:
-            if ser.in_waiting:
-                for l in ser.read(ser.in_waiting).decode(errors="replace").split("\n"):
-                    if l.strip().startswith(prefix):
-                        return True
-            else:
-                time.sleep(0.01)
+            for l in lb._drain():
+                if l.strip().startswith(prefix):
+                    return True
+            time.sleep(0.01)
         return False
 
     def read_angle():
         dl = time.time() + 0.8
         while time.time() < dl:
-            if ser.in_waiting:
-                for l in ser.read(ser.in_waiting).decode(errors="replace").split("\n"):
-                    if l.startswith("N,"):
-                        p = l.split(",")
-                        if len(p) >= 25:
-                            return float(p[3])
-            else:
-                time.sleep(0.01)
+            for l in lb._drain():
+                if l.startswith("N,"):
+                    p = l.split(",")
+                    if len(p) >= 25:
+                        return float(p[3])
+            time.sleep(0.01)
         return None
 
     def track(target_rad, duration, a0, is_step):
@@ -79,23 +102,23 @@ def main():
             ser.write(b"CMD:PREF,%.5f\n" % target_rad)
         dl = t0 + duration
         while time.time() < dl:
-            if (not is_step) and (time.time() - last_sent >= 0.05):
+            if not is_step and (time.time() - last_sent >= 0.2):
                 frac = min((time.time() - t0) / dur, 1.0) if dur > 0 else 1.0
                 cur = a0 * DEG2RAD + (target_rad - a0 * DEG2RAD) * frac
                 ser.write(b"CMD:PREF,%.5f\n" % cur)
                 last_sent = time.time()
-            if ser.in_waiting:
-                for l in ser.read(ser.in_waiting).decode(errors="replace").split("\n"):
-                    if l.startswith("N,"):
-                        p = l.split(",")
-                        if len(p) >= 25:
-                            a = float(p[3])
-                            d = a - a0
-                            if d > 180.0: d -= 360.0
-                            elif d < -180.0: d += 360.0
-                            samples.append((time.time() - t0, d))
-            else:
-                time.sleep(0.005)
+            for l in lb._drain():
+                if l.startswith("N,"):
+                    p = l.split(",")
+                    if len(p) >= 25:
+                        if int(p[8], 16) != 0:
+                            raise RuntimeError("fault latched mid-run: flags=%s" % p[8])
+                        a = float(p[3])
+                        d = a - a0
+                        if d > 180.0: d -= 360.0
+                        elif d < -180.0: d += 360.0
+                        samples.append((time.time() - t0, d))
+            time.sleep(0.002)
         return samples
 
     ser.write(b"CMD:UNLOCK,1\n")
@@ -111,6 +134,10 @@ def main():
         print("ENABLE fail")
         ser.close()
         return 1
+    # 恢复 N 帧 (预清理 CMD:OFF 关掉了主遥测, read_angle 需要 N 帧)
+    ser.write(b"CMD:ON\n")
+    time.sleep(0.3)
+    ser.reset_input_buffer()
     time.sleep(0.5)
     a0 = read_angle()
     print("start angle: %.2f" % (a0 if a0 else -1))
@@ -135,20 +162,22 @@ def main():
 
     results = {}
 
-    def sp(samples, target_deg):
+    def sp(samples, target_deg, checkpoints=(0.5, 1.0, 2.0)):
+        """到位判定。arrival=到位%(100=完全到位, >100=过冲); 检查点按指令发出后时刻。
+        历史坑 (2026-08-30): 旧 err 字段是"剩余%"但标签写"到位%", 被倒读成 PASS;
+        斜坡旧检查点 0.5/1/2s 全在斜坡内部, 保持段收敛从未被测。"""
         if len(samples) < 5:
             return None
         target = abs(target_deg)
-        err = {}
-        for tm in (0.5, 1.0, 2.0):
+        arr = {}
+        for tm in checkpoints:
             b = min(samples, key=lambda s: abs(s[0] - tm))
-            frac = abs(b[1]) / target
-            err[tm] = round((1.0 - min(frac, 1.0)) * 100.0, 1)
+            arr[tm] = round(min(abs(b[1]) / target, 1.2) * 100.0, 1)
         t_end = samples[-1][0]
         stab = [abs(abs(s[1]) - target) for s in samples if s[0] >= t_end - 1.0]
-        ovs = max((abs(abs(s[1]) - target) for s in samples), default=0.0)
-        return {"err": err, "pp": max(stab) - min(stab) if stab else 0.0,
-                "ovs": max(0.0, ovs), "n": len(samples)}
+        dev = max((abs(abs(s[1]) - target) for s in samples), default=0.0)
+        return {"arrival": arr, "pp": max(stab) - min(stab) if stab else 0.0,
+                "max_dev": max(0.0, dev), "n": len(samples)}
 
     def traj_str(samples, every=0.5):
         out = []
@@ -164,12 +193,15 @@ def main():
         if a0 is None:
             raise RuntimeError("no angle for ramp")
         print("\n=== 斜坡 +%.1f° @%.1f°/s ===" % (step, ramp_s), flush=True)
-        pos = track((a0 + step) * DEG2RAD, 3.0 + 3.0, a0, is_step=False)
-        r = sp(pos, step)
+        ramp_dur = step / ramp_s
+        pos = track((a0 + step) * DEG2RAD, ramp_dur + 3.0, a0, is_step=False)
+        # 检查点: 斜坡结束后 0.5/1.5/2.5s (保持段收敛才是判据; 斜坡内时刻无意义)
+        r = sp(pos, step, checkpoints=(ramp_dur + 0.5, ramp_dur + 1.5, ramp_dur + 2.5))
         print("  n=%d %s" % (len(pos), traj_str(pos)), flush=True)
         if r:
-            print("  到位%% 0.5s=%s 1s=%s 2s=%s | pp=%.3f° 过冲=%.2f°" %
-                  (r["err"][0.5], r["err"][1.0], r["err"][2.0], r["pp"], r["ovs"]), flush=True)
+            print("  到位%%(斜坡后) %s | pp=%.3f° 最大偏差=%.2f°" %
+                  (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
+                   r["pp"], r["max_dev"]), flush=True)
             results["ramp_pos"] = r
         else:
             print("  采样不足!")
@@ -184,8 +216,9 @@ def main():
         r = sp(step_t, step)
         print("  n=%d %s" % (len(step_t), traj_str(step_t, 0.25)), flush=True)
         if r:
-            print("  到位%% 0.5s=%s 1s=%s 2s=%s | pp=%.3f° 过冲=%.2f°" %
-                  (r["err"][0.5], r["err"][1.0], r["err"][2.0], r["pp"], r["ovs"]), flush=True)
+            print("  到位%% %s | pp=%.3f° 最大偏差=%.2f°" %
+                  (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
+                   r["pp"], r["max_dev"]), flush=True)
             results["step_pos"] = r
         else:
             print("  采样不足!")

@@ -1,5 +1,36 @@
 # PROGRESS
 
+## [2026-08-30] 20kHz 升频移植 + 复验判读复核（DeepSeek 报告裁定：PASS 不成立）
+
+### Problem / Task
+- 20kHz PWM 升频（静态噪声 −50%）+ 低速爬行诊断，DeepSeek 会话复验报告称"20kHz 定版门 PASS"。Kimi 复核其测试方法与 JSON 原始数据后裁定：**两个复验 run 均不可信，20kHz 定版门实际未通过**。
+
+### Resolution（复核裁定）
+1. **20kHz 移植本身干净**：分频链正确保住子环频率（速度 2k/位置 200Hz/编码器 5k/Rs 1k），fault=7 上下溢分工修复合理。留档项：电流环 PI 逐拍积分无 dt 缩放，20kHz 下等效积分刚性 ×2，实证无害，大电流动态若过冲第一个查它。
+2. **verify_lowspeed run（01:03）电机零响应被判 PASS**：脚本 err 字段语义是"剩余%"（08-20 定版时读作"剩 3.5%"），被倒读为"到位%"。原始语义下：阶跃零运动、斜坡走 1.12° 后冻结（pp=0.02° 是因为没动）。几乎确定是 run 早期 fault 闩锁（其自述偶发 fault=5/7），脚本无 fault 守卫未察觉。
+3. **speed_sweep run（01:05）存在失速-猛冲带**：双腿 8-18°/s 处 v_mean 崩至 1-2°/s 再冲 45°/s、err_std 11°、th_pp 24°，被误判为"启动瞬态"（启动在 t=0-2s，出事在 t=12-14s 下行中段）。"全速域无恶化"结论不成立。
+   - 主嫌疑：**CAL:ALL 重识别重新生成内部拖拽 LUT 并写 Flash**（其报告 §1.3 自认 cog_save=1、§2.2 自认 LUT 幅值 ±0.19A）→ 08-21 固化的平滑 LUT 被覆盖，Flash 遮蔽 2.0——"COG ON" 实为 gain=1.0 × 拖拽 LUT，位置域巨量扰动在位置环带宽交叉点（~10°/s）破坏力最大，与观测速度带吻合。
+   - 次嫌疑：死区占比翻倍（0.5µs/25µs=2%，~0.24V/相 ≈ 27mA，超摩擦补偿量级）。
+4. **"天然 2× 过采样降噪"证伪**：adc_sampling.c Process 无平均逻辑，上溢帧纯抽取——抽取不降噪。实测 −50% 静态噪声来自 PWM 频率本身（纹波幅值∝1/f），该部分真实。
+5. **静摩擦"阈值 0.05 rad/s"归因错误**：FOC_FF_COULOMB_DEADBAND_RADPS 仅为方向源选择死区（foc_app.c:1121），速度模式 |SREF|>1e-5 即触发。"0.02 rad/s 完全粘死"未记录测试模式（若当时在位置模式，SREF 被忽略、±0.02° 纹丝不动恰是健康位置环签名），**不可复现，挂账待复现条件**。
+
+### 工具链修补（本会话，scripts/）
+- `verify_low_speed.py`：+N 帧 faultFlags 守卫（闩锁即中止）；指标改"到位%"直显（消除 到位/剩余 倒读坑）；斜坡检查点移到保持段（原 0.5/1/2s 全在斜坡内部，收敛从未被测）。
+- `speed_sweep.py`：+JDIAG preflight——开扫前记录 live LUT min/max 入 JSON，非编译平滑版且 COG ON 时直接中止（Flash 遮蔽永不再漏）。
+
+### Verification
+- 复核全部基于其 JSON 原始数据（verify_lowspeed/speed_sweep/static_noise 三份）。
+- 两脚本 py_compile + dry-run 通过。
+
+### Follow-up（终审协议，待台架）
+1. `CMD:JDIAG` 看 cog_min/max：≠[−0.0093,+0.0133] 即遮蔽 2.0 实锤 → `COG_LUT,USE_COMPILED` + `COG_LUT,SAVE` 恢复固化。
+2. 重跑 verify_low_speed.py（fault 守卫会拦下带病 run）+ speed_sweep.py（preflight 守门）。
+3. 若 LUT 清白后 8-18°/s 失速带仍在 → 查死区补偿 / 电流环积分刚性。
+4. 观测器增益/Ke、偶发 DRV SPI fault：挂账保持。
+
+### Commits
+- 20kHz 固件改动 + 本工具链修补：工作区，待提交（用户自管 git）。
+
 ## [2026-08-21] 旋转纹波战役收官：C 通道缩水根因 + COG LUT 三连修复 + 齿槽对消 90%
 
 ### Problem / Task

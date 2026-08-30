@@ -3089,24 +3089,30 @@ void TIM1_UP_IRQHandler(void)
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_IRQn 1 */
     /* ===== FOC current loop =====
-     * PWM: 10kHz center-aligned (ARR=11999, PSC=0).
-     * Effective FOC rate: ADC-frame-gated, ~10kHz (matches PWM/ADC trigger).
+     * PWM: 20kHz center-aligned (ARR=5999, PSC=0).
+     * ADC frame (OC4REF@CNT=5400) lands on the underflow edge only.
+     * Underflow edge: full control cycle (Begin → consume → FOC_Run → End) + push.
+     * Overflow edge: push only (stream stays 40kHz, control stays 20kHz in lockstep).
      */
-    uint32_t current_path_start = FOC_Profiler_Begin();
-    FOC_App_TIM1_IRQHandler(&g_foc_app);
-    FOC_Profiler_End(FOC_PROBE_CURRENT_PATH, current_path_start);
-    
-    /* TLE5012 encoder read: target ~5kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+    if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim1) == RESET) {
+        uint32_t current_path_start = FOC_Profiler_Begin();
+        FOC_App_TIM1_IRQHandler(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_CURRENT_PATH, current_path_start);
+    } else {
+        FOC_App_PushCurrentStream(&g_foc_app);
+    }
+
+    /* TLE5012 encoder read: target ~5kHz (ISR base 40kHz, ÷8). */
     static uint8_t tle5012_div_counter = 0;
-    if (++tle5012_div_counter >= 4)
+    if (++tle5012_div_counter >= 8)
     {
         tle5012_div_counter = 0;
         TLE5012_StartRead();
     }
 
-    /* Speed loop: target ~2kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+    /* Speed loop: target ~2kHz (ISR base 40kHz, ÷20). */
     static uint8_t speed_loop_div_counter = 0;
-    if (++speed_loop_div_counter >= 10) 
+    if (++speed_loop_div_counter >= 20)
     {
         uint32_t speed_loop_start;
         speed_loop_div_counter = 0;
@@ -3115,10 +3121,10 @@ void TIM1_UP_IRQHandler(void)
         FOC_App_SpeedLoop(&g_foc_app);
         FOC_Profiler_End(FOC_PROBE_SPEED_LOOP, speed_loop_start);
     }
-    
-    /* Position loop: target ~200Hz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+
+    /* Position loop: target ~200Hz (ISR base 40kHz, ÷200). */
     static uint8_t position_loop_div_counter = 0;
-    if (++position_loop_div_counter >= 100) 
+    if (++position_loop_div_counter >= 200)
     {
         uint32_t position_loop_start;
         position_loop_div_counter = 0;
@@ -3126,7 +3132,7 @@ void TIM1_UP_IRQHandler(void)
         FOC_App_PositionLoop(&g_foc_app);
         FOC_Profiler_End(FOC_PROBE_POSITION_LOOP, position_loop_start);
     }
-    
+
     /* DRV8350S status poll. Rate = TIM1_UP freq (TBD by scope). */
     DRV8350S_TIM1_UpdateCallback(&drv8350s);
   /* USER CODE END TIM1_UP_IRQn 1 */

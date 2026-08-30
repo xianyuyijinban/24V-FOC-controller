@@ -46,8 +46,8 @@ extern "C" {
 
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
-#define FOC_PWM_PERIOD          12000       /* ARR=11999, center-aligned */
-#define FOC_CONTROL_FREQ        10000       /* PWM/ADC/effective current loop freq */
+#define FOC_PWM_PERIOD          6000        /* ARR=5999, center-aligned */
+#define FOC_CONTROL_FREQ        20000       /* PWM/ADC/effective current loop freq */
 #define FOC_SPEED_LOOP_FREQ     2000        /* Target speed loop freq (TBD by scope) */
 #define FOC_POSITION_LOOP_FREQ  200         /* 【新增】位置环频率 200Hz */
 #define FOC_SPEED_LPF_CUTOFF_HZ 20.0f       /* 速度估算低通截止频率：低速台架优先抑制编码器微分噪声 */
@@ -421,6 +421,7 @@ typedef struct {
 void FOC_App_Init(FOC_AppHandle_t *handle);
 void FOC_App_MainLoop(FOC_AppHandle_t *handle);
 void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle);
+void FOC_App_PushCurrentStream(FOC_AppHandle_t *handle);
 void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle);
 void FOC_App_RequestFaultShutdownFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 

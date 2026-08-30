@@ -538,9 +538,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_c);
     }
     
-    /* Rs在线估计（每20个周期执行一次，即1kHz） */
+    /* Rs在线估计（每40个周期执行一次，即1kHz，ISR基频40kHz） */
     handle->control_count++;
-    if ((handle->control_count % 20) == 0) {
+    if ((handle->control_count % 40) == 0) {
         MI_RsOnlineEstimator_Update(&handle->rs_est, 
             handle->foc.Vdq.d, handle->foc.Vdq.q,
             handle->foc.Idq.d, handle->foc.Idq.q,
@@ -549,6 +549,19 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
 exit_cycle:
     ADC_Sampling_EndControlCycle();
+    FOC_App_PushCurrentStream(handle);
+}
+
+/**
+ * @brief Push a current-stream sample (called from TIM1_UP ISR, both edges).
+ * @note  V1.1: standalone from control cycle so the upper-edge ISR (no frame)
+ *        can still push at the 40kHz base rate without double-executing FOC.
+ */
+void FOC_App_PushCurrentStream(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
 
     /* ── V1.1: Current stream sample push (all FOC states) ── */
     {

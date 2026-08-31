@@ -43,3 +43,33 @@
 ### 遗留
 - PDBBIN 率修复建议: gate 从固定 ÷13 改主循环率自适应 (目标 200Hz) — 挂账下轮。
 - F1 已知发现: TIM1 抢占 UART TX 完成中断 ≤15µs 节流空隙 (TX 带宽上限视角)。
+
+## [2026-08-31] TX 泵效率专项（T0 三数判别 + T3.1 时间门控，PDBBIN 200Hz 全工况解耦）
+
+### Problem / Task
+- 遥测带宽瓶颈定位: 判决实验 212Hz vs 黑洞专项 E0 691Hz 矛盾数据 (同固件系)。
+  Kimi 任务卡: T0 三数判别 (零烧录) + T1 代码核查 + T3 修法池 (时间门控必做)。
+
+### T0/T1 结论
+- **L1 准入丢弃排除**: tx_p0/p1/p2_drop=0 (前后差分)。
+- **L2 泵未满转排除**: 固件尝试 9666Hz / 成功 690Hz, 主机 rx=690Hz+gap=0。
+- **L3 主机/链路排除**: 1M 下有效载荷 8.4KB/s << 100KB/s。
+- **根因**: PDBBIN 门控 `÷13` 计数器与主循环率耦合 (为 2.5kHz 时代设计);
+  探针固件主循环 9.7kHz → 尝试率 9666Hz → 发射率 690Hz。0fa8b17 的 212Hz 是主循环
+  2.8kHz 所致 — 两版门控率不同源于主循环率不同, 非 bug。
+
+### T3.1 实现 (时间门控)
+- `UART_CommandServicePosdbg` 门控改 `(s_foc_tick_2khz - s_posdbg_last_tick) < 10U`
+  (5ms 硬时间基准, tick 在 2kHz 速度环拍递增) — 替代 `s_posdbg_acc < 13` 计数器。
+- compile clean (Keil 0 Error / 1 Warning), 烧录 Verify OK。
+
+### Gates (台架实测)
+- **G1** 200Hz 全工况解耦: 纯流 202.0Hz / 全组合 202.4Hz (+1%), 主循环 9.7k→32k Hz → PASS
+- **G2** 纯流 ±5% + drop=0: 202.0Hz (+1%), tx_drop=0 → PASS
+- **G3** 全组合 ≥190Hz + gap=0: 202.4Hz, gap=11 → 部分 (gap 已隔离到 F1 N帧仲裁; 无 N帧时 gap=0)
+- **G4** verify_low_speed PASS: 稳态 pp=0.04°, 斜坡 95.5%, 阶跃 88.3% → PASS
+  (第一轮 pp=6.31° 为 fault=7 ADC 偶发污染, CLEAR_FAULT 后恢复)
+
+### 遗留
+- F1 (TIM1 抢占 UART TX) 是 G3 gap=11 的投影; 扩容需 C7 风险分析后实施。
+- 波特率 2M 未做 (L3 未坐实, 无扩容动机)。

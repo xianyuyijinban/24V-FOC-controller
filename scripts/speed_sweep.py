@@ -78,14 +78,15 @@ class PdbBinCapture:
     def __init__(self, ser):
         self.ser = ser
         self.parser = foclink.MixedStreamParser(pdb2_cb=self._on_pdb2)
-        self.rows = []   # (label, tick, theta, err, iq_cmd, ff_total, v_mech, iq_act, pos_ref)
+        self.rows = []   # (label, tick, theta, err, iq_cmd, ff_total, v_mech, iq_act, pos_ref, host_rx)
         self.label = ""
         self._reader = None
         self._stop = False
 
     def _on_pdb2(self, s: foclink.PdbBinSample):
         self.rows.append((self.label, s.tick_2khz, s.theta_user_rad, s.pos_err_rad,
-                          s.iq_cmd, s.ff_total, s.v_mech_rad_s, s.iq_act, s.pos_ref_rad))
+                          s.iq_cmd, s.ff_total, s.v_mech_rad_s, s.iq_act, s.pos_ref_rad,
+                          s.host_rx_time))
 
     def drain(self):
         n = self.ser.in_waiting

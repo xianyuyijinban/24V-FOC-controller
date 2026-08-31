@@ -127,7 +127,7 @@ static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
 
 /* POSDBG: 极限环量化诊断流 (CMD:POSDBG,1|0) — 主循环钩子 200Hz 输出一行 */
 static uint8_t  s_posdbg_stream = 0U;
-static uint16_t s_posdbg_acc = 0U;
+static volatile uint32_t s_posdbg_last_tick = 0U;  /* 200Hz 时间门控基准 (2kHz tick) */
 static volatile uint32_t s_foc_tick_2khz = 0U;  /* 速度环节拍计数 (2kHz, TIM1 ISR) — PDB 行硬件时基 */
 static uint8_t  s_pdbbin_stream = 0U;           /* PDBBIN: 文本 PDB 的二进制孪生 (CMD:PDBBIN,1|0) */
 
@@ -606,14 +606,15 @@ static void UART_CommandServicePosdbg(void)
         return;
     }
 
-    /* ~200Hz: 主循环实测 ~2.5kHz (20kHz 固件), 每 13 拍输出一次 (~192Hz)。
-     * 2026-08-30 修正: 原 ÷5 在 1kHz 主循环下是 200Hz, 20kHz 固件主循环提速到
-     * 2.5kHz 后变 500Hz — PDBBIN 500Hz×42B=21KB/s 超 P1 容量致 seq_gap, 回收 200Hz 设计。 */
-    s_posdbg_acc++;
-    if (s_posdbg_acc < 13U) {
+    /* 时间门控 200Hz (2026-08-31 TX 泵专项): 原 ÷13 计数器与主循环率耦合 —
+     * 探针固件主循环 9.7kHz 时尝试率漂到 9666Hz 实测 690Hz; 改 s_foc_tick_2khz
+     * 差分 ≥10 拍 (5ms 硬时间基准, tick 在 2kHz 速度环拍递增, 与主循环率无关)。
+     * 主循环率高时仍每拍进 gate, 但 ≤200Hz 发射。 */
+    uint32_t tick_now = s_foc_tick_2khz;
+    if ((uint32_t)(tick_now - s_posdbg_last_tick) < 10U) {
         return;
     }
-    s_posdbg_acc = 0U;
+    s_posdbg_last_tick = tick_now;
 
     uint32_t posdbg_start = FOC_Profiler_Begin();
 
@@ -2037,7 +2038,7 @@ static void UART_CommandExecute(const char *cmd)
         if (uint_arg <= 1U) {
             s_posdbg_stream = (uint8_t)uint_arg;
             if (s_posdbg_stream == 0U) {
-                s_posdbg_acc = 0U;
+                s_posdbg_last_tick = s_foc_tick_2khz;
             }
             UART_CommandSendText("POSDBG,OK\r\n");
         } else {
@@ -2050,7 +2051,7 @@ static void UART_CommandExecute(const char *cmd)
         if (uint_arg <= 1U) {
             s_pdbbin_stream = (uint8_t)uint_arg;
             if (s_pdbbin_stream == 0U) {
-                s_posdbg_acc = 0U;
+                s_posdbg_last_tick = s_foc_tick_2khz;
             }
             UART_CommandSendText("PDBBIN,OK\r\n");
         } else {

@@ -1,6 +1,10 @@
 # 24V FOC Controller Build Script for ARM GCC
 # Target: STM32H743VIT6
 
+param(
+    [int]$LoopProf = 1   # 1=LOOP_PROF_EN(主循环分段探针), 0=探针关闭零成本基线
+)
+
 $ErrorActionPreference = "Stop"
 
 # Toolchain
@@ -66,6 +70,7 @@ $DEFINES = @(
     "-DUSE_HAL_DRIVER",
     "-DSTM32H743xx",
     "-DARM_MATH_CM7",
+    "-DLOOP_PROF_EN=$LoopProf",
     $GIT_HASH_DEFINE
 )
 

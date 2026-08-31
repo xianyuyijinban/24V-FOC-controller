@@ -36,6 +36,7 @@ class PdbBinSample:
     iq_act: float = 0.0
     v_mech_rad_s: float = 0.0
     pos_ref_rad: float = 0.0
+    host_rx_time: float = 0.0    # 解析层打戳: PC 收讫时刻 (epoch s)
 
     @property
     def t(self) -> float:
@@ -199,6 +200,7 @@ class MixedStreamParser:
     def _dispatch(self, type_byte: int, payload: bytes) -> None:
         if type_byte == TYPE_PDB2:
             s = self._decode_pdb2(payload)
+            s.host_rx_time = __import__("time").time()   # C4: 收讫时刻
             self._track_seq(type_byte, s.seq)
             if self.pdb2_cb:
                 self.pdb2_cb(s)
@@ -263,3 +265,67 @@ def query(ser, cmd: bytes, timeout: float = 1.5) -> bytes:
 def query_lines(ser, cmd: bytes, timeout: float = 1.5):
     """query() + 按 \\n split 的文本行列表。"""
     return [l for l in query(ser, cmd, timeout).split(b"\n") if l]
+
+
+# ── LOOP_PROF 快照解析 (2026-08-31 主循环黑洞专项) ──────────────────
+
+
+def parse_loop_prof(lines) -> dict:
+    """LOOP_PROF,.. 行列表 -> {'begin': {...}, 'probes': {...}, 'raw': [...]}。
+
+    行格式:
+      LOOP_PROF,BEGIN,probe_en=,cpu_hz=,iter_n=,iter_avg_us=,iter_max_cyc=,isr_avg_cyc=,isr_max_cyc=
+      LOOP_PROF,<PROBE>,n=,min_cyc=,avg_cyc=,max_cyc=,min_us=,avg_us=,max_us=
+      LOOP_PROF,END
+    """
+    import re
+    out = {"begin": {}, "probes": {}, "raw": []}
+    for l in lines:
+        l = l.strip()
+        if not l.startswith("LOOP_PROF,"):
+            continue
+        out["raw"].append(l)
+        parts = l.split(",")
+        if len(parts) < 3:
+            continue
+        kind = parts[1]
+        if kind == "BEGIN":
+            out["begin"] = dict(re.findall(r"([a-z_0-9]+)=([^,]+)", l))
+            for k in ("probe_en", "cpu_hz", "iter_n", "iter_avg_us", "iter_max_cyc",
+                      "isr_avg_cyc", "isr_max_cyc"):
+                if k in out["begin"]:
+                    out["begin"][k] = int(out["begin"][k])
+        elif kind in ("END", "BUSY"):
+            continue
+        else:
+            kv = dict(re.findall(r"([a-z_0-9]+)=([^,]+)", l))
+            kv["n"] = int(kv.get("n", 0))
+            kv["min_cyc"] = int(kv.get("min_cyc", 0))
+            kv["avg_cyc"] = int(kv.get("avg_cyc", 0))
+            kv["max_cyc"] = int(kv.get("max_cyc", 0))
+            kv["min_us"] = float(kv.get("min_us", 0))
+            kv["avg_us"] = float(kv.get("avg_us", 0))
+            kv["max_us"] = float(kv.get("max_us", 0))
+            out["probes"][kind] = kv
+    return out
+
+
+def fetch_loop_prof(ser, timeout: float = 2.0) -> dict:
+    """发 CMD:LOOP_PROF? 取快照并解析 (全读, 不按行增量判)。
+
+    前置: 调用方必须已停 PDBBIN 等二进制流 (A5 5A 帧会撞碎文本行, BEGIN/END 丢失)。
+    返回 BUSY 视为一次重试机会 (调用方可重试)。
+    """
+    ser.reset_input_buffer()
+    ser.write(b"CMD:LOOP_PROF?\n")
+    buf = b""
+    dl = __import__("time").time() + timeout
+    while __import__("time").time() < dl:
+        if ser.in_waiting:
+            buf += ser.read(ser.in_waiting)
+            if b"LOOP_PROF,END" in buf or b"LOOP_PROF,BUSY" in buf:
+                break
+        else:
+            __import__("time").sleep(0.01)
+    lines = buf.replace(b"\r", b"").split(b"\n")
+    return parse_loop_prof([l.decode(errors="replace") for l in lines])

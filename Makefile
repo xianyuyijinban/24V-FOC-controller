@@ -39,7 +39,8 @@ INCLUDES = \
 DEFINES = \
 -DUSE_HAL_DRIVER \
 -DSTM32H743xx \
--DARM_MATH_CM7
+-DARM_MATH_CM7 \
+-DLOOP_PROF_EN=1
 
 # MCU flags
 MCU_FLAGS = -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb

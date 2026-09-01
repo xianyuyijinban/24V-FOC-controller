@@ -67,6 +67,11 @@
   - CRC-8 多项式：`0x07`。
   - `BIN 1000`：当前推荐档位，约 1000 fps。
   - `BIN 2000`：实验档，受 1Mbaud 和 TX ring 反压限制，无法稳定达到完整 2000 fps。
+- **PDBBIN 二进制调试流**（v1.4.0 新增）：`A5 5A | 20 | 37B payload | CRC-8`，200Hz 固定采样，
+  `CMD:PDBBIN,1|0` 开关，含 seq/tick/pos_err/iq_cmd/ff_total/theta/v_mech/iq_act/pos_ref。
+  时间门控（5ms 硬基准）与主循环频率解耦（详见 docs/20khz_lowspeed_diag_report_20260830.md §7）。
+- **LOOP_PROF 主循环探针**（v1.4.0 新增）：`CMD:LOOP_PROF?` / `CMD:LOOP_PROF,CLEAR`，
+  主循环五段 DWT 探针（SEG_CMD/PREF/PDB/NFRAME/OTHER）+ ISR 税校正，`LOOP_PROF_EN` 编译开关（默认 1，置 0 零成本）。
 
 ## 控制实现
 
@@ -86,15 +91,19 @@ flowchart LR
     MOTOR --> ADC
 ```
 
-当前定时基线：
+当前定时基线（v1.4.0，20kHz 升频后）：
 
 | 项目 | 配置 |
 | --- | --- |
-| PWM | 20kHz，中心对齐，`ARR=11999` |
-| 有效电流环 | 10kHz |
+| PWM | 20kHz，中心对齐，`ARR=5999` |
+| 有效电流环 | 20kHz（控制环与 ADC 帧锁相，下溢执行 + 上溢推流，兼得 2× 过采样） |
 | 速度环 | 2kHz |
 | 位置环 | 200Hz |
 | 速度估算 LPF | 20Hz |
+
+> **20kHz 升频（v1.4.0）**：控制 ISR（40kHz）与 ADC 帧（40kHz）同频但相位差仅 0.52µs 导致 fault=7
+> （ADC_SAMPLING），改下溢执行控制环 + 上溢推电流流后锁相解决。20kHz 下死区占比 2%（0.5µs/25µs）。
+> 升频后静态电流噪声从 10kHz 基线的 5-11mA 降到 ~4.4mA（IA std），低速段跟踪误差下降一个数量级。
 
 提高 `TIM1 ARR` 是当前电流环能够输出毫伏级电压指令的关键。旧的 `ARR=49` 会把小 PI 输出量化掉，使电流环在低电流参考下看起来“没有响应”。
 
@@ -109,7 +118,7 @@ RS_FF_MODE     = DQ
 RS_FF_SCALE    = 0.20
 RS_FF_ADAPTIVE = OFF
 BEMF           = OFF
-COG            = 0.25 / +60 deg
+COG            = 0.0（OFF，LUT 编译平滑版定版） / +60 deg
 
 MOTION_CFG     = speed 1.0 rad/s
                  accel 2.0 rad/s^2
@@ -143,6 +152,17 @@ COG LUT          = 264 点标定（主导 22 次/圈磁阻力矩，`cogging_lut_
 实测（2°/s 匀速扫 40°）：速度均值 0.82 → **1.73°/s（86% 目标）**，角度残差 18.6° → **3.9°**；0.5°/s 慢摇 **92% 跟踪**、残差 std 0.9°（当前架构实际可用下限）。
 
 已知限制：**0.1°/s 极慢摇**受静摩擦非线性 + 低速速度估计噪声限制，位置补偿 / 速度模式 / 极低速固定补偿三种方案均未达标，需要速度观测器（规划中）。
+
+## v1.4.0 调试链路与诊断（2026-08-31 ~ 09-01）
+
+v1.4.0 在 20kHz 升频基础上补齐了调试链路与主循环诊断能力，主记录见 `docs/20khz_lowspeed_diag_report_20260830.md`。
+
+- **主循环黑洞专项**（2026-08-31）：LOOP_PROF 五段探针 + DWT/ISR 税校正，判别树 D1-D4 全闭环，
+  三条"不该贵的活很贵"挂账全部证伪——CPU 无黑洞，PDBBIN 率超载是 TX 链路现象。
+- **TX 泵效率专项**：PDBBIN 门控从 `÷13` 计数器改为 5ms 硬时间基准（200Hz 与主循环解耦），
+  T0 三数判别 + T3.1 时间门控全工况达标。
+- **F1/C7 风险分析**：TIM1 抢占 UART TX ≤15µs 节流空隙，扩容路线 2M 波特率（推荐）/ NVIC 提级（否），
+  等"N 帧 + PDBBIN 双开满速"需求再现再动。
 
 ## 上位机
 

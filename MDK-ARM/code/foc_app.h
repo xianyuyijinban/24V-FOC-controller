@@ -150,7 +150,7 @@ extern "C" {
 #define FOC_WHEEL_LIMIT_DEFAULT      0.30f /* 卡点力限幅 A */
 
 /* 固件版本信息 */
-#define FOC_FW_VERSION          "1.0.0"
+#define FOC_FW_VERSION          "1.4.0"
 #define FOC_PARAM_VERSION       "1"
 #define FOC_BASELINE_NAME       "12V_STANDARD"
 #ifndef FOC_GIT_HASH

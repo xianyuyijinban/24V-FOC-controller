@@ -2,9 +2,9 @@
 import serial, time, sys
 from pathlib import Path
 
-HOST_DIR = Path(__file__).resolve().parent.parent / "HostComputer"
+HOST_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(HOST_DIR))
-from data_parser import FOCDataParser, CommandBuilder
+from HostComputer.data_parser import FOCDataParser, CommandBuilder
 
 PORT = "COM9"; BAUD = 1152000
 

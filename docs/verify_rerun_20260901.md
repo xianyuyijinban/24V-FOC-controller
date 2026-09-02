@@ -1,7 +1,7 @@
 # 任务 1 尾差复跑（2026-09-01，verify_low_speed.py 第三轮，同固件）
 
 **对象**: 24V FOC 控制器台架，分支 foc-public-0817 @ 84de679
-**方法**: `python scripts/verify_low_speed.py --port COM10 --power-ok`（完整预检 + 停流 + JDIAG 审计）
+**方法**: `python scripts/low_speed/verify_low_speed.py --port COM10 --power-ok`（完整预检 + 停流 + JDIAG 审计）
 **结果**: 报告见下，已清除故障，台架回安全态
 
 ---

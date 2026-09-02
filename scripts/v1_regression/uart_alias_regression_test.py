@@ -5,13 +5,15 @@ validating responses through MixedStreamDecoder without
 reset_input_buffer() (except one initial flush).
 """
 
+import os
 import sys
 import time
 import serial
 
 # Import MixedStreamDecoder from the profile script
-sys.path.insert(0, "scripts")
-from foc_runtime_profile import MixedStreamDecoder
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
+from common.foc_runtime_profile import MixedStreamDecoder
 
 BAUD = 1_000_000
 PORT = "COM7"

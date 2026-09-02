@@ -7,8 +7,9 @@ COG 齿槽LUT 贡献量化 — DIRECT kp=0.5/kd=0.03 下, COG ON(0.25) vs OFF(0)
 """
 import argparse, json, os, statistics, sys, time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pos_direct_ab_test import SerialIO, step_stats, N_IDX
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
+from common.pos_direct_ab_test import SerialIO, step_stats, N_IDX
 
 DEG2RAD = 3.14159265358979 / 180.0
 

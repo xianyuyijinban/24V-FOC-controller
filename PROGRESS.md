@@ -15,7 +15,7 @@
 - **P1 命令**: `CMD:LOOP_PROF?` BEGIN...END 事务 (P0 逐行泵), `CMD:LOOP_PROF,CLEAR`。
   修复两个 BUSY 死锁: (1) END 行发后未清 active; (2) 探针索引越界
   (`<=FOC_PROBE_COUNT` → `<=COUNT-1`), END 行永不发送。
-- **P2 实验**: scripts/loop_prof_exp.py (E0-E4×30s, 落盘 JSON + PDBBIN 三元组)。
+- **P2 实验**: scripts/low_speed/loop_prof_exp.py (E0-E4×30s, 落盘 JSON + PDBBIN 三元组)。
   主机侧 lessons: fetch 快照前必须停 PDBBIN + 排空残留 (二进制帧撞碎文本行)。
 
 ### Verification (E0-E4 判别树全闭环)

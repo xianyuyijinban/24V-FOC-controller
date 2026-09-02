@@ -7,7 +7,7 @@
 
 ## E1: 角度矩阵八点（修复后 PDBBIN 版）
 
-**脚本**: `scripts/verify_settle_angles2.py`（**PDBBIN 连续流，无 LineBuffer 陈旧帧问题**）
+**脚本**: `scripts/low_speed/verify_settle_angles2.py`（**PDBBIN 连续流，无 LineBuffer 陈旧帧问题**）
 **点位**: 0/30/75/110/120/165/200/240°，每点 30s，settle 后 20s 窗测 pp
 
 | 角度 | settle_end 实际 | err | pp(后20s) | iq 范围 | 判定 |
@@ -116,7 +116,7 @@ E1-E4 全部在台架，结束时：
 
 ## 脚本
 
-- `scripts/verify_settle_angles2.py` — E1（8 点 PDBBIN 位置线）
-- `scripts/verify_settle_abc.py` — E2/E3（AW 三模 + COG A/B）
+- `scripts/low_speed/verify_settle_angles2.py` — E1（8 点 PDBBIN 位置线）
+- `scripts/low_speed/verify_settle_abc.py` — E2/E3（AW 三模 + COG A/B）
 - **注意**: 两个脚本都有已知小 bug（set_angles 解环绕 STUCK 误标；abc 有单点 PREF 时序异常），已重测确认无实际问题；后续复跑可修
 - 数据文件: `scripts/settle_mat_20260901_161126.json`（E1）、`scripts/settle_abc_20260901_161539.json`（E2/E3）

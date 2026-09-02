@@ -20,8 +20,9 @@ import time
 
 import serial
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pos_direct_ab_test import N_IDX
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
+from common.pos_direct_ab_test import N_IDX
 
 
 def main():

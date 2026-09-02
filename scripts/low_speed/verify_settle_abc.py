@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-"""verify_drift_probe.py — 双态漂移收官判据: verify 序列连跑 4 轮 (2026-09-01 Kimi 任务卡收官)
+"""verify_settle_abc.py — E2/E3 稳态漂移 A/B (2026-09-01 Kimi 判别矩阵)
 
-复现 verify_low_speed 的完整稳态测量序列 (阶跃+回位+5s+测2s), 每轮 PDBBIN 全程落盘
-(pos_err/iq_cmd/ff_total), 漂移态现形时抓状态字 (AW 积分/position_friction_active/
-pos_cmd_dir), 干净轮也抓一份作对照。
+E2: AW 三模 A/B (POS_AW_MODE 0=条件冻结旧律 / 1=超阈值回拉定版 / 3=非对称泄放)
+    在问题位测稳态 pp — 三模切换直接改变现象 -> 回拉律实锤
+E3: COG ON/OFF A/B (COG_CFG gain 1.0/0) 同位置 — 排除 LUT 残差注入
 
-序列 (与 verify_low_speed 同):
-  1. 钉住当前角 a0 -> 阶跃 +6° (PREF a0+6) -> 3s -> 回位 (PREF a0) -> 等 5s
-  2. 测 2s 稳态窗 (目标角 a0, 但 verify 实际钉的是 240.69° 锚点附近)
-  3. 判定: pp>=3° 漂移态 / <=0.1° 干净 / else MID
-  4. 漂移态 or 干净轮: 抓 JDIAG/状态字 (命令: CMD:POS_AW_MODE? 拿当前 mode;
-     drift 发生时 PDBBIN 行已含 iq_cmd/ff_total; 状态字另行查询)
+点位: 240.69° (09-01 6.24° 漂移发生点) + 165.0° (历史拒动嫌疑位, E1 已证伪)
 
-用法: python scripts/verify_drift_probe.py COM10 --power-ok [--rounds 4] [--step 6.0]
+用法: python scripts/verify_settle_abc.py COM10 --power-ok [--angles 240.69,165.0]
 """
 import argparse
 import json
@@ -23,7 +18,8 @@ import time
 
 import serial
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
 import foclink  # noqa: E402
 
 DEG2RAD = math.pi / 180.0
@@ -34,10 +30,9 @@ def main():
     ap.add_argument("port", nargs="?", default="COM10")
     ap.add_argument("--baud", type=int, default=1000000)
     ap.add_argument("--power-ok", action="store_true")
-    ap.add_argument("--rounds", type=int, default=4)
-    ap.add_argument("--step", type=float, default=6.0, help="阶跃幅度 °")
-    ap.add_argument("--anneal", type=float, default=5.0, help="回位后等待 s")
-    ap.add_argument("--win", type=float, default=2.0, help="稳态测量窗 s")
+    ap.add_argument("--angles", default="240.69,165.0")
+    ap.add_argument("--settle", type=float, default=5.5)
+    ap.add_argument("--win", type=float, default=2.0)
     ap.add_argument("--kp", type=float, default=0.49)
     ap.add_argument("--kd", type=float, default=0.007)
     ap.add_argument("--ki", type=float, default=0.37)
@@ -45,6 +40,7 @@ def main():
     if not args.power_ok:
         print("DRY-RUN: need --power-ok")
         return 0
+    angles = [float(a) for a in args.angles.split(",") if a.strip()]
 
     ser = serial.Serial(args.port, args.baud, timeout=0.05)
     time.sleep(0.4)
@@ -115,7 +111,7 @@ def main():
         ser.close()
         return 1
 
-    # 配置 (与 verify 同)
+    # 配置序列 (与 E1 同)
     send("CMD:UNLOCK,1", 0.15)
     ser.reset_input_buffer()
     if not expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK"):
@@ -140,9 +136,6 @@ def main():
         send("CMD:CLEAR_FAULT", 0.8)
     if not en_ok:
         print("ENABLE fail (3次)"); ser.close(); return 1
-
-    # PDBBIN capture
-    rows = []
 
     def row(s):
         return (round(s.host_rx_time, 4), s.tick_2khz, s.theta_user_rad,
@@ -181,51 +174,24 @@ def main():
     time.sleep(0.3)
     cap.start()
 
-    def read_state_words():
-        """抓状态字: CMD:DIR? —— dir/hold/integral/iq_cmd/fric_pos/fric_neg.
-        DIR? 走 P0 队列, 会被 PDBBIN 淹没 — 必须: PDBBIN,0 等 0.5s 再 DIR? 抓完恢复。
-        2026-09-01 实测: 流全停后 DIR? 正常 (dir/hold/integral/fric_pos_neg)。"""
-        send("CMD:PDBBIN,0", 0.5)
-        time.sleep(0.4)
-        ser.reset_input_buffer()
-        ser.write(b"CMD:DIR?\n")
-        time.sleep(0.5)
-        s = b""
-        t0 = time.time()
-        while time.time() - t0 < 2.0:
-            if ser.in_waiting:
-                s += ser.read(ser.in_waiting)
-            else:
-                time.sleep(0.05)
-        send("CMD:PDBBIN,1", 0.4)
-        for l in s.decode(errors="replace").split("\n"):
-            if l.strip().startswith("DIR,OK"):
-                return l.strip()
-        return None
-
     def near360(x, tgt):
         while x - tgt > 180.0: x -= 360.0
         while x - tgt < -180.0: x += 360.0
         return x
 
-    def round_probe(idx, a0_deg):
-        """单轮: 阶跃 +6° -> 回位 a0 -> 等 anneal -> 测 win 窗。返回 dict."""
-        target_step = a0_deg + args.step
-        # 移动
-        send("CMD:PREF,%.6f" % (target_step * DEG2RAD), 3.0)
-        time.sleep(3.0)
-        # 回位
-        send("CMD:PREF,%.6f" % (a0_deg * DEG2RAD), 0.3)
-        time.sleep(args.anneal)
-        # 稳态窗测量 (PDBBIN 新行)
-        row_base = len(cap.rows)
+    def measure(a_deg):
+        """钉住 a_deg, 等 settle, 测 win 窗 pp (PDBBIN, 每次只取窗内新行)。"""
+        target_rad = a_deg * DEG2RAD
+        ser.write(b"CMD:PREF,%.6f\n" % target_rad)
+        time.sleep(args.settle)
+        row_base = len(cap.rows)   # settle 后标记; 窗口只收其后新行
         t0 = time.time()
         angs, iqs, errs, ffs = [], [], [], []
         consumed = row_base
         while time.time() - t0 < args.win:
             if len(cap.rows) > consumed:
                 for r in cap.rows[consumed:]:
-                    angs.append(near360(r[2] * 180.0 / math.pi, a0_deg))
+                    angs.append(near360(r[2] * 180.0 / math.pi, a_deg))
                     iqs.append(r[4])
                     errs.append(r[3] * 180.0 / math.pi)
                     ffs.append(r[5])
@@ -233,35 +199,41 @@ def main():
             time.sleep(0.02)
         if not angs:
             return None
-        pp = max(angs) - min(angs)
-        cls = "DRIFT" if pp >= 3.0 else ("CLEAN" if pp <= 0.1 else "MID")
-        st = read_state_words()
-        return {"round": idx, "a0": a0_deg, "pp": pp, "end": angs[-1], "cls": cls,
+        return {"pp": max(angs) - min(angs),
+                "end": angs[-1],
                 "iq_min": min(iqs), "iq_max": max(iqs), "iq_mean": sum(iqs) / len(iqs),
-                "err_end": errs[-1], "ff_end": ffs[-1], "n": len(angs),
-                "state": st, "traj": [(r[0], r[2], r[3], r[4], r[5]) for r in cap.rows[row_base:]]}
+                "err_end": errs[-1], "ff_end": ffs[-1], "n": len(angs)}
 
-    # 初始钉到 240.69° 附近 (verify 历史漂移点)
-    send("CMD:PREF,%.6f" % (240.69 * DEG2RAD), 4.0)
-    time.sleep(4.0)
-    a0 = None
-    # 读当前角 (PDBBIN 最后一行)
-    if cap.rows:
-        a0 = near360(cap.rows[-1][2] * 180.0 / math.pi, 240.69)
-    print("initial settle at %.2f°" % (a0 if a0 else -1), flush=True)
-
+    # E2 AW 三模 + E3 COG A/B 合并跑
+    configs = [
+        ("E2_AW1_基线", "CMD:POS_AW_MODE,1,0.03"),
+        ("E2_AW0_条件冻结", "CMD:POS_AW_MODE,0,0.03"),
+        ("E2_AW3_非对称泄放", "CMD:POS_AW_MODE,3,0.03"),
+        ("E3_COG_OFF", "CMD:COG_CFG,0.0,60.0"),
+        ("E3_COG_ON", "CMD:COG_CFG,1.0,60.0"),   # 最后测 COG ON (结束时恢复 COG_OFF)
+    ]
     results = []
     try:
-        for i in range(args.rounds):
-            r = round_probe(i, a0)
-            if r is None:
-                print("轮 %d: 采样不足" % i, flush=True)
-                continue
-            print("轮 %d: pp=%.3f end=%.2f iq[%.4f,%.4f] err_end=%.3f ff=%.4f n=%d %s state=%s"
-                  % (i, r["pp"], r["end"], r["iq_min"], r["iq_max"], r["err_end"],
-                     r["ff_end"], r["n"], r["cls"], r["state"]), flush=True)
-            results.append(r)
+        for label, cfg_cmd in configs:
+            send(cfg_cmd, 0.2)
+            for a in angles:
+                m = measure(a)
+                if m is None:
+                    print("  %s angle %.1f: 采样不足" % (label, a), flush=True)
+                    continue
+                cls = "DRIFT" if m["pp"] >= 3.0 else ("CLEAN" if m["pp"] <= 0.1 else "MID")
+                print("  %s angle %.1f: pp=%6.3f end=%7.2f iq[%5.3f,%5.3f] mean=%5.3f err_end=%6.3f ff_end=%6.3f -> %s"
+                      % (label, a, m["pp"], m["end"], m["iq_min"], m["iq_max"], m["iq_mean"],
+                         m["err_end"], m["ff_end"], cls), flush=True)
+                results.append({"config": label, "angle": a, "pp": round(m["pp"], 4),
+                                "end": round(m["end"], 3),
+                                "iq_min": round(m["iq_min"], 4), "iq_max": round(m["iq_max"], 4),
+                                "iq_mean": round(m["iq_mean"], 4),
+                                "err_end": round(m["err_end"], 4), "ff_end": round(m["ff_end"], 4),
+                                "cls": cls, "n": m["n"]})
     finally:
+        send("CMD:COG_CFG,0.0,60.0")   # 恢复定版 COG OFF
+        time.sleep(0.2)
         cap.stop()
         send("CMD:STOP")
         send("CMD:PDBBIN,0")
@@ -269,20 +241,11 @@ def main():
         send("CMD:CLEAR_FAULT")
         ser.close()
 
-    # 切片轨迹（防 JSON 过大）
-    for r in results:
-        if len(r["traj"]) > 1200:
-            step = len(r["traj"]) // 200
-            r["traj"] = r["traj"][::step]
-
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "drift_probe_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+                       "settle_abc_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"args": vars(args), "results": results}, f, ensure_ascii=False, indent=1)
     print("JSON: %s" % out)
-    drift = sum(1 for r in results if r["cls"] == "DRIFT")
-    clean = sum(1 for r in results if r["cls"] == "CLEAN")
-    print("4轮汇总: %d 漂移态 %d 干净态 %d MID" % (drift, clean, len(results) - drift - clean))
     return 0
 
 

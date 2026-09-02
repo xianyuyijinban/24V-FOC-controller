@@ -9,8 +9,9 @@
 """
 import argparse, json, os, statistics, sys, time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pos_direct_ab_test import SerialIO, step_stats, N_IDX
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
+from common.pos_direct_ab_test import SerialIO, step_stats, N_IDX
 
 RAD2DEG = 57.29577951308232
 DEG2RAD = 3.14159265358979 / 180.0

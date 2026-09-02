@@ -21,8 +21,9 @@ import time
 
 import serial
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pos_direct_ab_test import N_IDX
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
+from common.pos_direct_ab_test import N_IDX
 
 DEG2RAD = 3.14159265358979 / 180.0
 SWEEP_RAD = 1.0  # 每档扫动幅度 rad (~57°), 单圈内

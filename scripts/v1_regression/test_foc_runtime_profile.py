@@ -1,6 +1,11 @@
 import unittest
+import os
+import sys
 
-from scripts.foc_runtime_profile import (
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
+
+from common.foc_runtime_profile import (
     FocSerial,
     MixedStreamDecoder,
     crc8_poly07,

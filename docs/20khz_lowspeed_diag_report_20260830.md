@@ -153,7 +153,7 @@
   (TIM1_UP 每拍 ISR 墙钟累入 64 位账本, 段净耗时 = 墙钟差 − 段内 ISR 差);
   `LOOP_PROF_EN` 编译开关, 置 0 零成本零行为差 (GCC 双路径验证: 开 185088B / 关 183512B)。
 - **实验**: E0-E4 每档 30s, LOOP_PROF 快照 + PDBBIN 原始三元组落盘
-  (`scripts/loop_prof_exp_20260831_203037.json`), 预检含 JDIAG 参数审计全绿。
+  (`scripts/low_speed/loop_prof_exp_20260831_203037.json`), 预检含 JDIAG 参数审计全绿。
 
 ### 6.2 判别树结果
 

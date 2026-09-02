@@ -90,7 +90,7 @@ DIR,OK,dir=0,hold=0,integral=0.0374,iq_cmd=0.0156,fric_pos=0.022,fric_neg=0.022
 ## 5. 报告/数据
 
 - 数据: scripts/drift_probe_20260901_174345.json / 174833.json / 175106.json（12 轮）
-- 脚本: scripts/verify_drift_probe.py（完整 verify 序列 + PDBBIN 轨迹 + DIR? 状态字）
+- 脚本: scripts/low_speed/verify_drift_probe.py（完整 verify 序列 + PDBBIN 轨迹 + DIR? 状态字）
 - 固件: 1d898ce（LOAD_PROF_EN=1）
 - 台架: COM10（串口 1000000）, PDBBIN 200Hz
 - 结束: CMD:STOP + CMD:PDBBIN,0 + CMD:OFF + CMD:CLEAR_FAULT, 台架安全

@@ -19,7 +19,8 @@ import time
 
 import serial
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'common'))
 import foclink  # noqa: E402
 
 DEG2RAD = 3.14159265358979 / 180.0

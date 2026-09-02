@@ -10,12 +10,14 @@ Constraints:
 - Must validate 100/100 ACK, ~57k-63k binary frames, 0 CRC errors
 """
 
+import os
 import sys
 import time
 import serial
 
-sys.path.insert(0, "scripts")
-from foc_runtime_profile import MixedStreamDecoder
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common"))
+from common.foc_runtime_profile import MixedStreamDecoder
 
 BAUD = 1_000_000
 PORT = "COM7"

@@ -1750,6 +1750,7 @@ static void UART_CommandExecute(const char *cmd)
         if ((strncmp(cmd, "CMD:SREF,", 9) == 0) ||
             (strncmp(cmd, "CMD:PREF,", 9) == 0) ||
             (strncmp(cmd, "CMD:IREF,", 9) == 0) ||
+            (strncmp(cmd, "CMD:VOLT,", 9) == 0) ||
             (strncmp(cmd, "CMD:MODE,", 9) == 0) ||
             (strncmp(cmd, "CMD:APP_MODE,", 13) == 0) ||
             (strncmp(cmd, "CMD:ENABLE,1", 12) == 0)) {
@@ -2435,7 +2436,7 @@ static void UART_CommandExecute(const char *cmd)
     }
 
     if (sscanf(cmd, "CMD:MODE,%ld", &int_arg) == 1) {
-        if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_POSITION) {
+        if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_VOLTAGE) {
             char resp[32];
             __disable_irq();
             FOC_App_SetRawControlMode(&g_foc_app, (FOC_ControlMode_t)int_arg);
@@ -2445,6 +2446,85 @@ static void UART_CommandExecute(const char *cmd)
         } else {
             UART_CommandSendText("MODE,FAIL,range\r\n");
         }
+        return;
+    }
+
+    /* ── CMD:VOLT — 电压开环模式 (FOC_MODE_VOLTAGE) 电压指令 ── */
+    if (strcmp(cmd, "CMD:VOLT?") == 0) {
+        char resp[96];
+        float vbus = g_foc_app.Vbus;
+        (void)snprintf(resp, sizeof(resp),
+                 "VOLT,OK,vq_ref_mV=%ld,bemf_mV=%ld,iq_est_mA=%ld,mode=%u,vbus_mV=%ld\r\n",
+                 (long)(g_foc_app.voltage_vq_ref * 1000.0f),
+                 (long)(g_foc_app.voltage_bemf_ff * 1000.0f),
+                 (long)(g_foc_app.iq_est * 1000.0f),
+                 (unsigned)g_foc_app.control_mode,
+                 (long)(vbus * 1000.0f));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:VOLT_OFF") == 0) {
+        __disable_irq();
+        g_foc_app.voltage_vq_ref = 0.0f;
+        g_foc_app.foc.Vdq.d = 0.0f;
+        g_foc_app.foc.Vdq.q = 0.0f;
+        __enable_irq();
+        UART_CommandSendText("VOLT_OFF,OK\r\n");
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:VOLT,", &f1)) {
+        /* 输入单位 mV → V */
+        char resp[48];
+        if (g_foc_app.control_mode != FOC_MODE_VOLTAGE) {
+            UART_CommandSendText("VOLT,FAIL,not_voltage_mode (use CMD:MODE,3)\r\n");
+            return;
+        }
+        __disable_irq();
+        FOC_App_SetVoltageRef(&g_foc_app, f1 * 0.001f);
+        __enable_irq();
+        (void)snprintf(resp, sizeof(resp), "VOLT,OK,%ldmV\r\n", (long)f1);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    /* ── CMD:DT — 逆变器死区补偿 (E7 A/B) ── */
+    if (strcmp(cmd, "CMD:DT?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp),
+                 "DT,OK,en=%u,amp_mV=%ld,comp=%ld,%ld,%ldmV\r\n",
+                 (unsigned)g_foc_app.dt_comp.enabled,
+                 (long)(g_foc_app.dt_comp.amplitude_v * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_a * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_b * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_c * 1000.0f));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:DT,%ld", &int_arg) == 1) {
+        if (int_arg != 0) {
+            __disable_irq();
+            g_foc_app.dt_comp.enabled = 1U;
+            g_foc_app.dt_comp.sign_a = g_foc_app.dt_comp.sign_b = g_foc_app.dt_comp.sign_c = 0U;
+            __enable_irq();
+            UART_CommandSendText("DT,OK,1\r\n");
+        } else {
+            __disable_irq();
+            g_foc_app.dt_comp.enabled = 0U;
+            __enable_irq();
+            UART_CommandSendText("DT,OK,0\r\n");
+        }
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:DT_V,", &f1)) {
+        /* 手动幅值覆盖 mV → V（E7 校正用） */
+        char resp[48];
+        if (f1 < 0.0f || f1 > 1000.0f) {
+            UART_CommandSendText("DT_V,FAIL,range (0-1000mV)\r\n");
+            return;
+        }
+        g_foc_app.dt_comp.amplitude_v = f1 * 0.001f;
+        (void)snprintf(resp, sizeof(resp), "DT_V,OK,%ldmV\r\n", (long)f1);
+        UART_CommandSendText(resp);
         return;
     }
 

@@ -1358,6 +1358,16 @@
               <FilePath>.\code\foc_observer.h</FilePath>
             </File>
             <File>
+              <FileName>foc_dtcomp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\foc_dtcomp.c</FilePath>
+            </File>
+            <File>
+              <FileName>foc_dtcomp.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\foc_dtcomp.h</FilePath>
+            </File>
+            <File>
               <FileName>motor_identify.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\motor_identify.c</FilePath>

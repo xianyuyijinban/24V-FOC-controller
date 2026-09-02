@@ -164,6 +164,7 @@ $FOC_SOURCES = @(
     "MDK-ARM/code/foc_profiler.c",
     "MDK-ARM/code/foc_core.c",
     "MDK-ARM/code/foc_observer.c",
+    "MDK-ARM/code/foc_dtcomp.c",
     "MDK-ARM/code/motor_identify.c",
     "MDK-ARM/code/param_storage.c",
     "MDK-ARM/code/tle5012.c",

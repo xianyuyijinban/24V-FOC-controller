@@ -19,6 +19,7 @@ extern "C" {
 #include "tle5012.h"
 #include "drv8350s.h"
 #include "foc_observer.h"
+#include "foc_dtcomp.h"
 
 /*==================== 配置参数 ====================*/
 
@@ -190,7 +191,14 @@ typedef enum {
     FOC_MODE_TORQUE = 0,        /* 力矩模式：直接控制Iq */
     FOC_MODE_SPEED,             /* 速度模式：速度环控制 */
     FOC_MODE_POSITION,          /* 位置模式：位置环+速度环 */
+    FOC_MODE_VOLTAGE,           /* 电压开环模式：Vq*直给(旁路电流PI)，力矩代理控制(60A/1mR 线低速蠕动用) */
 } FOC_ControlMode_t;
+
+/* 电压开环模式默认参数 */
+#define FOC_VOLTAGE_VQ_REF_MAX_V        3.0f  /* Vq指令上限 V（评估期安全限幅） */
+#define FOC_VOLTAGE_IQ_EST_LIMIT_A      2.4f  /* 估计电流软限幅 A（80%过流阈值） */
+#define FOC_VOLTAGE_IQ_EST_LPF_HZ       160.0f /* 估计电流低通截止 Hz（τ≈1ms） */
+#define FOC_VOLTAGE_VQ_RAMP_V_PER_S     0.05f /* 内部 Vq 斜坡速率 V/s（空载平衡窗 <±20mV 用） */
 
 /* 上层应用模式 (Phase 3 — 产品模式外壳) */
 typedef enum {
@@ -326,6 +334,14 @@ typedef struct {
     float speed_ref_ramped;     /* 速度模式内部限斜率给定 rad/s */
     float speed_ref_ramped_prev;/* 上一拍速度给定 (惯量前馈加速度计算) */
     float pos_ref;              /* 位置给定 (rad) */
+
+    /* 电压开环模式 (FOC_MODE_VOLTAGE) */
+    float voltage_vq_ref;       /* 用户Vq指令 V（外环2kHz写入，ISR读取） */
+    float voltage_vq_ramped;    /* 内部斜坡 Vq V（0.05V/s 逼近目标） */
+    float voltage_bemf_ff;      /* Bemf前馈项 ωe·Ke_elec V 诊断 */
+    float iq_est;               /* 电流估计值 A（电压模型，诊断+软限幅） */
+    float iq_est_lpf_alpha;     /* 估计电流低通系数（Init算好） */
+    FOC_DtComp_t dt_comp;       /* 逆变器死区补偿 (E7 A/B, 默认 OFF) */
 
     /* V5 位置模式运行时运动配置 */
     float position_speed_limit_radps;   /* 速度上限 rad/s */
@@ -485,6 +501,7 @@ const BlackBoxSample_t *BlackBox_GetSample(uint8_t index);  /* 0 = oldest */
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
+void FOC_App_SetVoltageRef(FOC_AppHandle_t *handle, float vq_ref);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetPosDirectPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);

@@ -179,6 +179,18 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->pos_aw_decay_diag = 0.0f;
     handle->pos_ref_prev = handle->pos_ref;
 
+    /* 电压开环模式 (FOC_MODE_VOLTAGE) 初始化 */
+    handle->voltage_vq_ref = 0.0f;
+    handle->voltage_vq_ramped = 0.0f;
+    handle->voltage_bemf_ff = 0.0f;
+    handle->iq_est = 0.0f;
+    FOC_DtComp_Init(&handle->dt_comp);
+    {
+        const float wc_iq_est = 2.0f * FOC_PI * FOC_VOLTAGE_IQ_EST_LPF_HZ;
+        const float Ts_loop = 1.0f / (float)FOC_SPEED_LOOP_FREQ;
+        handle->iq_est_lpf_alpha = (wc_iq_est * Ts_loop) / (1.0f + wc_iq_est * Ts_loop);
+    }
+
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
 
@@ -510,6 +522,26 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
     if (identify_direct_svpwm) {
         /* Direct-SVPWM identify stages already produced the voltage vector. */
+    } else if ((handle->state == FOC_STATE_RUNNING) &&
+               (handle->control_mode == FOC_MODE_VOLTAGE)) {
+        /* 电压开环模式：Vdq 由速度环(2kHz)直写，此处仅反Park+SVPWM。
+         * 电流反馈仍走 Clarke/Park 供遥测真值，但不用作闭环。 */
+        FOC_Clarke_Transform(&handle->foc.Iabc, &handle->foc.IalphaBeta);
+        FOC_Park_Transform(&handle->foc.IalphaBeta,
+                          handle->foc.sin_theta, handle->foc.cos_theta,
+                          &handle->foc.Idq);
+        FOC_Inverse_Park_Transform(&handle->foc.Vdq, handle->foc.sin_theta,
+                                  handle->foc.cos_theta, &handle->foc.ValphaBeta);
+        if (handle->dt_comp.enabled) {
+            /* 死区补偿：相电压域逐相叠加（E7 A/B），再走 ABC 域 SVPWM */
+            float vabc[3];
+            FOC_AlphaBeta_t vab = handle->foc.ValphaBeta;
+            FOC_Inverse_Clarke_Transform(&vab, (FOC_ABC_t *)vabc);
+            FOC_DtComp_Apply(&handle->dt_comp, handle->Ia, handle->Ib, handle->Ic, vabc);
+            FOC_SVPWM_GenerateFromABC((FOC_ABC_t *)vabc, handle->foc.Vbus, &handle->foc.svpwm);
+        } else {
+            FOC_SVPWM_Generate(&handle->foc.ValphaBeta, handle->foc.Vbus, &handle->foc.svpwm);
+        }
     } else if (!current_feedback_valid) {
         if (handle->state == FOC_STATE_PARAM_IDENTIFY && !identify_direct_svpwm) {
             /* During identify closed-loop stages, don't regenerate old voltage on invalid windows */
@@ -870,6 +902,65 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         handle->speed_loop_ready = 1U;
         handle->speed_ref_ramped = 0.0f;
         FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 初始化：尚无有效速度误差 */
+        handle->speed_loop_count++;
+        return;
+    }
+
+    if (handle->control_mode == FOC_MODE_VOLTAGE) {
+        /* ── 电压开环模式：Vq* = vq_ramped + Bemf前馈(ωe·Ke_elec)，旁路电流PI ──
+         * 电流估计 Îq = (Vq* − ωe·Ke_elec) / Rs 仅诊断+软限幅，不参与闭环；
+         * 超限回拉斜坡电压保证软限幅先于硬件 OCP。
+         * 极性定案（4 次 A/B 实测）：不映射。正 vq → 用户帧正转矩（速度环同向）。 */
+        float pn_f = (handle->motor_param.Pn > 0U) ? (float)handle->motor_param.Pn : 1.0f;
+        float ke_elec = handle->motor_param.Ke / pn_f;
+        float bemf = handle->speed_elec * ke_elec;  /* speed_elec=ωe 电角速度 */
+        /* 内置斜坡：vq_ramped 以 FOC_VOLTAGE_VQ_RAMP_V_PER_S 逼近目标（空载平衡窗 <±20mV） */
+        {
+            float ramp_step = FOC_VOLTAGE_VQ_RAMP_V_PER_S / (float)FOC_SPEED_LOOP_FREQ;
+            float delta = handle->voltage_vq_ref - handle->voltage_vq_ramped;
+            handle->voltage_vq_ramped += FOC_Saturate(delta, ramp_step, -ramp_step);
+        }
+        float vq_cmd = handle->voltage_vq_ramped + bemf;
+        float rs = handle->motor_param.Rs;
+
+        handle->voltage_bemf_ff = bemf;
+
+        /* 电流估计（一阶低通，2kHz更新）。Vq*-Bemf ≈ Rs·Iq（低速 Rd 忽略）。 */
+        if ((rs > 0.01f) && handle->motor_identified) {
+            float iq_raw = (vq_cmd - bemf) / rs;  /* = vq_ramped / rs */
+            handle->iq_est += handle->iq_est_lpf_alpha * (iq_raw - handle->iq_est);
+        } else {
+            handle->iq_est = 0.0f;
+        }
+
+        /* 软限幅：估计电流超限 → 回拉斜坡电压（防堵转飞车） */
+        if (handle->iq_est > FOC_VOLTAGE_IQ_EST_LIMIT_A) {
+            float excess_v = (handle->iq_est - FOC_VOLTAGE_IQ_EST_LIMIT_A) * rs;
+            handle->voltage_vq_ramped -= excess_v;
+            if ((handle->voltage_vq_ramped > 0.0f) && (handle->voltage_vq_ramped > excess_v * 10.0f)) {
+                handle->voltage_vq_ramped = 0.0f;  /* 极端情况直接切零 */
+            }
+        } else if (handle->iq_est < -FOC_VOLTAGE_IQ_EST_LIMIT_A) {
+            float excess_v = (-handle->iq_est - FOC_VOLTAGE_IQ_EST_LIMIT_A) * rs;
+            handle->voltage_vq_ramped += excess_v;
+            if ((handle->voltage_vq_ramped < 0.0f) && (-handle->voltage_vq_ramped > excess_v * 10.0f)) {
+                handle->voltage_vq_ramped = 0.0f;
+            }
+        }
+        vq_cmd = handle->voltage_vq_ramped + bemf;
+
+        /* 总电压限幅：|Vq*| ≤ Vbus/√3 */
+        {
+            float vmax = (handle->Vbus > 1.0f) ? (handle->Vbus / FOC_SQRT3) : (24.0f / FOC_SQRT3);
+            vq_cmd = FOC_Saturate(vq_cmd, vmax, -vmax);
+        }
+
+        /* 直写 Vdq（ISR 中 FOC_Run 被旁路，反Park/SVPWM 由 Regenerate 执行） */
+        handle->foc.Vdq.d = 0.0f;
+        handle->foc.Vdq.q = vq_cmd;
+        handle->Id_ref = 0.0f;
+        handle->Iq_ref = 0.0f;
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);
         handle->speed_loop_count++;
         return;
     }
@@ -2067,6 +2158,17 @@ void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
     handle->pi_speed.integral = 0.0f;
 }
 
+void FOC_App_SetVoltageRef(FOC_AppHandle_t *handle, float vq_ref)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->voltage_vq_ref = FOC_Saturate(vq_ref,
+                                          FOC_VOLTAGE_VQ_REF_MAX_V,
+                                          -FOC_VOLTAGE_VQ_REF_MAX_V);
+}
+
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
 {
     if (handle == NULL) {
@@ -2144,6 +2246,22 @@ void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 
     if (handle->stall_open_loop_active && (mode == FOC_MODE_POSITION)) {
         mode = FOC_MODE_SPEED;
+    }
+
+    /* 离开电压模式：清电压状态防止下次进入残留 */
+    if ((handle->control_mode == FOC_MODE_VOLTAGE) && (mode != FOC_MODE_VOLTAGE)) {
+        handle->voltage_vq_ref = 0.0f;
+        handle->voltage_vq_ramped = 0.0f;
+        handle->voltage_bemf_ff = 0.0f;
+        handle->iq_est = 0.0f;
+        handle->foc.Vdq.d = 0.0f;
+        handle->foc.Vdq.q = 0.0f;
+    }
+    /* 进入电压模式：初始化电压状态 */
+    if (mode == FOC_MODE_VOLTAGE) {
+        handle->voltage_vq_ref = 0.0f;
+        handle->voltage_vq_ramped = 0.0f;
+        handle->iq_est = 0.0f;
     }
 
     handle->control_mode = mode;

@@ -1,0 +1,95 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "steps": "200,300,500,1000,1500",
+  "win": 10.0
+ },
+ "results": [
+  {
+   "vq_cmd_mV": 200.0,
+   "n": 468,
+   "id_mean": 0.00938,
+   "iq_mean": -0.03664,
+   "vd_mean": 0.0,
+   "vq_mean": 0.2,
+   "angle_deg": 14.35,
+   "verdict": "PASS(同相)",
+   "angle_pp_deg": 0.07,
+   "axis_locked": true,
+   "slope_vq_iq": -5.4584,
+   "fault_count": 0,
+   "theta_first": 227.36,
+   "theta_last": 227.33
+  },
+  {
+   "vq_cmd_mV": 300.0,
+   "n": 473,
+   "id_mean": 0.01062,
+   "iq_mean": -0.05497,
+   "vd_mean": 0.0,
+   "vq_mean": 0.3,
+   "angle_deg": 10.93,
+   "verdict": "PASS(同相)",
+   "angle_pp_deg": 0.11,
+   "axis_locked": true,
+   "slope_vq_iq": -5.4577,
+   "fault_count": 0,
+   "theta_first": 227.23,
+   "theta_last": 227.21
+  },
+  {
+   "vq_cmd_mV": 500.0,
+   "n": 474,
+   "id_mean": 0.00747,
+   "iq_mean": -0.10237,
+   "vd_mean": 0.0,
+   "vq_mean": 0.5,
+   "angle_deg": 4.17,
+   "verdict": "PASS(同相)",
+   "angle_pp_deg": 0.16,
+   "axis_locked": true,
+   "slope_vq_iq": -4.8841,
+   "fault_count": 0,
+   "theta_first": 227.09,
+   "theta_last": 226.98
+  },
+  {
+   "vq_cmd_mV": 1000.0,
+   "n": 473,
+   "id_mean": -0.08475,
+   "iq_mean": -0.21308,
+   "vd_mean": 0.0,
+   "vq_mean": 1.0,
+   "angle_deg": 21.69,
+   "verdict": "FAIL(错位!)",
+   "angle_pp_deg": 0.09,
+   "axis_locked": true,
+   "slope_vq_iq": -4.6931,
+   "fault_count": 0,
+   "theta_first": 225.77,
+   "theta_last": 225.71
+  },
+  {
+   "vq_cmd_mV": 1500.0,
+   "n": 473,
+   "id_mean": -0.26603,
+   "iq_mean": -0.20442,
+   "vd_mean": 0.0,
+   "vq_mean": 1.5,
+   "angle_deg": 52.46,
+   "verdict": "FAIL(错位!)",
+   "angle_pp_deg": 0.17,
+   "axis_locked": true,
+   "slope_vq_iq": -7.338,
+   "fault_count": 0,
+   "theta_first": 224.3,
+   "theta_last": 224.18
+  }
+ ],
+ "fit": {
+  "slope_Rs": -6.116,
+  "intercept_V": -0.048
+ }
+}

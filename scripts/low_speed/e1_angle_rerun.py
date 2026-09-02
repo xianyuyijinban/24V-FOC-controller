@@ -148,8 +148,8 @@ def main():
                 time.sleep(0.002)
             if not rows:
                 print("  无 N 帧数据!"); continue
-            # 解析: p[5]=Id, p[6]=Iq, p[20]=Vd, p[21]=Vq, p[8]=faultFlags(hex)
-            ids, iqs, vds, vqs = [], [], [], []
+            # 解析: p[3]=angle(deg), p[5]=Id, p[6]=Iq, p[20]=Vd, p[21]=Vq, p[8]=faultFlags(hex)
+            ids, iqs, vds, vqs, angs = [], [], [], [], []
             faults = 0
             for p in rows:
                 try:
@@ -157,6 +157,7 @@ def main():
                     iqs.append(float(p[6]))
                     vds.append(float(p[20]))
                     vqs.append(float(p[21]))
+                    angs.append(float(p[3]))
                     if int(p[8], 16) != 0:
                         faults += 1
                 except ValueError:
@@ -168,6 +169,8 @@ def main():
             mean_iq = sum(iqs) / n
             mean_vd = sum(vds) / n
             mean_vq = sum(vqs) / n
+            # 轴锁定判定: 角度窗内 max-min (判手限位是否真锁死)
+            ang_pp = max(angs) - min(angs) if angs else -1
             # 夹角 (纯阻同相: atan(|Id|/|Iq|))
             import math
             ang = math.degrees(math.atan2(abs(mean_id), abs(mean_iq))) if mean_iq != 0 else 90.0
@@ -178,14 +181,18 @@ def main():
             else:
                 slope = mean_vq / 1e-6
             verdict = "PASS(同相)" if ang < 15.0 else "FAIL(错位!)"
-            print("  n=%d Id=%+8.4f Iq=%+8.4f Vd=%+7.4f Vq=%+7.4f 夹角=%.1f° %s fault=%d"
-                  % (n, mean_id, mean_iq, mean_vd, mean_vq, ang, verdict, faults), flush=True)
+            axis_st = "锁死" if ang_pp < 1.0 else "未锁死(轴在动)"
+            print("  n=%d Id=%+8.4f Iq=%+8.4f Vd=%+7.4f Vq=%+7.4f 夹角=%.1f° %s 轴pp=%.1f°(%s) fault=%d"
+                  % (n, mean_id, mean_iq, mean_vd, mean_vq, ang, verdict, ang_pp, axis_st, faults), flush=True)
             results.append({
                 "vq_cmd_mV": step_mv, "n": n,
                 "id_mean": round(mean_id, 5), "iq_mean": round(mean_iq, 5),
                 "vd_mean": round(mean_vd, 5), "vq_mean": round(mean_vq, 5),
                 "angle_deg": round(ang, 2), "verdict": verdict,
+                "angle_pp_deg": round(ang_pp, 3), "axis_locked": ang_pp < 1.0,
                 "slope_vq_iq": round(slope, 4) if slope else None, "fault_count": faults,
+                "theta_first": round(angs[0], 3) if angs else None,
+                "theta_last": round(angs[-1], 3) if angs else None,
             })
     finally:
         ser.write(b"CMD:VOLT_OFF")

@@ -1,0 +1,75 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "steps": "200,300,500,1000,1500",
+  "win": 10.0
+ },
+ "results": [
+  {
+   "vq_cmd_mV": 200.0,
+   "n": 463,
+   "id_mean": -0.03134,
+   "iq_mean": -0.02046,
+   "vd_mean": 0.0,
+   "vq_mean": 0.2,
+   "angle_deg": 56.86,
+   "verdict": "FAIL(错位!)",
+   "slope_vq_iq": -9.7752,
+   "fault_count": 0
+  },
+  {
+   "vq_cmd_mV": 300.0,
+   "n": 464,
+   "id_mean": -0.05047,
+   "iq_mean": -0.02362,
+   "vd_mean": 0.0,
+   "vq_mean": 0.3,
+   "angle_deg": 64.92,
+   "verdict": "FAIL(错位!)",
+   "slope_vq_iq": -12.703,
+   "fault_count": 0
+  },
+  {
+   "vq_cmd_mV": 500.0,
+   "n": 462,
+   "id_mean": 0.00514,
+   "iq_mean": 0.07567,
+   "vd_mean": 0.0,
+   "vq_mean": 0.5,
+   "angle_deg": 3.89,
+   "verdict": "PASS(同相)",
+   "slope_vq_iq": 6.6077,
+   "fault_count": 0
+  },
+  {
+   "vq_cmd_mV": 1000.0,
+   "n": 470,
+   "id_mean": 0.14011,
+   "iq_mean": 0.11512,
+   "vd_mean": 0.0,
+   "vq_mean": 1.0,
+   "angle_deg": 50.59,
+   "verdict": "FAIL(错位!)",
+   "slope_vq_iq": 8.6865,
+   "fault_count": 0
+  },
+  {
+   "vq_cmd_mV": 1500.0,
+   "n": 471,
+   "id_mean": -0.1414,
+   "iq_mean": -0.31634,
+   "vd_mean": 0.0,
+   "vq_mean": 1.5,
+   "angle_deg": 24.08,
+   "verdict": "FAIL(错位!)",
+   "slope_vq_iq": -4.7417,
+   "fault_count": 0
+  }
+ ],
+ "fit": {
+  "slope_Rs": -1.8727,
+  "intercept_V": 0.6365
+ }
+}

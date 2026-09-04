@@ -906,11 +906,12 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         return;
     }
 
-    if (handle->control_mode == FOC_MODE_VOLTAGE) {
-        /* ── 电压开环模式：Vq* = vq_ramped + Bemf前馈(ωe·Ke_elec)，旁路电流PI ──
+    if ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct == 0U)) {
+        /* ── 电压开环模式 (pos_direct=0, E系列实验路径)：Vq* = vq_ramped + Bemf前馈(ωe·Ke_elec)，旁路电流PI ──
          * 电流估计 Îq = (Vq* − ωe·Ke_elec) / Rs 仅诊断+软限幅，不参与闭环；
          * 超限回拉斜坡电压保证软限幅先于硬件 OCP。
-         * 极性定案（4 次 A/B 实测）：不映射。正 vq → 用户帧正转矩（速度环同向）。 */
+         * 极性定案（4 次 A/B 实测）：不映射。正 vq → 用户帧正转矩（速度环同向）。
+         * S2 闭环 (pos_direct=1) 跳过本分支, 落 FF 层末级换算 (1488)。 */
         float pn_f = (handle->motor_param.Pn > 0U) ? (float)handle->motor_param.Pn : 1.0f;
         float ke_elec = handle->motor_param.Ke / pn_f;
         float bemf = handle->speed_elec * ke_elec;  /* speed_elec=ωe 电角速度 */
@@ -1078,7 +1079,9 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         }
         /* ── 位置环直连电流环 (判别实验): 跳过速度PI，位置环力矩指令
          *    直接进FF层(齿槽LUT/摩擦/惯量)与静摩擦补偿 ── */
-        if ((handle->control_mode == FOC_MODE_POSITION) && (handle->pos_direct != 0U)) {
+        if (((handle->control_mode == FOC_MODE_POSITION) ||
+             ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
+            (handle->pos_direct != 0U)) {
             handle->pi_speed.integral = 0.0f;
             FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 直连：速度误差不参与控制 */
             iq_ref_mech = FOC_Saturate(handle->pos_direct_iq_cmd, iq_limit_pos, iq_limit_neg);
@@ -1213,7 +1216,8 @@ ff_layers:
                  *   导致前馈随噪声高频翻转放大抖动 (0.5°/s 实测 ±24°/s 跳变)。
                  * - SPEED: SREF 指令符号 (差分速度噪声淹没 0.1°/s 信号, 速度方向不可靠) */
                 float coulomb_dir;
-                if ((handle->control_mode == FOC_MODE_POSITION) &&
+                if (((handle->control_mode == FOC_MODE_POSITION) ||
+                     ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
                     (handle->pos_direct != 0U)) {
                     /* 直连位置模式: 方向只锁指令方向, 速度方向永不参与。
                      * pos_cmd_dir 是传感器帧方向, FF 输出需转 control 帧力矩
@@ -1223,7 +1227,8 @@ ff_layers:
                     coulomb_dir = handle->pos_cmd_dir * enc_dir_ff;
                 } else if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
                     coulomb_dir = (omega > 0.0f) ? 1.0f : -1.0f;
-                } else if ((handle->control_mode == FOC_MODE_POSITION) &&
+                } else if (((handle->control_mode == FOC_MODE_POSITION) ||
+                            ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
                            (handle->pos_cmd_dir != 0.0f)) {
                     /* 级联低速兜底: pos_cmd_dir 是传感器帧方向, 转 control 帧 (同直连修正) */
                     float enc_dir_ff = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
@@ -1380,14 +1385,16 @@ ff_layers:
             (fabsf(speed_feedback) < FOC_SPEED_STATIC_FRICTION_ACTIVE_RAD_PER_S) &&
             ((speed_ref_temp * speed_error) > 0.0f)) {
             friction_dir = speed_ref_temp;
-        } else if (handle->control_mode == FOC_MODE_POSITION) {
+        } else if (((handle->control_mode == FOC_MODE_POSITION) ||
+                    ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
             /* 低速静摩擦前馈统一由 FF 层库仑处理(fric_comp + pos_cmd_dir方向兜底 + Stribeck),
              * 此处禁用避免双重补偿(实测双份过冲: 匀速从1.8→1.25°/s恶化)。 */
             friction_dir = 0.0f;
         }
 
         if (friction_dir != 0.0f) {
-            if (handle->control_mode == FOC_MODE_POSITION) {
+            if (((handle->control_mode == FOC_MODE_POSITION) ||
+                 ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
                 friction_comp = (friction_dir > 0.0f) ?
                                 handle->fric_comp_pos :
                                 handle->fric_comp_neg;
@@ -1493,6 +1500,44 @@ haptic_torque_injection:
 
         float iq_cmd = iq_ref_mech;
 
+        /* ── 电压闭环末级换算 (FOC_MODE_VOLTAGE && pos_direct): ──
+         * 所有电流口径项 (PD+积分+摩擦+COG+惯量 FF) 统一 ×Rs_phase 换算为电压。
+         * Rs 口径铁律: motor_param.Rs = 线线 (8.3-8.8), 电压模式用相口径 = Rs/2 ≈ 4.4。
+         * 高阻电机 L/R=0.42ms << 位置环拍 5ms, 电气动态透明, 增益映射 200Hz 频段成立。 */
+        if ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)) {
+            float rs_phase = (handle->motor_param.Rs > 0.01f) ?
+                             (handle->motor_param.Rs * 0.5f) : 4.4f;   /* 线线→相口径 */
+            float vq_cmd = iq_cmd * rs_phase;
+            handle->voltage_vq_cmd_diag = iq_cmd;
+            /* Vq 限幅 ±2V (堵转 2V/4.4Ω = 455mA 安全; C8) */
+            vq_cmd = FOC_Saturate(vq_cmd, FOC_VOLTAGE_S2_VQ_MAX_V, -FOC_VOLTAGE_S2_VQ_MAX_V);
+            /* iq_act 软限幅: 实测电流超限 → 降 vq (用实测不用 iq_est; C8) */
+            {
+                float iq_act = handle->foc.Idq.q;
+                float iq_act_lim = FOC_VOLTAGE_S2_IQ_SOFT_LIMIT_A;
+                if (iq_act > iq_act_lim) {
+                    vq_cmd -= (iq_act - iq_act_lim) * rs_phase;
+                } else if (iq_act < -iq_act_lim) {
+                    vq_cmd -= (iq_act + iq_act_lim) * rs_phase;
+                }
+            }
+            /* 直写 Vdq (电压模式 ISR 分支消费) */
+            handle->foc.Vdq.d = 0.0f;
+            handle->foc.Vdq.q = vq_cmd;
+            handle->Id_ref = 0.0f;
+            handle->Iq_ref = 0.0f;
+            handle->position_loop_pd_out_diag = handle->voltage_vq_cmd_diag;
+            handle->ff_diag.ff_total_iq = 0.0f;
+            handle->ff_diag.bemf_vd = 0.0f;
+            handle->ff_diag.bemf_vq = 0.0f;
+            handle->ff_diag.bemf_enabled = 0U;
+            handle->speed_loop_iq_cmd_diag = iq_cmd;
+            handle->speed_loop_iq_mech_diag = iq_ref_mech;
+        } else {
+            /* 更新电流参考值 */
+            FOC_App_SetCurrentRef(handle, 0.0f, iq_cmd);  /* Id=0控制 */
+        }
+
         /* FFDiag 汇总 */
         handle->ff_diag.ff_total_iq = handle->ff_diag.inertia_iq
                                     + handle->ff_diag.friction_iq
@@ -1577,17 +1622,20 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         return;
     }
 
-    /* 非位置模式/非运行时清零低速静摩擦状态（积分+指令方向） */
+    /* 非位置模式/非运行时清零低速静摩擦状态（积分+指令方向）。
+     * 电压闭环 (VOLTAGE && pos_direct) 复用同一位置环, 不清零。 */
     if ((handle->state != FOC_STATE_RUNNING) ||
-        (handle->control_mode != FOC_MODE_POSITION)) {
+        ((handle->control_mode != FOC_MODE_POSITION) &&
+         !((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
         handle->pos_integral = 0.0f;
         handle->pos_cmd_dir = 0.0f;
         handle->pos_cmd_dir_hold = 0U;
     }
 
-    /* 位置环（仅在位置模式且运行状态执行） */
-    if (handle->state == FOC_STATE_RUNNING && 
-        handle->control_mode == FOC_MODE_POSITION) {
+    /* 位置环（位置模式 或 电压闭环模式 且运行状态执行） */
+    if (handle->state == FOC_STATE_RUNNING &&
+        ((handle->control_mode == FOC_MODE_POSITION) ||
+         ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
         
         /* 位置误差：pos_ref(用户坐标) - theta_mech_user(用户坐标) */
         float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;

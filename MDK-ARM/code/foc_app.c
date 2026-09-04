@@ -1657,7 +1657,11 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         /* 指令方向锁存(慢摇连续静摩擦补偿方向源, 级联与直连共用):
          * ref 有增量→方向=sign(增量)并重置保持窗口; hold窗口内(ref刚动过,
          * 含PC步进间歇期)方向保持——否则PC每0.2s步进时 ref_delta 间歇为0
-         * 会误清方向导致补偿5Hz间歇、长斜坡爬行; hold耗尽后 到位或误差反向→清0。
+         * 会误清方向导致补偿5Hz间歇、长斜坡爬行。
+         * 优先级 (2026-09-04 Kimi 定案): ①ref步进刷新 ②误差反号→立即释放+
+         * hold清零(斜坡中 hold 被步进反复重置, 原④排最后永不触发→粘滑脱扣后
+         * comp 仍按老方向推满 hold 窗, 喂过冲=142-169% 超前根因) ③hold递减
+         * ④到位清0。
          * 注意: pos_ref 为 control frame(=用户角×encoder_dir), 方向/误差须转回
          * 用户坐标再判, 否则 encoder_dir=-1 时补偿方向反(正向运动 dir=-1 帮倒忙)。 */
         float enc_dir_f = encoder_dir_f;
@@ -1667,11 +1671,12 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         if (fabsf(ref_delta) > FOC_FRIC_CMD_DIR_UPDATE_RAD) {
             handle->pos_cmd_dir = (ref_delta > 0.0f) ? 1.0f : -1.0f;
             handle->pos_cmd_dir_hold = FOC_FRIC_CMD_DIR_HOLD_CNT;
+        } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
+            handle->pos_cmd_dir = 0.0f;          /* 反号立即释放, 不等 hold 窗 (2026-09-04) */
+            handle->pos_cmd_dir_hold = 0U;
         } else if (handle->pos_cmd_dir_hold > 0U) {
             handle->pos_cmd_dir_hold--;
         } else if (fabsf(pos_err_user) < FOC_FRIC_CMD_DIR_CLEAR_RAD) {
-            handle->pos_cmd_dir = 0.0f;
-        } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
             handle->pos_cmd_dir = 0.0f;
         }
 

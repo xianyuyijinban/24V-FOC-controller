@@ -212,8 +212,16 @@ static void DrvUart_CollectData(DrvUart_DataPacket_t* packet, uint8_t type)
     packet->Iq = g_foc_app.foc.Idq.q;
     packet->adcId = adcTelemetryIdq.d;
     packet->adcIq = adcTelemetryIdq.q;
-    packet->Vd = g_foc_app.foc.Vdq.d;
-    packet->Vq = g_foc_app.foc.Vdq.q;
+    if (g_foc_app.control_mode == FOC_MODE_VOLTAGE) {
+        /* 电压模式: S2 闭环 (pos_direct=1) Vq 由末级写 foc.Vdq.q (1507 行);
+         * 开环 (pos_direct=0) Vq 由 909 分支写 foc.Vdq.q — 统一读 foc.Vdq。
+         * (旧版读 ramped 只在开环对, S2 闭环 ramped=0 → N帧 Vq=0 bug 已修) */
+        packet->Vd = 0.0f;
+        packet->Vq = g_foc_app.foc.Vdq.q;
+    } else {
+        packet->Vd = g_foc_app.foc.Vdq.d;
+        packet->Vq = g_foc_app.foc.Vdq.q;
+    }
     packet->speed = g_foc_app.speed_mech * encoder_dir;
     packet->thetaMech = g_foc_app.theta_mech;
     packet->thetaElec = g_foc_app.theta_elec;

@@ -652,6 +652,9 @@ static void UART_CommandServicePosdbg(void)
         p.iq_act         = h->foc.Idq.q;
         p.v_mech_rad_s   = h->speed_mech;
         p.pos_ref_rad    = h->pos_ref;
+        /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04) */
+        p.flags = ((uint32_t)h->state << 8) |
+                  ((uint32_t)h->fault_code & 0xFFU);
         DebugStream_PushPdb(s_foc_tick_2khz, &p);
     }
     FOC_Profiler_End(FOC_PROBE_POSDBG, posdbg_start);
@@ -2465,9 +2468,7 @@ static void UART_CommandExecute(const char *cmd)
     }
     if (strcmp(cmd, "CMD:VOLT_OFF") == 0) {
         __disable_irq();
-        g_foc_app.voltage_vq_ref = 0.0f;
-        g_foc_app.foc.Vdq.d = 0.0f;
-        g_foc_app.foc.Vdq.q = 0.0f;
+        FOC_App_VoltageOff(&g_foc_app);   /* 收拢: 清 iq_est/vq_ramped/bemf/Vdq 全部 */
         __enable_irq();
         UART_CommandSendText("VOLT_OFF,OK\r\n");
         return;

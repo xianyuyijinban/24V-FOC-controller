@@ -30,7 +30,7 @@ void DebugStream_PushPdb(uint32_t tick_2khz, const PdbBinPayload_t *p)
 
     /* 小端 packed: u32/f32 均为小端 (ARM Cortex-M7), memcpy 直拷 */
     memcpy(&payload[1], &tick_2khz, 4U);
-    payload[5] = 0U; payload[6] = 0U; payload[7] = 0U; payload[8] = 0U;  /* flags=0 */
+    memcpy(&payload[5], &p->flags, 4U);  /* flags: 高 8 位=state, 低 8 位=fault_code (2026-09-04) */
     off = 9;
     memcpy(&payload[off], &p->pos_err_rad,  4U); off += 4;
     memcpy(&payload[off], &p->iq_cmd,       4U); off += 4;

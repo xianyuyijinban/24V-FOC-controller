@@ -29,7 +29,7 @@ extern "C" {
 typedef struct {
     uint8_t  seq;       /* 发射点递增, 丢帧定位核心 */
     uint32_t tick_2khz; /* 硬件时基 tick (t=tick/2000) */
-    uint32_t flags;     /* 保留, 恒 0 (任务卡 37B 规格计入) */
+    uint32_t flags;     /* 高 8 位=state, 低 8 位=fault_code (2026-09-04) */
     float    pos_err_rad;   /* 位置误差 rad (control 帧, =文本 PDB p[1]) */
     float    iq_cmd;        /* FF 前位置环指令 A (= p[7]) */
     float    ff_total;      /* FF 层总注入 A (= p[9]) */

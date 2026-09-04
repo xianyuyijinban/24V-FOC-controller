@@ -965,6 +965,18 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         return;
     }
 
+    /* 速度环初始化（仅一次，任何模式先跑） */
+    if (!handle->speed_loop_ready) {
+        handle->speed_theta_prev = handle->theta_mech;
+        handle->speed_mech = 0.0f;
+        handle->speed_elec = 0.0f;
+        handle->speed_loop_ready = 1U;
+        handle->speed_ref_ramped = 0.0f;
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 初始化：尚无有效速度误差 */
+        handle->speed_loop_count++;
+        return;
+    }
+
     /* 计算转速（简化：微分法） */
     float delta_theta = handle->theta_mech - handle->speed_theta_prev;
     float speed_raw;
@@ -2169,6 +2181,21 @@ void FOC_App_SetVoltageRef(FOC_AppHandle_t *handle, float vq_ref)
                                           -FOC_VOLTAGE_VQ_REF_MAX_V);
 }
 
+void FOC_App_VoltageOff(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    /* 清零所有电压模式状态——VOLT_OFF 命令与离开电压模式共用（收拢一处） */
+    handle->voltage_vq_ref = 0.0f;
+    handle->voltage_vq_ramped = 0.0f;
+    handle->voltage_bemf_ff = 0.0f;
+    handle->iq_est = 0.0f;
+    handle->foc.Vdq.d = 0.0f;
+    handle->foc.Vdq.q = 0.0f;
+}
+
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
 {
     if (handle == NULL) {
@@ -2250,12 +2277,7 @@ void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 
     /* 离开电压模式：清电压状态防止下次进入残留 */
     if ((handle->control_mode == FOC_MODE_VOLTAGE) && (mode != FOC_MODE_VOLTAGE)) {
-        handle->voltage_vq_ref = 0.0f;
-        handle->voltage_vq_ramped = 0.0f;
-        handle->voltage_bemf_ff = 0.0f;
-        handle->iq_est = 0.0f;
-        handle->foc.Vdq.d = 0.0f;
-        handle->foc.Vdq.q = 0.0f;
+        FOC_App_VoltageOff(handle);
     }
     /* 进入电压模式：初始化电压状态 */
     if (mode == FOC_MODE_VOLTAGE) {

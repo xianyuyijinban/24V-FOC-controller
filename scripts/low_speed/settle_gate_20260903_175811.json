@@ -1,0 +1,160 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "kp": 0.49,
+  "kd": 0.007,
+  "ki": 0.37,
+  "gate_pp": 0.1,
+  "gate_window": 2.0,
+  "gate_timeout": 15.0,
+  "meas_win": 2.0
+ },
+ "results": [
+  {
+   "group": "G1_static",
+   "round": 0,
+   "timeout": false,
+   "waited_s": 2.26,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 415
+  },
+  {
+   "group": "G1_static",
+   "round": 1,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 183
+  },
+  {
+   "group": "G1_static",
+   "round": 2,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 185
+  },
+  {
+   "group": "G1_static",
+   "round": 3,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.03,
+   "cls": "CLEAN",
+   "traj_len": 182
+  },
+  {
+   "group": "G1_static",
+   "round": 4,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.03,
+   "cls": "CLEAN",
+   "traj_len": 182
+  },
+  {
+   "group": "G1_static",
+   "round": 5,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 184
+  },
+  {
+   "group": "G1_static",
+   "round": 6,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 183
+  },
+  {
+   "group": "G1_static",
+   "round": 7,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 183
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 0,
+   "timeout": false,
+   "waited_s": 2.11,
+   "pp": 0.02,
+   "cls": "CLEAN",
+   "traj_len": 371
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 1,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 6.03,
+   "cls": "DRIFT",
+   "traj_len": 182
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 2,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 5.99,
+   "cls": "DRIFT",
+   "traj_len": 183
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 3,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 6.11,
+   "cls": "DRIFT",
+   "traj_len": 183
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 4,
+   "timeout": false,
+   "waited_s": 2.11,
+   "pp": 0.03,
+   "cls": "CLEAN",
+   "traj_len": 372
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 5,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 5.78,
+   "cls": "DRIFT",
+   "traj_len": 182
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 6,
+   "timeout": false,
+   "waited_s": 2.11,
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "traj_len": 370
+  },
+  {
+   "group": "G4_rampstep",
+   "round": 7,
+   "timeout": false,
+   "waited_s": 0.0,
+   "pp": 5.78,
+   "cls": "DRIFT",
+   "traj_len": 181
+  }
+ ]
+}

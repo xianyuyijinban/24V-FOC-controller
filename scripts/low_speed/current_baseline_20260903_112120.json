@@ -1,0 +1,47 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "rounds": 4,
+  "settle": 5.0,
+  "win": 2.0,
+  "kp": 0.49,
+  "kd": 0.007,
+  "ki": 0.37
+ },
+ "results": [
+  {
+   "round": 0,
+   "ts": "11:20:42",
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "vbus": 11.92,
+   "dir_state": "DIR,OK,dir=0,hold=0,integral=-0.0033,iq_cmd=-0.0014,fric_pos=0.022,fric_neg=0.022"
+  },
+  {
+   "round": 1,
+   "ts": "11:20:54",
+   "pp": 0.04,
+   "cls": "CLEAN",
+   "vbus": 11.92,
+   "dir_state": "DIR,OK,dir=0,hold=0,integral=-0.0046,iq_cmd=-0.0017,fric_pos=0.022,fric_neg=0.022"
+  },
+  {
+   "round": 2,
+   "ts": "11:21:05",
+   "pp": 0.02,
+   "cls": "CLEAN",
+   "vbus": 11.88,
+   "dir_state": "DIR,OK,dir=0,hold=0,integral=-0.0045,iq_cmd=-0.0018,fric_pos=0.022,fric_neg=0.022"
+  },
+  {
+   "round": 3,
+   "ts": "11:21:17",
+   "pp": 0.02,
+   "cls": "CLEAN",
+   "vbus": 11.9,
+   "dir_state": "DIR,OK,dir=0,hold=0,integral=-0.0044,iq_cmd=-0.0018,fric_pos=0.022,fric_neg=0.022"
+  }
+ ]
+}

@@ -329,3 +329,89 @@ def fetch_loop_prof(ser, timeout: float = 2.0) -> dict:
             __import__("time").sleep(0.01)
     lines = buf.replace(b"\r", b"").split(b"\n")
     return parse_loop_prof([l.decode(errors="replace") for l in lines])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 测量窗 helper (2026-09-04 Kimi 双态案定案: 积压帧混入测量窗伪影家族第五条)
+#
+# 历史坑族: drain / 环绕 / 字段索引 / settle 时序 / 【积压帧混入窗】
+# 病根: 回位/保持 sleep 期间无人排空队列, 测量窗第一批 pop 出来的是几秒前的旧帧,
+#       pp 报出"伪漂移" (幅度 ≈ 序列行程本身)。
+# 用法:
+#   win = MeasureWindow(nframe_q)          # N帧队列 (host_rx, p1, ...) 元组
+#   win.begin()                            # 窗前排空+记录积压数
+#   frame = win.pop()                      # 只返回窗内帧 (按 host_rx >= win_start)
+#   win.finish()                           # 返回 (frames, backlog_n)
+#   win.wait_stable(...)                   # 稳定门 (连续 gate_window 滑动窗 pp < gate_pp)
+#
+# 帧格式约定: 队列成员至少含 (host_rx: float, ...) — host_rx 为入队时刻 (time.time())。
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MeasureWindow:
+    """测量窗: 排空积压 + 按 host_rx 时间戳过滤只收窗内帧 + 稳定门。"""
+
+    def __init__(self, nframe_q, win_seconds=2.0, gate_pp=0.1, gate_window=2.0):
+        self.q = nframe_q
+        self.win_seconds = win_seconds
+        self.gate_pp = gate_pp
+        self.gate_window = gate_window
+        self.win_start = 0.0
+        self.backlog_n = 0
+
+    def begin(self):
+        """窗开始: 排空积压帧并计数 (旧帧不入窗)。返回积压数。"""
+        self.backlog_n = len(self.q)
+        self.q.clear()
+        self.win_start = __import__("time").time()
+        return self.backlog_n
+
+    def pop(self):
+        """取一帧, 只返回 host_rx 在窗开始后的 (时间戳过滤)。无则 None。"""
+        while self.q:
+            f = self.q.pop(0)
+            if f[0] >= self.win_start:
+                return f
+        return None
+
+    def drain_in_window(self):
+        """消费窗内全部帧, 返回列表 (按时间序)。"""
+        out = []
+        while True:
+            f = self.pop()
+            if f is None:
+                break
+            out.append(f)
+        return out
+
+    def collect(self, duration=None):
+        """收集 duration 秒 (默认 self.win_seconds) 的窗内帧。返回 (frames, elapsed)。"""
+        t0 = __import__("time").time()
+        d = duration if duration is not None else self.win_seconds
+        frames = []
+        while __import__("time").time() - t0 < d:
+            frames.extend(self.drain_in_window())
+            __import__("time").sleep(0.002)
+        return frames, __import__("time").time() - t0
+
+    def wait_stable(self, target_deg, timeout=15.0, angle_index=2):
+        """稳定门: 连续 gate_window 滑动窗内角度 pp < gate_pp (相对 target_deg)。
+        返回 (ok, waited_s)。frames 元组中角度在 angle_index 位置 (默认 2 = (hrx, p1, ang,...))"""
+        t0 = __import__("time").time()
+        recent = []
+        while __import__("time").time() - t0 < timeout:
+            f = self.pop()
+            if f is not None:
+                ang = f[angle_index]
+                d = ang - target_deg
+                while d > 180.0: d -= 360.0
+                while d < -180.0: d += 360.0
+                recent.append((__import__("time").time(), d))
+                cutoff = __import__("time").time() - self.gate_window
+                recent = [x for x in recent if x[0] >= cutoff]
+                if len(recent) >= 5:
+                    pp = max(x[1] for x in recent) - min(x[1] for x in recent)
+                    if pp < self.gate_pp:
+                        return True, __import__("time").time() - t0
+            else:
+                __import__("time").sleep(0.01)
+        return False, __import__("time").time() - t0

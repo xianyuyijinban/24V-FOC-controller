@@ -1,0 +1,42 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "step": 6.0,
+  "ramp_deg_s": 0.5,
+  "kp": 0.49,
+  "kd": 0.007,
+  "ki": 0.37,
+  "settle": 5.0,
+  "win": 2.0
+ },
+ "results": [
+  {
+   "mode": "current_pid",
+   "ramp": {
+    "track_pct": 97.5,
+    "err_std": 0.0089
+   },
+   "step": {
+    "t95_s": 0.089,
+    "pp": 0.03,
+    "overshoot_pct": 102.5
+   },
+   "steady_pp": 6.22
+  },
+  {
+   "mode": "voltage_s2",
+   "ramp": {
+    "track_pct": 0.0,
+    "err_std": 0.0097
+   },
+   "step": {
+    "t95_s": null,
+    "pp": 0.05,
+    "overshoot_pct": 0.5
+   },
+   "steady_pp": 0.05
+  }
+ ]
+}

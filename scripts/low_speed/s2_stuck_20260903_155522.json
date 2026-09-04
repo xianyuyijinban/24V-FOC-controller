@@ -1,0 +1,15 @@
+{
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "kp": 0.245,
+  "kd": 0.0035,
+  "ki": 0.185,
+  "win": 2.0
+ },
+ "err_deg": 0.006,
+ "pp": 0.03,
+ "iq_ref_mean": 0.0,
+ "verdict": "真实干净"
+}

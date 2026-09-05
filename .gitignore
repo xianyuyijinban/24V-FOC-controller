@@ -27,7 +27,9 @@ MDK-ARM/*.scvd
 MDK-ARM/*_output.txt
 # 台架构建产物 (UV4 -b/-f 命令行 -o 输出, 2026-09-06 收编)
 MDK-ARM/build_log_*.txt
+MDK-ARM/build_log.txt
 MDK-ARM/flash_log_*.txt
+MDK-ARM/flash_log.txt
 MDK-ARM/24V FOC Controller/*.axf
 MDK-ARM/24V FOC Controller/*.build_log.htm
 MDK-ARM/24V FOC Controller/*.htm

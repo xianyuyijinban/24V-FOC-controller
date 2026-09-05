@@ -533,6 +533,7 @@ FOC_STATE_READY → FOC_STATE_RUNNING / FOC_STATE_FAULT
 FOC_MODE_TORQUE = 0     // 力矩模式：直接控制Iq
 FOC_MODE_SPEED = 1      // 速度模式：速度环控制
 FOC_MODE_POSITION = 2   // 位置模式：位置环+速度环
+FOC_MODE_VOLTAGE = 3    // 电压开环模式：Vq*直给(旁路电流PI)，力矩代理控制(低速蠕动用)
 
 /* 运行时保护阈值 */
 FOC_ProtectionConfig_t
@@ -542,7 +543,8 @@ FOC_ProtectionConfig_t
 
 /* 故障代码 */
 FOC_FAULT_NONE, FOC_FAULT_OVERCURRENT, FOC_FAULT_OVERVOLTAGE,
-FOC_FAULT_UNDERVOLTAGE, FOC_FAULT_ENCODER, FOC_FAULT_DRV8350S, FOC_FAULT_PARAM_INVALID
+FOC_FAULT_UNDERVOLTAGE, FOC_FAULT_ENCODER, FOC_FAULT_DRV8350S, FOC_FAULT_PARAM_INVALID,
+FOC_FAULT_ADC_SAMPLING   /* 7: ADC采样时序故障 (2026-04-02 新增, 已纳入故障表) */
 
 /* 核心函数 */
 void FOC_App_Init(FOC_AppHandle_t *handle);
@@ -897,6 +899,21 @@ sequenceDiagram
 - 位置反馈来自编码器角度
 - 适用于伺服定位应用
 
+### 电压模式 (FOC_MODE_VOLTAGE = 3, 2026-09)
+- **电压开环**：`Vq*` 直给（旁路电流环 PI），力矩代理控制；内部 Vq 斜坡 0.05V/s，
+  iq_est 软限幅 2.4A（160Hz LPF）。用于低速蠕动实验（60A/1mR 电机线）。
+- **S2 电压闭环位置伺服**（`pos_direct=1` 时 Voltage 模式复用位置环直通控制律）：
+  - 位置环直通 PD + 积分 + FF 层（摩擦/齿槽/惯量）输出**电流口径**指令 iq_cmd，
+    末级 × Rs_phase（相口径 Rs/2 ≈ 4.4）换算为 Vq*，±2V 限幅 + iq_act 0.8A 软限幅。
+  - 增益宏（foc_app.h）：`FOC_VOLTAGE_S2_KP 1.078 V/rad / KD 0.0154 / KI 0.814 / VQ_MAX 2V`。
+- **Rs 口径铁律（2026-09-03 定案）**：`motor_param.Rs` = 线线口径（万用表 8.8，识别
+  8.30-8.37），只作识别存档与电流环整定；**电压模式控制律必须用相口径 Rs/2 ≈ 4.4**。
+  禁改 param 值（`voltage_limit = Vbus·ratio/Rs` 会放宽一倍）。
+- **S2 增益阶梯实测（2026-09-04，9 轮）**：G1(1.016V/rad) 3/3 僵持死区 5.2-5.8°；
+  G2/G3(2.033/3.050) 全到位 resid 0.19-0.26°，但斜坡超前 142-169%（comp 方向锁存
+  过冲，已修复）；极限环 ∝ kp（G2/G3 0.02-0.45°）。**结论：电压闭环位置伺服可行
+  （无环死、无 PWM 量化），但当前低速率品质劣于电流模式定版**，改善候选排队中。
+
 ---
 
 ## 故障保护机制
@@ -1134,4 +1151,6 @@ State : 4
 | v1.7 | 2026-03-04 | DRV8350S异步读失败路径清理pending，避免BusLock等待超时 |
 | v1.8 | 2026-04-02 | 低边分流ADC触发改为TIM1_CH4/TRGO2，新增ADC帧新鲜度校验、采样故障升级与UART诊断 |
 | v1.9 | 2026-04-05 | 台架回退HSI启动、ADC零点校准预触发顺序修复、UART故障快照缓冲与格式化加固 |
-| **v1.10** | **2026-06-11** | **前馈系统全面补齐：P1 BEMF解耦、P2 惯量前馈+J/B识别重写、P3 库仑+粘滞摩擦(+Tc)、P0 齿槽LUT(264bin+识别+Flash)、P4 负载转矩观测器(默认关)。PARAM_VERSION→0x00010009** |
+| v1.10 | 2026-06-11 | 前馈系统全面补齐：P1 BEMF解耦、P2 惯量前馈+J/B识别重写、P3 库仑+粘滞摩擦(+Tc)、P0 齿槽LUT(264bin+识别+Flash)、P4 负载转矩观测器(默认关)。PARAM_VERSION→0x00010009 |
+| v1.4.0 | 2026-08-29 | 固件版本号重定 v1.4.0（fw_version 字符串）：20kHz PWM 升频（ARR=5999，下溢控制+上溢推流）、调试链路（PDBBIN 二进制流 + LOOP_PROF 五段探针）、TX 泵 DMA 化与时间门控固定 200Hz。详见 docs/20khz_lowspeed_diag_report_20260830.md |
+| v1.8 (后续) | 2026-09 | S2 电压闭环位置伺服 + FOC_MODE_VOLTAGE 移植 + 补偿方向锁存优先级重排（8e796ea）+ PDBBIN flags 状态字。即本文档标注的 2026-09 增量 |

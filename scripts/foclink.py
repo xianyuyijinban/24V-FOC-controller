@@ -357,6 +357,11 @@ class MeasureWindow:
         self.gate_window = gate_window
         self.win_start = 0.0
         self.backlog_n = 0
+        self.last_gate_span_s = None
+        self.last_gate_frames = 0
+        self.last_gate_pp = None
+        self.last_gate_first_rx = None
+        self.last_gate_last_rx = None
 
     def begin(self):
         """窗开始: 排空积压帧并计数 (旧帧不入窗)。返回积压数。"""
@@ -384,40 +389,60 @@ class MeasureWindow:
             out.append(f)
         return out
 
-    def collect(self, duration=None):
-        """收集 duration 秒 (默认 self.win_seconds) 的窗内帧。返回 (frames, elapsed)。"""
+    def collect(self, duration=None, health_cb=None):
+        """收集 duration 秒 (默认 self.win_seconds) 的窗内帧。返回 (frames, elapsed)。
+
+        health_cb 在等待期间周期调用；回调抛出的异常直接传给调用方，
+        使串流健康守卫不会被阻塞的测量窗绕过。
+        """
         t0 = __import__("time").time()
         d = duration if duration is not None else self.win_seconds
         frames = []
         while __import__("time").time() - t0 < d:
+            if health_cb:
+                health_cb()
             frames.extend(self.drain_in_window())
             __import__("time").sleep(0.002)
         return frames, __import__("time").time() - t0
 
-    def wait_stable(self, target_deg, timeout=15.0, angle_index=2):
-        """稳定门: 连续 gate_window 滑动窗内角度 pp < gate_pp (相对 target_deg)。
+    def wait_stable(self, target_deg, timeout=15.0, angle_index=2, health_cb=None):
+        """稳定门: 从调用时刻起累积帧, 要求 span (last_rx - first_rx) >= gate_window
+        且期间全部帧 pp < gate_pp (相对 target_deg)。
         返回 (ok, waited_s)。frames 元组中角度在 angle_index 位置 (默认 2 = (hrx, p1, ang,...))
-        2026-09-05 修复: 门前排空 + 窗起点刷新 — 此前调用前积压的旧静止帧
-        (阶跃前 θ≈target) 使门 0.0s 秒过, 窗内混入回位大摆帧 → pp/resid 伪影
-        (A/B 回归 4 轮稳态全作废的根因)。"""
+        2026-09-05 恢复规划: 旧版滑动窗 (cutoff=now-gate_window) 的 span 测的是
+        "当前窗口内" 而非 "调用后全窗", 帧持续进来时 cutoff 移除旧帧 → span 永不达
+        gate_window → 假稳态/永不达标。本版改为调用后累积帧 + span 硬判 + 记录
+        (last_rx-first_rx), 并保留门前排空 (积压旧帧秒过 bug)。"""
+        self.last_gate_span_s = None
+        self.last_gate_frames = 0
+        self.last_gate_pp = None
+        self.last_gate_first_rx = None
+        self.last_gate_last_rx = None
         self.q.clear()                              # 门前排空: 只判调用后的新帧
         self.win_start = __import__("time").time()  # 2026-09-05 积压秒过 bug
         t0 = __import__("time").time()
         recent = []
         while __import__("time").time() - t0 < timeout:
+            if health_cb:
+                health_cb()
             f = self.pop()
             if f is not None:
                 ang = f[angle_index]
                 d = ang - target_deg
                 while d > 180.0: d -= 360.0
                 while d < -180.0: d += 360.0
-                recent.append((__import__("time").time(), d))
-                cutoff = __import__("time").time() - self.gate_window
-                recent = [x for x in recent if x[0] >= cutoff]
+                recent.append((f[0], d))   # f[0]=host_rx (帧入队时刻), 不是收讫时刻
+                self.last_gate_frames = len(recent)
+                self.last_gate_first_rx = recent[0][0]
+                self.last_gate_last_rx = recent[-1][0]
+                self.last_gate_span_s = (recent[-1][0] - recent[0][0])
                 if len(recent) >= 5:
-                    pp = max(x[1] for x in recent) - min(x[1] for x in recent)
-                    if pp < self.gate_pp:
-                        return True, __import__("time").time() - t0
+                    span = self.last_gate_span_s
+                    if span >= self.gate_window:  # 必须覆盖完整窗 (2026-09-05 恢复规划)
+                        pp = max(x[1] for x in recent) - min(x[1] for x in recent)
+                        self.last_gate_pp = pp
+                        if pp < self.gate_pp:
+                            return True, __import__("time").time() - t0
             else:
                 __import__("time").sleep(0.01)
         return False, __import__("time").time() - t0

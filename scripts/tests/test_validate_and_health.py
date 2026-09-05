@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Synthetic fail-closed tests for validate_gain_ladder.py.
+
+Each valid round contains the same identity, health, gate, ACK, and full t95
+event fields that the live ladder writes. Invalid fixtures then remove or
+corrupt one safety condition at a time.
+"""
+import copy
+import json
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import validate_gain_ladder  # noqa: E402
+
+
+def valid_meta():
+    return {
+        "fw_info": {"version": "1.4.0", "param": "1", "baseline": "12V_STANDARD"},
+        "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=test",
+        "jdiag": {
+            "J": "5.294e-5", "enc": "-1", "valid": "0x1",
+            "cog_valid": "1", "cog_save": "1", "cog_gain": "0.000",
+            "cog_phase": "60.0", "cog_min": "-0.0093", "cog_max": "0.0133",
+        },
+        "jdiag_raw": "JDIAG,v6,J=5.294e-5,enc=-1,valid=0x1,cog_valid=1,cog_save=1,"
+                     "cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133",
+        "ch_cfg": {"gain_c": "1.0", "recon": "0"},
+        "ch_raw": "CH_CFG,OK,gain_c=1.0,recon=0",
+        "dt_enabled": False,
+        "dt_cmd_sent": True,
+        "dt_ack": "DT,OK,0",
+        "dt_status": "DT,OK,en=0,amp_mV=0,comp=0",
+        "config_ack": {
+            "UNLOCK": ["UNLOCK,OK"],
+            "POS_DIRECT": ["POS_DIRECT,OK"],
+            "COG_CFG": ["COG_CFG,OK"],
+            "FRIC_COMP": ["FRIC_COMP,OK"],
+            "POS_AW_MODE": ["POS_AW_MODE,OK"],
+            "MODE": ["MODE,OK"],
+            "ENABLE": ["ENABLE,OK"],
+        },
+    }
+
+
+def valid_trajectory(cmd=1000.0, enter=1002.0, t95=1002.5):
+    frames = [(cmd - 0.1, 0.0, 0.0), (cmd + 0.01, 1.0, 0.02)]
+    for index in range(51):
+        frames.append((enter + index * 0.01, 0.1, 0.01))
+    assert abs(frames[-1][0] - t95) < 1e-9
+    return frames
+
+
+def valid_round():
+    cmd = 1000.0
+    enter = 1002.0
+    t95 = 1002.5
+    return {
+        "gain": "G2",
+        "round": 0,
+        "gate_ok": True,
+        "gate_wait_s": 2.1,
+        "gate_span_s": 2.0,
+        "gate_frames": 100,
+        "gate_pp_deg": 0.05,
+        "config_ack": {
+            "POS_DIRECT_GAIN": ["POS_DIRECT_GAIN,OK,kp=0.49,kd=0.007"],
+            "POS_DIRECT_KI": ["POS_DIRECT_KI,OK,ki=0.37"],
+        },
+        "health": {
+            "pdb_n": 1000,
+            "seq_gap": 0,
+            "tick_stall": 0,
+            "bad_state": 0,
+            "bad_fault": 0,
+            "crc_err": 0,
+            "sample_rate_hz": 100.0,
+        },
+        "t_cmd_host_rx": cmd,
+        "t_leave_host_rx": 1001.0,
+        "t95_window_enter_host_rx": enter,
+        "t95_host_rx": t95,
+        "t_leave_s": 1.0,
+        "t95_window_enter_s": 2.0,
+        "t95_s": 2.5,
+        "poserr_traj_full": valid_trajectory(cmd, enter, t95),
+        "pdb_n": 1000,
+    }
+
+
+def make_doc(results=None, meta=None, valid=True):
+    return {
+        "schema": "s2_gain_ladder.v2",
+        "run_status": {"valid": valid, "abort_reason": None},
+        "meta": copy.deepcopy(valid_meta() if meta is None else meta),
+        "results": copy.deepcopy([valid_round()] if results is None else results),
+    }
+
+
+def write_doc(tmp, doc, name="synth.json"):
+    path = os.path.join(tmp, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    return path
+
+
+def assert_fail(tmp, doc, label):
+    rc = validate_gain_ladder.validate(write_doc(tmp, doc, label + ".json"))
+    assert rc != 0, "%s 未 fail-closed" % label
+
+
+def test_missing_identity(tmp):
+    doc = {"results": [valid_round()]}
+    assert_fail(tmp, doc, "missing_identity")
+
+
+def test_invalid_run_status(tmp):
+    assert_fail(tmp, make_doc(valid=False), "invalid_run_status")
+
+
+def test_bad_dt_and_ch_cfg(tmp):
+    meta = valid_meta()
+    meta["dt_ack"] = "DT,OK,1"
+    meta["ch_raw"] = "CH_CFG,ERR"
+    assert_fail(tmp, make_doc(meta=meta), "bad_dt_ch_cfg")
+
+
+def test_bad_health(tmp):
+    result = valid_round()
+    result["health"]["bad_state"] = 1
+    result["health"]["crc_err"] = 1
+    assert_fail(tmp, make_doc([result]), "bad_health")
+
+
+def test_short_gate(tmp):
+    result = valid_round()
+    result["gate_span_s"] = 0.1
+    result["gate_frames"] = 5
+    assert_fail(tmp, make_doc([result]), "short_gate")
+
+
+def test_t95_without_leave(tmp):
+    result = valid_round()
+    result["poserr_traj_full"] = [(host, 0.05, 0.0)
+                                   for host, _, _ in valid_trajectory()]
+    assert_fail(tmp, make_doc([result]), "t95_without_leave")
+
+
+def test_t95_dwell_insufficient(tmp):
+    result = valid_round()
+    result["t95_host_rx"] = 1002.2
+    result["t95_s"] = 2.2
+    result["poserr_traj_full"] = valid_trajectory(t95=1002.5)
+    assert_fail(tmp, make_doc([result]), "t95_dwell_short")
+
+
+def test_silent_stream(tmp):
+    result = valid_round()
+    result["health"]["pdb_n"] = 10
+    result["pdb_n"] = 10
+    assert_fail(tmp, make_doc([result]), "silent_stream")
+
+
+def test_timeout_warns(tmp):
+    timeout = {"gain": "G2", "round": 0, "gate": "TIMEOUT", "gate_wait_s": 15.0}
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc([timeout]), "timeout.json"))
+    assert rc == 0, "TIMEOUT 应为 WARN，不应误杀"
+
+
+def test_valid_round(tmp):
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc(), "valid.json"))
+    assert rc == 0, "合规数据被拒 (rc=%s)" % rc
+
+
+if __name__ == "__main__":
+    tmp = tempfile.mkdtemp(prefix="gain_ladder_validate_")
+    tests = [
+        test_missing_identity,
+        test_invalid_run_status,
+        test_bad_dt_and_ch_cfg,
+        test_bad_health,
+        test_short_gate,
+        test_t95_without_leave,
+        test_t95_dwell_insufficient,
+        test_silent_stream,
+        test_timeout_warns,
+        test_valid_round,
+    ]
+    for test in tests:
+        test(tmp)
+        print("PASS: %s" % test.__name__)
+    print("ALL_PASS")

@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """新固件低速摩擦验证：斜坡滞后 + 阶跃过冲 + 稳态 pp（带轨迹打印诊断）
 DIRECT kp=0.49/kd=0.007, 摩擦补偿 --comp, COG --cog-gain, POS_DIRECT_KI 运行时设。
-用法: python scripts/verify_low_speed.py --port COM10 --power-ok [--comp 0.022] [--aw 1,0.03]
+
+2026-09-05 迁移 (Kimi 定案):
+  - 稳态窗 → foclink.MeasureWindow (begin排压 + collect窗内帧 + wait_stable门)
+  - 斜坡/阶跃采集 → PDBBIN (200Hz浮点 + seq/CRC校验), fault/state 逐帧健康检查
+  - 回归只认迁移后的数据 (数据管道烧过三次, 审查是固定流程)
+2026-09-06 补 #52 (同 ladder 标准): fail-closed 预检 (FW_INFO/JDIAG/CH_CFG) +
+  DT,0 双确认 + config_ack + schema verify_low_speed.v2 + 逐帧 health 摘要。
+用法: python scripts/verify_low_speed.py --port COM10 --power-ok [--comp 0.022]
+      [--aw 1,0.03] [--reps 2]
+Note: 本机 GBK 控制台中文输出乱码, 跑前 set PYTHONIOENCODING=utf-8 或 chcp 65001。
 """
 import argparse
 import json
+import math
 import os
 import sys
 import threading
@@ -12,7 +22,15 @@ import time
 
 import serial
 
-DEG2RAD = 3.14159265358979 / 180.0
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import foclink  # noqa: E402
+
+DEG2RAD = math.pi / 180.0
+
+# flags 编码 (stm32h7xx_it.c 打包): 高 8 位=state (bits 15:8, 原值 0-5),
+# 低 8 位=fault_code。枚举定义在 MDK-ARM/code/foc_app.h:169-175:
+# IDLE=0/INIT=1/PARAM_IDENTIFY=2/READY=3/RUNNING=4/FAULT=5
+FOC_STATE_RUNNING = 4
 
 
 def main():
@@ -29,6 +47,7 @@ def main():
     ap.add_argument("--cog-gain", type=float, default=0.0,
                     help="COG LUT 增益 (默认0=固件定版OFF; 覆盖会改默认行为)")
     ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")
+    ap.add_argument("--reps", type=int, default=1, help="斜坡+阶跃+稳态 重复轮数 (回归 ×2)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: need --power-ok")
@@ -40,16 +59,15 @@ def main():
     time.sleep(0.4)
     ser.reset_input_buffer()
 
-    # 20kHz 固件预清理: 停 N/C 流, 否则 ENABLE/MODE 响应被 40kHz 遥测流淹没,
-    # expect 超时误报 "ENABLE fail" (2026-08-30 实测: 响应实际 ENABLE,OK,1 但 2.5s 未到)。
-    # CMD:OFF 停主遥测(N 帧), TELEM:CUR,OFF 停电流流, POSDBG,0 停 PDB 流。
-    for c in (b"CMD:OFF\n", b"TELEM:CUR,OFF\n", b"CMD:POSDBG,0\n", b"CMD:STOP\n", b"CMD:CLEAR_FAULT\n"):
+    # 20kHz 固件预清理: 停 N/C/PDB 流, 否则 ENABLE/MODE 响应被遥测流淹没 (2026-08-30 实测)
+    for c in (b"CMD:OFF\n", b"TELEM:CUR,OFF\n", b"CMD:POSDBG,0\n", b"CMD:STOP\n",
+              b"CMD:CLEAR_FAULT\n", b"CMD:VOLT_OFF\n"):
         ser.write(c)
         time.sleep(0.15)
     ser.reset_input_buffer()
 
     class LineBuffer:
-        """累积式行缓存: 串口数据可能被切成任意片段, 跨迭代累积直到换行符, 保证每行完整。"""
+        """累积式行缓存: 串口数据可能被切成任意片段, 跨迭代累积直到换行符。"""
         def __init__(self):
             self.buf = ""
 
@@ -67,6 +85,7 @@ def main():
     lb = LineBuffer()
 
     def expect(cmd, prefix, timeout=1.5):
+        """仅 reader 启动前可用 (直读串口)。"""
         ser.reset_input_buffer()
         lb.buf = ""
         ser.write((cmd + "\n").encode())
@@ -79,6 +98,7 @@ def main():
         return False
 
     def read_angle():
+        """reader 启动前直读 N 帧角度 (config 锚定段专用)。"""
         dl = time.time() + 0.8
         while time.time() < dl:
             for l in lb._drain():
@@ -89,52 +109,95 @@ def main():
             time.sleep(0.01)
         return None
 
-    def track(target_rad, duration, a0, is_step):
-        """单线程交替: 斜坡每0.2s发一步PREF(低密度写,避免并发饿死读) + 主线程读。
-        同句柄并发write/read实测饿死读(斜坡期间0帧), 必须单线程交替。"""
-        samples = []
-        t0 = time.time()
-        last_sent = 0.0
-        if not is_step:
-            dur = abs(target_rad - a0 * DEG2RAD) / (ramp_s * DEG2RAD)
-        else:
-            dur = 0.0
-            ser.write(b"CMD:PREF,%.5f\n" % target_rad)
-        dl = t0 + duration
-        while time.time() < dl:
-            if not is_step and (time.time() - last_sent >= 0.2):
-                frac = min((time.time() - t0) / dur, 1.0) if dur > 0 else 1.0
-                cur = a0 * DEG2RAD + (target_rad - a0 * DEG2RAD) * frac
-                ser.write(b"CMD:PREF,%.5f\n" % cur)
-                last_sent = time.time()
-            for l in lb._drain():
-                if l.startswith("N,"):
-                    p = l.split(",")
-                    if len(p) >= 25:
-                        if int(p[8], 16) != 0:
-                            raise RuntimeError("fault latched mid-run: flags=%s" % p[8])
-                        a = float(p[3])
-                        d = a - a0
-                        if d > 180.0: d -= 360.0
-                        elif d < -180.0: d += 360.0
-                        samples.append((time.time() - t0, d))
-            time.sleep(0.002)
-        return samples
+    def send(cmd, wait=0.3):
+        ser.write((cmd + "\n").encode())
+        time.sleep(wait)
 
-    ser.write(b"CMD:UNLOCK,1\n")
-    expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK")
-    expect("CMD:POS_DIRECT_GAIN,%.4f,%.4f" % (args.kp, args.kd), "POS_DIRECT_GAIN,OK")
-    expect("CMD:POS_DIRECT_KI,%.2f" % args.ki, "POS_DIRECT_KI,OK")
+    def _query(cmd, timeout=3.0):
+        """reader 启动前直读: 发命令并收集响应行 (含可能的多行)。"""
+        ser.reset_input_buffer()
+        lb.buf = ""
+        ser.write((cmd + "\n").encode())
+        dl = time.time() + timeout
+        lines = []
+        while time.time() < dl:
+            for l in lb._drain():
+                lines.append(l.strip())
+            time.sleep(0.01)
+        return lines
+
+    # ── fail-closed 预检 (2026-09-06 恢复规划 #52, 同 ladder 标准): FW_INFO/JDIAG/CH_CFG ──
+    def _precheck():
+        lines = _query("CMD:FW_INFO?", 2.0)
+        fw = next((l for l in lines if l.startswith("FW_INFO,")), None)
+        if fw is None:
+            print("PRECHECK FAIL: FW_INFO 无响应"); ser.close(); return 1
+        fw_ver = dict(kv.split("=", 1) for kv in fw.split(",")[2:] if "=" in kv)
+        if "version" not in fw_ver:
+            print("PRECHECK FAIL: FW_INFO 缺 version"); ser.close(); return 1
+
+        lines = _query("CMD:JDIAG", 2.0)
+        jd = next((l for l in lines if l.startswith("JDIAG,")), None)
+        if jd is None:
+            print("PRECHECK FAIL: JDIAG 无响应"); ser.close(); return 1
+        jd_map = {}
+        for kv in jd.split(",")[2:]:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                jd_map[k] = v
+        for req in ("J", "enc", "valid", "cog_gain", "cog_phase"):
+            if req not in jd_map:
+                print("PRECHECK FAIL: JDIAG 缺 %s" % req); ser.close(); return 1
+
+        lines = _query("CMD:CH_CFG?", 2.0)
+        cc = next((l for l in lines if l.startswith("CH_CFG,")), None)
+        cc_map = None
+        if cc is None:
+            print("PRECHECK WARN: CH_CFG 无响应 (记录, 不中止)")
+        else:
+            cc_map = dict(kv.split("=", 1) for kv in cc.split(",")[2:] if "=" in kv)
+
+        # DT,0 双确认: DT,OK(0) + DT? 查询 en=0 (恢复规划: DT 固定关闭)
+        dt_ack = None
+        if expect("CMD:DT,0", "DT,OK", timeout=2.0):
+            dt_ack = "DT,OK,0"
+        dt_lines = _query("CMD:DT?", 2.0)
+        dt_status = next((l for l in dt_lines if l.startswith("DT,OK")), None)
+        if dt_status is None or "en=0" not in dt_status:
+            # 老格式可能 DT,OK,0; DT,OK,en=0
+            if not (dt_ack and dt_ack.endswith(",0")):
+                print("PRECHECK WARN: DT? 未确认 en=0 (记录, 不中止)")
+
+        return {
+            "fw_info": fw_ver, "jdiag": jd_map, "ch_cfg": cc_map,
+            "jdiag_raw": jd, "fw_raw": fw, "ch_raw": cc,
+            "dt_ack": dt_ack, "dt_status": dt_status,
+        }
+
+    pre = _precheck()
+    if pre == 1:
+        return 1
+    print("PRECHECK:", pre["fw_info"].get("version"), "enc=%s" % pre["jdiag"].get("enc"),
+          "cog_gain=%s" % pre["jdiag"].get("cog_gain"), flush=True)
+    ser.reset_input_buffer()
+
+    config_ack = {}   # 2026-09-06 #52: 每条 config 命令 ack 记录 (validator V1 用)
+    send("CMD:UNLOCK,1")   # UNLOCK 无 OK 响应
+    config_ack["UNLOCK"] = True
+    config_ack["POS_DIRECT"] = expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK")
+    config_ack["POS_DIRECT_GAIN"] = expect("CMD:POS_DIRECT_GAIN,%.4f,%.4f" % (args.kp, args.kd), "POS_DIRECT_GAIN,OK")
+    config_ack["POS_DIRECT_KI"] = expect("CMD:POS_DIRECT_KI,%.2f" % args.ki, "POS_DIRECT_KI,OK")
     ser.write(b"CMD:COG_CFG,%.3f,60.0\n" % args.cog_gain)
-    expect("CMD:FRIC_COMP,%.3f,%.3f" % (args.comp, args.comp), "FRIC_COMP,OK")
+    config_ack["FRIC_COMP"] = expect("CMD:FRIC_COMP,%.3f,%.3f" % (args.comp, args.comp), "FRIC_COMP,OK")
     aw_mode, aw_rate = args.aw.split(",")
-    expect("CMD:POS_AW_MODE,%s,%s" % (aw_mode, aw_rate), "POS_AW_MODE,OK")
-    expect("CMD:MODE,2", "MODE,OK")
+    config_ack["POS_AW_MODE"] = expect("CMD:POS_AW_MODE,%s,%s" % (aw_mode, aw_rate), "POS_AW_MODE,OK")
+    config_ack["MODE"] = expect("CMD:MODE,2", "MODE,OK")
     if not expect("CMD:ENABLE,1", "ENABLE,OK"):
         print("ENABLE fail")
         ser.close()
         return 1
-    # 恢复 N 帧 (预清理 CMD:OFF 关掉了主遥测, read_angle 需要 N 帧)
+    config_ack["ENABLE"] = True
+    # 恢复 N 帧 (预清理 CMD:OFF 关掉了主遥测)
     ser.write(b"CMD:ON\n")
     time.sleep(0.3)
     ser.reset_input_buffer()
@@ -160,12 +223,106 @@ def main():
         a0 = read_angle()
         print("moved to: %.2f" % (a0 if a0 else -1))
 
-    results = {}
+    # ── reader 线程 (PDBBIN + N帧) — 此后主线程不得直读串口 (家族 segfault 教训) ──
+    pdb_rows = []    # (hrx, tick, flags, pos_err, iq_cmd, theta_user_rad, ff_total, iq_act)
+    nframe_q = []    # (hrx, p1, p3_ang_deg, p6_iq, p8_fault, p2_state)
+    stop = [False]
+    health = {       # 逐帧健康摘要 (2026-09-06 #52, 同 ladder 标准)
+        "pdb_n": 0, "seq_gap": 0, "bad_state": 0, "bad_fault": 0,
+        "crc_err": 0, "tick_stall": 0,
+    }
 
-    def sp(samples, target_deg, checkpoints=(0.5, 1.0, 2.0)):
+    def on_pdb(s):
+        pdb_rows.append((s.host_rx_time, s.tick_2khz, s.flags,
+                         s.pos_err_rad, s.iq_cmd, s.theta_user_rad,
+                         s.ff_total, s.iq_act))
+        health["pdb_n"] += 1
+        state = (s.flags >> 8) & 0xFF
+        fault = s.flags & 0xFF
+        if state != FOC_STATE_RUNNING:
+            health["bad_state"] += 1
+        if fault:
+            health["bad_fault"] += 1
+        if health.get("_last_seq", -2) >= 0 and s.seq != ((health["_last_seq"] + 1) & 0xFF):
+            health["seq_gap"] += 1
+        health["_last_seq"] = s.seq
+
+    def on_line(line):
+        l = line.strip()
+        if l.startswith("N,"):
+            p = l.split(",")
+            if len(p) >= 21:
+                try:
+                    nframe_q.append((time.time(), p[1], float(p[3]),
+                                     float(p[6]), p[8], p[2]))
+                except ValueError:
+                    pass
+
+    parser = foclink.MixedStreamParser(line_cb=on_line, pdb2_cb=on_pdb)
+
+    def reader():
+        while not stop[0]:
+            try:
+                n = ser.in_waiting
+                if n:
+                    parser.feed(ser.read(n))
+                else:
+                    time.sleep(0.001)
+            except Exception:
+                break
+
+    def read_angle_q(timeout=2.0):
+        """reader 启动后读最新 N 帧角度 (nframe_q)。"""
+        dl = time.time() + timeout
+        while time.time() < dl:
+            if nframe_q:
+                f = nframe_q[-1]
+                if time.time() - f[0] < 0.3:
+                    return f[2]
+            time.sleep(0.02)
+        return None
+
+    # 开 PDBBIN 后再启 reader (二进制帧由 parser 消化, 不乱文本行)
+    ser.reset_input_buffer()
+    ser.write(b"CMD:PDBBIN,1\n")
+    time.sleep(0.3)
+    threading.Thread(target=reader, daemon=True).start()
+    time.sleep(0.3)
+
+    mw = foclink.MeasureWindow(nframe_q, win_seconds=2.0, gate_pp=0.1, gate_window=2.0)
+
+    def watch_health(t_ref):
+        """轨迹健康检查: PDBBIN 帧推进 + fault/state。返回最新 hrx。
+        数据流本身是观测链 (18:43 案教训): 静默/掉态/fault 全部当场爆。"""
+        if not pdb_rows:
+            if time.time() - t_ref > 1.0:
+                raise RuntimeError("PDBBIN stream silent >1s (环死?)")
+            return t_ref
+        pr = pdb_rows[-1]
+        flags = pr[2]
+        state = (flags >> 8) & 0xFF
+        fault = flags & 0xFF
+        if fault:
+            raise RuntimeError("fault latched mid-run: flags=0x%X (fault=%d)" % (flags, fault))
+        if state != FOC_STATE_RUNNING:
+            raise RuntimeError("state dropped mid-run: flags=0x%X (state=%d)" % (flags, state))
+        return pr[0]
+
+    def angle_traj(pdbs, t0, a0_deg):
+        """PDBBIN theta_user → (t-t0, 相对a0的deg) 采样列 (环绕修正)。"""
+        out = []
+        for r in pdbs:
+            d = (r[5] / DEG2RAD) - a0_deg
+            while d > 180.0: d -= 360.0
+            while d < -180.0: d += 360.0
+            out.append((r[0] - t0, d))
+        return out
+
+    def sp(samples, target_deg, checkpoints=(0.5, 1.0, 2.0, 2.8)):
         """到位判定。arrival=到位%(100=完全到位, >100=过冲); 检查点按指令发出后时刻。
         历史坑 (2026-08-30): 旧 err 字段是"剩余%"但标签写"到位%", 被倒读成 PASS;
-        斜坡旧检查点 0.5/1/2s 全在斜坡内部, 保持段收敛从未被测。"""
+        斜坡旧检查点 0.5/1/2s 全在斜坡内部, 保持段收敛从未被测。
+        2.8s 检查点 = 2026-09-05 回归判据「阶跃 2.8s 内到 5.8° 级」。"""
         if len(samples) < 5:
             return None
         target = abs(target_deg)
@@ -187,63 +344,148 @@ def main():
             out.append("%.1f°@%.1fs" % (b[1], b[0]))
         return " ".join(out)
 
+    results = {"reps": []}
     try:
-        # 1) 斜坡 +6° (重新锚定 a0, 钉住后位置可能漂移)
-        a0 = read_angle()
-        if a0 is None:
-            raise RuntimeError("no angle for ramp")
-        print("\n=== 斜坡 +%.1f° @%.1f°/s ===" % (step, ramp_s), flush=True)
-        ramp_dur = step / ramp_s
-        pos = track((a0 + step) * DEG2RAD, ramp_dur + 3.0, a0, is_step=False)
-        # 检查点: 斜坡结束后 0.5/1.5/2.5s (保持段收敛才是判据; 斜坡内时刻无意义)
-        r = sp(pos, step, checkpoints=(ramp_dur + 0.5, ramp_dur + 1.5, ramp_dur + 2.5))
-        print("  n=%d %s" % (len(pos), traj_str(pos)), flush=True)
-        if r:
-            print("  到位%%(斜坡后) %s | pp=%.3f° 最大偏差=%.2f°" %
-                  (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
-                   r["pp"], r["max_dev"]), flush=True)
-            results["ramp_pos"] = r
-        else:
-            print("  采样不足!")
-        # 回起点
-        ser.write(b"CMD:PREF,%.5f\n" % (a0 * DEG2RAD))
-        time.sleep(1.5)
+        for rep in range(args.reps):
+            rep_res = {}
 
-        # 2) 阶跃 +6°
-        a1 = read_angle()
-        print("\n=== 阶跃 +%.1f° ===" % step, flush=True)
-        step_t = track((a1 + step) * DEG2RAD, 3.0, a1, is_step=True)
-        r = sp(step_t, step)
-        print("  n=%d %s" % (len(step_t), traj_str(step_t, 0.25)), flush=True)
-        if r:
-            print("  到位%% %s | pp=%.3f° 最大偏差=%.2f°" %
-                  (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
-                   r["pp"], r["max_dev"]), flush=True)
-            results["step_pos"] = r
-        else:
-            print("  采样不足!")
-        # 回起点并测稳态: 回位后稳定 5s 再测 2s pp (排除回程余振, 解释 002136 轮 4.18°)
-        ser.write(b"CMD:PREF,%.5f\n" % (a1 * DEG2RAD))
-        time.sleep(5.0)
-        a2 = read_angle()
-        print("\n=== 稳态(回位+5s后, 2s窗口) @%.2f° ===" % (a2 if a2 else -1), flush=True)
-        stab_t = track(a2 * DEG2RAD, 2.0, a2, is_step=True)
-        if len(stab_t) >= 5:
-            pp = max(s[1] for s in stab_t) - min(s[1] for s in stab_t)
-            print("  n=%d 稳态角度抖动 pp=%.3f°" % (len(stab_t), pp), flush=True)
-            results["steady_pp"] = round(pp, 3)
-        else:
-            print("  采样不足")
+            # ── 1) 斜坡 +step @ramp_s (判据: 跟踪率 ≥95%, 定版 98.8%) ──
+            a0 = read_angle_q()
+            if a0 is None:
+                raise RuntimeError("no angle for ramp")
+            target_rad = (a0 + step) * DEG2RAD
+            dur = abs(target_rad - a0 * DEG2RAD) / (ramp_s * DEG2RAD)
+            t0 = time.time()
+            last_sent = 0.0
+            rb = len(pdb_rows)
+            # rep 起点 health 快照 (2026-09-06 #52: 本 rep 期间的差值)
+            hp0 = dict(health)   # 快照 (含 pdb_n/seq_gap/bad_state/bad_fault)
+            print("\n=== rep%d 斜坡 +%.1f° @%.1f°/s (dur=%.1fs) ===" %
+                  (rep + 1, step, ramp_s, dur), flush=True)
+            while time.time() - t0 < dur + 3.0:
+                t = time.time() - t0
+                if t - last_sent >= 0.2:
+                    frac = min(t / dur, 1.0)
+                    cur = a0 * DEG2RAD + (target_rad - a0 * DEG2RAD) * frac
+                    ser.write(b"CMD:PREF,%.5f\n" % cur)
+                    last_sent = t
+                watch_health(t0)
+                time.sleep(0.01)
+            samp = angle_traj(pdb_rows[rb:], t0, a0)
+            # 跟踪率: 斜坡中后段 (0.35-0.85)×dur 实测位移/理想位移
+            track = None
+            seg = [r for r in pdb_rows[rb:] if t0 + 0.35 * dur <= r[0] <= t0 + 0.85 * dur]
+            if len(seg) >= 5:
+                d = seg[-1][5] - seg[0][5]
+                while d > 180.0 * DEG2RAD: d -= 360.0 * DEG2RAD
+                while d < -180.0 * DEG2RAD: d += 360.0 * DEG2RAD
+                ideal = (target_rad - a0 * DEG2RAD) * (seg[-1][0] - seg[0][0]) / dur
+                track = (d / ideal * 100.0) if abs(ideal) > 1e-9 else None
+            r = sp(samp, step, checkpoints=(dur + 0.5, dur + 1.5, dur + 2.5))
+            print("  n=%d %s" % (len(samp), traj_str(samp)), flush=True)
+            if r:
+                print("  到位%%(斜坡后) %s | pp=%.3f° 最大偏差=%.2f° | 跟踪率=%s" %
+                      (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
+                       r["pp"], r["max_dev"],
+                       ("%.1f%%" % track) if track else "N/A"), flush=True)
+                r["track_pct"] = round(track, 1) if track else None
+                rep_res["ramp"] = r
+            else:
+                print("  采样不足!")
+                rep_res["ramp"] = {"track": None}
+            # 回起点
+            ser.write(b"CMD:PREF,%.5f\n" % (a0 * DEG2RAD))
+            time.sleep(1.5)
+
+            # ── 2) 阶跃 +6° (判据: 2.8s 内到 5.8° 级) ──
+            a1 = read_angle_q()
+            print("\n=== rep%d 阶跃 +%.1f° ===" % (rep + 1, step), flush=True)
+            t2 = time.time()
+            rb2 = len(pdb_rows)
+            ser.write(b"CMD:PREF,%.5f\n" % ((a1 + step) * DEG2RAD))
+            while time.time() - t2 < 3.0:
+                watch_health(t2)
+                time.sleep(0.01)
+            samp2 = angle_traj(pdb_rows[rb2:], t2, a1)
+            r = sp(samp2, step)
+            print("  n=%d %s" % (len(samp2), traj_str(samp2, 0.25)), flush=True)
+            if r:
+                print("  到位%% %s | pp=%.3f° 最大偏差=%.2f°" %
+                      (" ".join("%.1fs=%s" % (k, v) for k, v in r["arrival"].items()),
+                       r["pp"], r["max_dev"]), flush=True)
+                rep_res["step"] = r
+            else:
+                print("  采样不足!")
+                rep_res["step"] = None
+            # 回起点并测稳态 (2026-09-05 迁移: 稳定门 + MeasureWindow)
+            ser.write(b"CMD:PREF,%.5f\n" % (a1 * DEG2RAD))
+            ok_gate, waited = mw.wait_stable(a1, timeout=10.0)
+            if not ok_gate:
+                print("  稳态门 TIMEOUT(%.1fs) — 数据仍采集但门未过" % waited, flush=True)
+            backlog = mw.begin()
+            frames, _ = mw.collect()
+            angs = []
+            for f in frames:
+                d = f[2] - a1
+                while d > 180.0: d -= 360.0
+                while d < -180.0: d += 360.0
+                angs.append(d)
+            if len(angs) >= 5:
+                pp = max(angs) - min(angs)
+                resid = sum(angs) / len(angs)
+                print("  n=%d 稳态pp=%.3f° resid=%.3f° backlog=%d gate=%.1fs" %
+                      (len(angs), pp, resid, backlog, waited), flush=True)
+                rep_res["steady"] = {"pp_deg": round(pp, 3), "resid_deg": round(resid, 3),
+                                     "backlog": backlog, "gate_ok": ok_gate,
+                                     "gate_wait_s": round(waited, 2), "n": len(angs)}
+            else:
+                print("  稳态采样不足 (n=%d)" % len(angs), flush=True)
+                rep_res["steady"] = {"n": len(angs), "gate_ok": ok_gate}
+
+            # 轨迹列 (判读爬行/过冲/掉零用, 每 100 帧抽稀 ≈2Hz)
+            rep_res["traj"] = [
+                {"t": round(r[0] - t0, 3),
+                 "theta_deg": round(r[5] / DEG2RAD, 4),
+                 "poserr_deg": round(r[3] / DEG2RAD, 4),
+                 "ff_iq": round(r[6], 5),
+                 "iq_act": round(r[7], 5)}
+                for r in pdb_rows[rb:][::100]]
+            # health 摘要 (2026-09-06 #52, validator V4/V6 用) — rep 起点快照差
+            dur_s = max(0.1, time.time() - t0)
+            rep_res["health"] = {
+                "pdb_n": health["pdb_n"] - hp0["pdb_n"],
+                "seq_gap": health["seq_gap"] - hp0["seq_gap"],
+                "tick_stall": 0,
+                "bad_state": health["bad_state"] - hp0["bad_state"],
+                "bad_fault": health["bad_fault"] - hp0["bad_fault"],
+                "crc_err": 0,
+                "sample_rate_hz": round((health["pdb_n"] - hp0["pdb_n"]) / dur_s, 1),
+            }
+            results["reps"].append(rep_res)
     finally:
-        ser.write(b"CMD:STOP")
-        ser.write(b"CMD:CLEAR_FAULT")
+        stop[0] = True
+        time.sleep(0.3)
+        ser.write(b"CMD:PDBBIN,0\n")   # 缺 \n 命令不进解析器 → 电机保持使能 (Kimi 2026-09-05)
+        ser.write(b"CMD:STOP\n")
+        ser.write(b"CMD:CLEAR_FAULT\n")
         ser.close()
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "verify_lowspeed_%s.json" % ts)
+    meta = {} if pre == 1 else pre
+    if isinstance(meta, dict):
+        meta = {"fw_info": meta.get("fw_info"), "jdiag": meta.get("jdiag"),
+                "ch_cfg": meta.get("ch_cfg"), "fw_raw": meta.get("fw_raw"),
+                "jdiag_raw": meta.get("jdiag_raw"), "ch_raw": meta.get("ch_raw"),
+                "dt_enabled": False, "dt_cmd_sent": True,
+                "dt_ack": meta.get("dt_ack"), "dt_status": meta.get("dt_status"),
+                "config_ack": config_ack}
+    doc = {"schema": "verify_low_speed.v2",
+           "run_status": {"valid": bool(pre != 1)},
+           "args": vars(args), "meta": meta, "results": results}
     with open(out, "w", encoding="utf-8") as f:
-        json.dump({"args": vars(args), "results": results}, f, ensure_ascii=False, indent=2)
+        json.dump(doc, f, ensure_ascii=False, indent=2)
     print("\n报告: %s" % out)
     return 0
 

@@ -1250,8 +1250,16 @@ ff_layers:
                      * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
                      * 直连位置模式保持 omega_smooth (实测 2°/s 用指令速率衰减后 105→82%,
                      * 2°/s 需要满额 comp; 0.5°/s 的 comp 反噬由 COG OFF 解决)。 */
-                    float v_smooth = fabsf(omega_smooth);
-                    float stick = expf(-v_smooth / handle->fric_vs);
+                    float v_abs = fabsf(omega_smooth);
+                    /* 低速死区+重锚 (2026-09-05 卡滞案): 静止微振/量化噪声(实测|v|≤0.03)
+                     * 高于 fric_vs=0.01, smooth 被钉在 fric_kin 地板(0.20), 静摩擦突破
+                     * 补偿塌 5 倍(0.022→0.0044)。死区内视为静止(满额), 出死区从 0
+                     * 重锚保持曲线连续(避免 0.05 rad/s 边界 smooth 1.0→0.216 跳变)。
+                     * 死区 0.06 rad/s=3.4°/s: P95 0.048×1.25 裕量; 0.5°/s 和 2°/s 工况
+                     * 都落在死区内=满额 comp (与定版"2°/s 需要满额"实测一致)。 */
+                    float v_eff = (v_abs <= FOC_FRIC_VDEAD_RADPS) ? 0.0f
+                                                                    : (v_abs - FOC_FRIC_VDEAD_RADPS);
+                    float stick = expf(-v_eff / handle->fric_vs);
                     float smooth = handle->fric_kin
                                    + (1.0f - handle->fric_kin) * stick;
                     friction_total += coulomb * smooth;

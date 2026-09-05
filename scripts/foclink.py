@@ -366,9 +366,10 @@ class MeasureWindow:
         return self.backlog_n
 
     def pop(self):
-        """取一帧, 只返回 host_rx 在窗开始后的 (时间戳过滤)。无则 None。"""
+        """取一帧, 只返回 host_rx 在窗开始后的 (时间戳过滤)。无则 None。
+        兼容 list.pop(0) 与 deque.popleft (2026-09-05 单测暴露)。"""
         while self.q:
-            f = self.q.pop(0)
+            f = self.q.popleft() if hasattr(self.q, "popleft") else self.q.pop(0)
             if f[0] >= self.win_start:
                 return f
         return None
@@ -395,7 +396,12 @@ class MeasureWindow:
 
     def wait_stable(self, target_deg, timeout=15.0, angle_index=2):
         """稳定门: 连续 gate_window 滑动窗内角度 pp < gate_pp (相对 target_deg)。
-        返回 (ok, waited_s)。frames 元组中角度在 angle_index 位置 (默认 2 = (hrx, p1, ang,...))"""
+        返回 (ok, waited_s)。frames 元组中角度在 angle_index 位置 (默认 2 = (hrx, p1, ang,...))
+        2026-09-05 修复: 门前排空 + 窗起点刷新 — 此前调用前积压的旧静止帧
+        (阶跃前 θ≈target) 使门 0.0s 秒过, 窗内混入回位大摆帧 → pp/resid 伪影
+        (A/B 回归 4 轮稳态全作废的根因)。"""
+        self.q.clear()                              # 门前排空: 只判调用后的新帧
+        self.win_start = __import__("time").time()  # 2026-09-05 积压秒过 bug
         t0 = __import__("time").time()
         recent = []
         while __import__("time").time() - t0 < timeout:

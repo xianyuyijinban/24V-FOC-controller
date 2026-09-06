@@ -27,9 +27,17 @@ T95_DWELL = 0.5
 LEAVE_ERR_DEG = 0.1
 GATE_WINDOW = 2.0
 GATE_PP_DEG = 0.1
-PDB_MIN_RATE_HZ = 50.0
+# rate 阈值 mode-aware (2026-09-06 Kimi 裁决): N 帧共存挤占 P1, 实测 ~21-24Hz;
+#   N 共存 ≥18Hz (对最差 20.9 留 15% 裕量), 纯流 ≥150Hz。机制与 8/31 TX 泵专项一致。
+PDB_MIN_RATE_HZ_COEXIST = 18.0
+PDB_MIN_RATE_HZ_PURE = 150.0
 MIN_PDB_N = 100
 MIN_GATE_FRAMES = 5
+
+
+def _rate_floor(meta):
+    """mode-aware rate 下限: meta.n_coexist=true → 18Hz, 否则 150Hz。"""
+    return PDB_MIN_RATE_HZ_COEXIST if (meta.get("n_coexist") is True) else PDB_MIN_RATE_HZ_PURE
 
 
 def _number(value):
@@ -148,7 +156,7 @@ def _validate_meta(doc, errors):
                 errors.append("V1 FAIL: meta.config_ack 缺 %s" % name)
 
 
-def _validate_health(result, label, errors):
+def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE):
     health = result.get("health")
     if not isinstance(health, dict):
         errors.append("V4 FAIL: %s 缺 health 摘要" % label)
@@ -165,6 +173,13 @@ def _validate_health(result, label, errors):
         value = _number(health.get(key))
         if value is None:
             errors.append("V4 FAIL: %s health.%s 非数值" % (label, key))
+        elif key == "seq_gap":
+            # 容忍前提 = 归因材料 (2026-09-06 Kimi 补救规格): gap>0 必须带 loci
+            if value != 0:
+                loci = health.get("seq_gap_loci")
+                if not isinstance(loci, list) or len(loci) != int(value):
+                    errors.append("V4 FAIL: %s seq_gap=%d 但 seq_gap_loci 缺失/长度"
+                                  "不符 — 无归因不容忍" % (label, value))
         elif key != "pdb_n" and value != 0:
             errors.append("V4 FAIL: %s health.%s=%s" % (label, key, health[key]))
 
@@ -174,9 +189,9 @@ def _validate_health(result, label, errors):
                       (label, health.get("pdb_n")))
 
     sample_rate = _number(health.get("sample_rate_hz"))
-    if sample_rate is None or sample_rate < PDB_MIN_RATE_HZ:
-        errors.append("V4 FAIL: %s sample_rate_hz=%s < %.1fHz" %
-                      (label, health.get("sample_rate_hz"), PDB_MIN_RATE_HZ))
+    if sample_rate is None or sample_rate < rate_floor:
+        errors.append("V4 FAIL: %s sample_rate_hz=%s < %.1fHz (mode-aware)" %
+                      (label, health.get("sample_rate_hz"), rate_floor))
     return sample_rate
 
 
@@ -264,12 +279,50 @@ def _validate_t95(result, label, sample_rate, errors, warns):
             errors.append("V3 FAIL: %s t95 窗期间存在 |err|>%.2f° 帧" %
                           (label, T95_WINDOW_DEG))
         dwell_s = max(0.0, t95_rx - enter_rx)
+        rate_ref = sample_rate or PDB_MIN_RATE_HZ_COEXIST
         expected = max(MIN_GATE_FRAMES,
-                       int(math.ceil(dwell_s * max(sample_rate or PDB_MIN_RATE_HZ,
-                                                   PDB_MIN_RATE_HZ) * 0.5)))
+                       int(math.ceil(dwell_s * max(rate_ref, PDB_MIN_RATE_HZ_COEXIST) * 0.5)))
         if len(dwell_frames) < expected:
             errors.append("V3 FAIL: %s t95 窗帧数=%d < 预计下限%d" %
                           (label, len(dwell_frames), expected))
+
+
+def _validate_verify_meta(doc, errors):
+    """verify_low_speed.v2 的 meta 专用检查 (2026-09-06 schema 分支化)。"""
+    if doc.get("schema") != "verify_low_speed.v2":
+        errors.append("V1 FAIL: schema 不是 verify_low_speed.v2")
+    run_status = doc.get("run_status")
+    if not isinstance(run_status, dict) or run_status.get("valid") is not True:
+        errors.append("V1 FAIL: run_status.valid 不是 true")
+    meta = doc.get("meta")
+    if not isinstance(meta, dict):
+        errors.append("V1 FAIL: meta 缺失")
+        return None
+    fw = meta.get("fw_info")
+    if not _has_fields(fw, ("version", "param", "baseline")):
+        errors.append("V1 FAIL: meta.fw_info 缺 version/param/baseline")
+    if not isinstance(meta.get("fw_raw"), str) or not meta["fw_raw"].startswith("FW_INFO,OK,"):
+        errors.append("V1 FAIL: meta.fw_raw 缺 FW_INFO,OK 身份")
+    jdiag = meta.get("jdiag")
+    if not _has_fields(jdiag, ("J", "enc", "valid", "cog_gain", "cog_phase")):
+        errors.append("V1 FAIL: meta.jdiag 身份字段不完整")
+    if not isinstance(meta.get("jdiag_raw"), str) or not meta["jdiag_raw"].startswith("JDIAG,"):
+        errors.append("V1 FAIL: meta.jdiag_raw 缺 JDIAG 身份")
+    ch_cfg = meta.get("ch_cfg")
+    if not _has_fields(ch_cfg, ("gain_c", "recon")):
+        errors.append("V1 FAIL: meta.ch_cfg 缺 gain_c/recon")
+    if not isinstance(meta.get("ch_raw"), str) or not meta["ch_raw"].startswith("CH_CFG,OK,"):
+        errors.append("V1 FAIL: meta.ch_raw 缺 CH_CFG,OK 身份")
+    if meta.get("dt_cmd_sent") is not True:
+        errors.append("V1 FAIL: dt_cmd_sent 不是 true (DT,0 未记录)")
+    if meta.get("dt_enabled") is not False:
+        errors.append("V1 FAIL: dt_enabled 不是 false (恢复规划要求 DT OFF)")
+    # config_ack: verify 用自身命令集 (UNLOCK/POS_DIRECT/POS_DIRECT_GAIN/POS_DIRECT_KI/
+    #   FRIC_COMP/POS_AW_MODE/MODE/ENABLE) — 与 ladder 的 required_acks 不同
+    config_ack = meta.get("config_ack")
+    if not isinstance(config_ack, dict):
+        errors.append("V1 FAIL: meta.config_ack 缺失")
+    return meta
 
 
 def _validate_verify(doc, errors, warns):
@@ -278,6 +331,8 @@ def _validate_verify(doc, errors, warns):
     run_status = doc.get("run_status")
     if not isinstance(run_status, dict) or run_status.get("valid") is not True:
         errors.append("V1 FAIL: verify run_status.valid 不是 true")
+    meta = doc.get("meta") or {}
+    rate_floor = _rate_floor(meta)
     results = doc.get("results")
     reps = results.get("reps") if isinstance(results, dict) else None
     if not isinstance(reps, list) or not reps:
@@ -297,18 +352,34 @@ def _validate_verify(doc, errors, warns):
                         "bad_fault", "crc_err", "sample_rate_hz"):
                 if _number(h.get(key)) is None:
                     errors.append("V4 FAIL: %s health.%s 缺失/非数值" % (label, key))
+            # seq_gap 阈值: N 共存容忍 ≤2 帧 (F1 N 帧仲裁投影候选, 8/31 TX 泵专项);
+            # 容忍前提 = gap_loci 位置归因材料齐全 (2026-09-06 Kimi 补救规格) —
+            # loci 缺失/长度不符 = 无归因 = 直接 fail
+            gap_tol = 2 if meta.get("n_coexist") is True else 0
             for key in ("seq_gap", "tick_stall", "bad_state", "bad_fault", "crc_err"):
-                if _number(h.get(key)) != 0:
-                    errors.append("V4 FAIL: %s health.%s=%s" %
-                                  (label, key, h.get(key)))
+                val = _number(h.get(key))
+                if val is None:
+                    errors.append("V4 FAIL: %s health.%s 缺失/非数值" % (label, key))
+                elif key == "seq_gap":
+                    if val > gap_tol:
+                        errors.append("V4 FAIL: %s health.seq_gap=%s > 容忍%d (N共存)"
+                                      % (label, h.get(key), gap_tol))
+                    elif val > 0:
+                        loci = h.get("seq_gap_loci")
+                        if not isinstance(loci, list) or len(loci) != int(val):
+                            errors.append("V4 FAIL: %s seq_gap=%s 但 seq_gap_loci "
+                                          "缺失/长度不符 (%r) — 无归因不容忍"
+                                          % (label, h.get(key), loci))
+                elif val != 0:
+                    errors.append("V4 FAIL: %s health.%s=%s" % (label, key, h.get(key)))
             pdb_n = _number(h.get("pdb_n"))
             if pdb_n is None or pdb_n < MIN_PDB_N:
                 errors.append("V6 FAIL: %s health.pdb_n=%s 流静默/断开" %
                               (label, h.get("pdb_n")))
             rate = _number(h.get("sample_rate_hz"))
-            if rate is None or rate < PDB_MIN_RATE_HZ:
-                errors.append("V4 FAIL: %s sample_rate_hz=%s < %.1fHz" %
-                              (label, h.get("sample_rate_hz"), PDB_MIN_RATE_HZ))
+            if rate is None or rate < rate_floor:
+                errors.append("V4 FAIL: %s sample_rate_hz=%s < %.1fHz (mode-aware)"
+                              % (label, h.get("sample_rate_hz"), rate_floor))
         # ramp/step/steady 必需
         for key in ("ramp", "step", "steady"):
             if key not in rep:
@@ -329,12 +400,14 @@ def validate(path, strict=False):
     if not isinstance(doc, dict):
         print("VALIDATOR Fatal: JSON 根节点不是对象")
         return 2
-    _validate_meta(doc, errors)
-
     schema = doc.get("schema")
+    # schema-aware 分支 (2026-09-06 Kimi 裁决): dispatch 先于 meta 检查 —
+    # meta 检查按 schema 分支化, 否则 verify 文件被 ladder 标准打一轮假失败
     if schema == "verify_low_speed.v2":
+        _validate_verify_meta(doc, errors)
         _validate_verify(doc, errors, warns)
     else:
+        _validate_meta(doc, errors)
         _validate_ladder_results(doc, errors, warns)
 
     if errors:
@@ -357,6 +430,7 @@ def validate(path, strict=False):
 
 def _validate_ladder_results(doc, errors, warns):
     results = doc.get("results")
+    rate_floor = _rate_floor(doc.get("meta") or {})
     if not isinstance(results, list) or not results:
         errors.append("V1 FAIL: results 缺失或为空")
         return
@@ -369,7 +443,7 @@ def _validate_ladder_results(doc, errors, warns):
             warns.append("V4/V5: %s 稳定门超时 (记录为 WARN, 需要复跑)" % label)
             continue
         _validate_round_config(result, label, errors)
-        sample_rate = _validate_health(result, label, errors)
+        sample_rate = _validate_health(result, label, errors, rate_floor)
         _validate_gate(result, label, errors)
         reported_n = _number(result.get("pdb_n"))
         if reported_n is None or reported_n < MIN_PDB_N:

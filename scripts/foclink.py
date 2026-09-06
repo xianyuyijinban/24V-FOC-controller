@@ -406,13 +406,14 @@ class MeasureWindow:
         return frames, __import__("time").time() - t0
 
     def wait_stable(self, target_deg, timeout=15.0, angle_index=2, health_cb=None):
-        """稳定门: 从调用时刻起累积帧, 要求 span (last_rx - first_rx) >= gate_window
-        且期间全部帧 pp < gate_pp (相对 target_deg)。
+        """稳定门: 滑动样本 (最近 gate_window 内帧, 按 host_rx 剪) 的
+        last_rx - first_rx >= gate_window 且窗内 pp < gate_pp (相对 target_deg)。
         返回 (ok, waited_s)。frames 元组中角度在 angle_index 位置 (默认 2 = (hrx, p1, ang,...))
-        2026-09-05 恢复规划: 旧版滑动窗 (cutoff=now-gate_window) 的 span 测的是
-        "当前窗口内" 而非 "调用后全窗", 帧持续进来时 cutoff 移除旧帧 → span 永不达
-        gate_window → 假稳态/永不达标。本版改为调用后累积帧 + span 硬判 + 记录
-        (last_rx-first_rx), 并保留门前排空 (积压旧帧秒过 bug)。"""
+        2026-09-06 恢复规划原文修正 (Kimi 裁决): 实现回到"滑动样本"语义 —
+        先前"调用后累积全帧"把回位大摆帧永远留在窗里 → pp 永不收敛 → 4 rep 全 10s
+        超时 (稳态真值 pp 0.02-0.09°)。滑动窗下大摆滑出即可过; 5 帧 span 0.1s
+        假稳态仍被 span>=gate_window 拦下 (假稳态帧 span 不足)。保留门前排空
+        (积压旧帧秒过 bug)。"""
         self.last_gate_span_s = None
         self.last_gate_frames = 0
         self.last_gate_pp = None
@@ -431,7 +432,10 @@ class MeasureWindow:
                 d = ang - target_deg
                 while d > 180.0: d -= 360.0
                 while d < -180.0: d += 360.0
-                recent.append((f[0], d))   # f[0]=host_rx (帧入队时刻), 不是收讫时刻
+                recent.append((f[0], d))   # f[0]=host_rx (帧入队时刻)
+                # 滑动窗剪: 只保留最近 gate_window 内的帧 (回位大摆滑出即可过门)
+                cutoff = recent[-1][0] - self.gate_window
+                recent = [x for x in recent if x[0] >= cutoff]
                 self.last_gate_frames = len(recent)
                 self.last_gate_first_rx = recent[0][0]
                 self.last_gate_last_rx = recent[-1][0]

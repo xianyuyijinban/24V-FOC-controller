@@ -100,9 +100,35 @@ def test_late_enter_exit():
     assert not ok, "T4 FAIL: 大摆帧未被拦下 (ok=%s)" % ok
 
 
+def test_wobble_then_stable_slides_out():
+    """T5 (2026-09-06 Kimi 裁决): 先摆后稳 — 滑动窗下回位大摆滑出后过门。
+    序列: 前 3s 大摆 (±3°), 后 3s 稳 (±0.02°)。滑动窗 (gate_window=2s) 下,
+    大摆段滑出窗口后窗内只剩稳态帧 → pp 收敛 → 过门。"""
+    q2 = []
+    mw2 = foclink.MeasureWindow(q2, win_seconds=2.0, gate_pp=0.1, gate_window=2.0)
+    import threading
+
+    def feeder():
+        time.sleep(0.01)
+        base = time.time()
+        for i in range(120):  # 6s @20Hz
+            if i < 60:  # 前 3s 大摆
+                ang = 120.0 + (3.0 if i % 2 else -3.0)
+            else:       # 后 3s 稳
+                ang = 120.0 + (0.02 if i % 2 else -0.02)
+            q2.append((base + i * 0.05, "1", ang, "0"))
+    t = threading.Thread(target=feeder, daemon=True)
+    t.start()
+    ok, waited = mw2.wait_stable(120.0, timeout=8.0, angle_index=2)
+    # 大摆后滑出 (3s + 2s 窗) ≈ 5s, 稳态应过门
+    assert ok, "T5 FAIL: 先摆后稳未在滑动窗下过门 (waited=%.2f)" % waited
+    assert waited < 6.0, "T5 FAIL: 过门太慢 %.1f (应 ~5s)" % waited
+
+
 if __name__ == "__main__":
     tests = [test_5frames_01s_fake_stable, test_full_2s_stable_true,
-             test_old_backlog_drained, test_late_enter_exit]
+             test_old_backlog_drained, test_late_enter_exit,
+             test_wobble_then_stable_slides_out]
     for t in tests:
         t()
         print("PASS: %s" % t.__name__)

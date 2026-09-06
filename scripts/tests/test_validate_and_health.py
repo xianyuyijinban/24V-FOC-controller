@@ -33,6 +33,7 @@ def valid_meta():
         "dt_cmd_sent": True,
         "dt_ack": "DT,OK,0",
         "dt_status": "DT,OK,en=0,amp_mV=0,comp=0",
+        "n_coexist": True,   # 真实 ladder/verify: N 帧共存 (P1/P2 仲裁 ~21-24Hz)
         "config_ack": {
             "UNLOCK": ["UNLOCK,OK"],
             "POS_DIRECT": ["POS_DIRECT,OK"],
@@ -76,7 +77,7 @@ def valid_round():
             "bad_state": 0,
             "bad_fault": 0,
             "crc_err": 0,
-            "sample_rate_hz": 100.0,
+            "sample_rate_hz": 100.0,   # N 共存实测 20-24, >18 floor
         },
         "t_cmd_host_rx": cmd,
         "t_leave_host_rx": 1001.0,

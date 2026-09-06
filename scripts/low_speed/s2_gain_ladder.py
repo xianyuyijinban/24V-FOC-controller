@@ -256,6 +256,7 @@ def main():
         "dt_ack": dt_ack,
         "dt_status": dt_status,
         "config_ack": {},
+        "n_coexist": True,   # N 帧共存 (PDBBIN P1 与 N 帧 P2 仲裁, ~20-24Hz; 见 verify)
     }
 
     def expect2(cmd, prefix, timeout=5.0):
@@ -295,7 +296,9 @@ def main():
         "parser_seq_gap": 0, "crc_err": 0,
         "scope_seq_gap_base": 0, "scope_crc_err_base": 0,
         "run_seq_gap_base": 0, "run_crc_err_base": 0,
+        "seq_gap_loci": [],   # [(tick_2khz, phase)] — gap 位置归因 (Kimi 2026-09-06)
     }
+    phase_tag = ["init"]   # 当前阶段标记 (gap 归因用)
 
     def on_pdb(s):
         # (hrx, tick, flags, pos_err, iq_cmd, theta, ff_total, iq_act, v_mech)
@@ -316,6 +319,9 @@ def main():
             expected = (health["last_seq"] + 1) & 0xFF
             if s.seq != expected:
                 health["seq_gap"] += 1
+                # gap 位置归因: 容忍度前提是归因材料 (Kimi 2026-09-06 补救规格)
+                if len(health["seq_gap_loci"]) < 16:
+                    health["seq_gap_loci"].append((s.tick_2khz, phase_tag[0]))
         health["last_seq"] = s.seq
         if health["last_tick"] == s.tick_2khz:
             health["tick_stall"] += 1
@@ -353,6 +359,7 @@ def main():
             "parser_seq_gap": 0, "crc_err": 0,
             "scope_seq_gap_base": stats.seq_gap,
             "scope_crc_err_base": stats.crc_err,
+            "scope_loci_base": len(health["seq_gap_loci"]),   # loci 切片起点
         })
 
     def reader():
@@ -423,6 +430,8 @@ def main():
             "crc_err": max(health["crc_err"],
                             stats.crc_err - health["run_crc_err_base"]),
             "sample_rate_hz": round(sample_rate, 1) if sample_rate is not None else None,
+            # gap 位置归因 (2026-09-06 Kimi 补救规格): scope 内 loci 切片
+            "seq_gap_loci": health["seq_gap_loci"][health["scope_loci_base"]:],
         }
 
     # 配置 (电压模式 S2) — 整体重试 ≤3 次 (初始化读超时/reader 残留, 非真失败)
@@ -545,6 +554,7 @@ def main():
                 # 新定义: ①err 离开初始窗 |err|>=离去阈值(0.1°, 阶跃可见)
                 #   ②重新进入 |err|<=5%*step(=0.3°) 并持续 dwell(0.5s) → 到位。
                 # ±0.1° 指标改名 t_settle_0p1_deg (保留, 不叫 t95)。
+                phase_tag[0] = "%s-r%d-step" % (gname, rnd)
                 target_rad = (a0 + 6) * DEG2RAD
                 t_cmd = time.time()
                 t_step = t_cmd
@@ -571,6 +581,7 @@ def main():
                     time.sleep(0.02)
 
                 # ── 斜坡回程 6° (12s @0.5°/s, a0+6 → a0) — 跟踪率 ──
+                phase_tag[0] = "%s-r%d-ramp" % (gname, rnd)
                 dur = 12.0
                 t1 = time.time()
                 last = 0.0
@@ -586,6 +597,7 @@ def main():
                 ser.write(b"CMD:PREF,%.6f\n" % (a0 * DEG2RAD))
 
                 # ── 稳定门 → 测量窗(修复版, 目标=a0) ──
+                phase_tag[0] = "%s-r%d-gate" % (gname, rnd)
                 gate_t0 = time.time()
                 ok, waited = mw.wait_stable(
                     a0, timeout=15.0,

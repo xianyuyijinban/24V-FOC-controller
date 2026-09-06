@@ -227,9 +227,11 @@ def main():
     pdb_rows = []    # (hrx, tick, flags, pos_err, iq_cmd, theta_user_rad, ff_total, iq_act)
     nframe_q = []    # (hrx, p1, p3_ang_deg, p6_iq, p8_fault, p2_state)
     stop = [False]
+    phase_tag = ["init"]   # 当前阶段标记 (on_pdb 归因 gap 位置用, list 可变共享)
     health = {       # 逐帧健康摘要 (2026-09-06 #52, 同 ladder 标准)
         "pdb_n": 0, "seq_gap": 0, "bad_state": 0, "bad_fault": 0,
         "crc_err": 0, "tick_stall": 0,
+        "seq_gap_loci": [],   # [(tick_2khz, phase_tag)] — gap 位置归因 (Kimi 2026-09-06)
     }
 
     def on_pdb(s):
@@ -245,6 +247,9 @@ def main():
             health["bad_fault"] += 1
         if health.get("_last_seq", -2) >= 0 and s.seq != ((health["_last_seq"] + 1) & 0xFF):
             health["seq_gap"] += 1
+            # gap 位置归因: 容忍度的前提是归因材料 (Kimi 2026-09-06 补救规格)
+            if len(health["seq_gap_loci"]) < 16:   # 防爆表 (极端流断只记前 16 处)
+                health["seq_gap_loci"].append((s.tick_2khz, phase_tag[0]))
         health["_last_seq"] = s.seq
 
     def on_line(line):
@@ -348,6 +353,7 @@ def main():
     try:
         for rep in range(args.reps):
             rep_res = {}
+            phase_tag[0] = "rep%d-ramp" % (rep + 1)
 
             # ── 1) 斜坡 +step @ramp_s (判据: 跟踪率 ≥95%, 定版 98.8%) ──
             a0 = read_angle_q()
@@ -394,10 +400,12 @@ def main():
                 print("  采样不足!")
                 rep_res["ramp"] = {"track": None}
             # 回起点
+            phase_tag[0] = "rep%d-return" % (rep + 1)
             ser.write(b"CMD:PREF,%.5f\n" % (a0 * DEG2RAD))
             time.sleep(1.5)
 
             # ── 2) 阶跃 +6° (判据: 2.8s 内到 5.8° 级) ──
+            phase_tag[0] = "rep%d-step" % (rep + 1)
             a1 = read_angle_q()
             print("\n=== rep%d 阶跃 +%.1f° ===" % (rep + 1, step), flush=True)
             t2 = time.time()
@@ -418,8 +426,10 @@ def main():
                 print("  采样不足!")
                 rep_res["step"] = None
             # 回起点并测稳态 (2026-09-05 迁移: 稳定门 + MeasureWindow)
+            phase_tag[0] = "rep%d-gate" % (rep + 1)
             ser.write(b"CMD:PREF,%.5f\n" % (a1 * DEG2RAD))
             ok_gate, waited = mw.wait_stable(a1, timeout=10.0)
+            phase_tag[0] = "rep%d-steady" % (rep + 1)
             if not ok_gate:
                 print("  稳态门 TIMEOUT(%.1fs) — 数据仍采集但门未过" % waited, flush=True)
             backlog = mw.begin()
@@ -460,7 +470,10 @@ def main():
                 "bad_fault": health["bad_fault"] - hp0["bad_fault"],
                 "crc_err": 0,
                 "sample_rate_hz": round((health["pdb_n"] - hp0["pdb_n"]) / dur_s, 1),
+                # gap 位置归因 (2026-09-06 Kimi 补救规格): 本 rep 的 loci 切片
+                "seq_gap_loci": health["seq_gap_loci"][hp0.get("_loci_n", 0):],
             }
+            health["_loci_n"] = len(health["seq_gap_loci"])   # 下 rep 起点
             results["reps"].append(rep_res)
     finally:
         stop[0] = True
@@ -480,7 +493,10 @@ def main():
                 "jdiag_raw": meta.get("jdiag_raw"), "ch_raw": meta.get("ch_raw"),
                 "dt_enabled": False, "dt_cmd_sent": True,
                 "dt_ack": meta.get("dt_ack"), "dt_status": meta.get("dt_status"),
-                "config_ack": config_ack}
+                "config_ack": config_ack,
+                # N 帧共存: PDBBIN P1 与 N 帧 P2 仲裁, 实测 ~20-24Hz (8/31 TX 泵
+                #   专项一致); validator mode-aware rate 用 (2026-09-06 Kimi)
+                "n_coexist": True}
     doc = {"schema": "verify_low_speed.v2",
            "run_status": {"valid": bool(pre != 1)},
            "args": vars(args), "meta": meta, "results": results}

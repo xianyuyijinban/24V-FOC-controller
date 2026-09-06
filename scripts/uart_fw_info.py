@@ -31,7 +31,9 @@ def main():
             time.sleep(0.02)
     ser.close()
     text = buf.decode(errors="replace").strip()
-    print(text if text else "NO_RESPONSE")
+    # GBK console 打印 � 会 UnicodeEncodeError — 剥到 ASCII 安全区
+    safe = text.encode("ascii", errors="replace").decode("ascii")
+    print(safe if safe else "NO_RESPONSE")
     if "FW_INFO,OK" in text and "version=1.4.0" in text and "baseline=12V_STANDARD" in text:
         print("FW_INFO_OK")
         return 0

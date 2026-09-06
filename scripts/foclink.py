@@ -350,11 +350,15 @@ def fetch_loop_prof(ser, timeout: float = 2.0) -> dict:
 class MeasureWindow:
     """测量窗: 排空积压 + 按 host_rx 时间戳过滤只收窗内帧 + 稳定门。"""
 
-    def __init__(self, nframe_q, win_seconds=2.0, gate_pp=0.1, gate_window=2.0):
+    def __init__(self, nframe_q, win_seconds=2.0, gate_pp=0.1, gate_window=2.0,
+                 gate_span_eps=0.1):
         self.q = nframe_q
         self.win_seconds = win_seconds
         self.gate_pp = gate_pp
         self.gate_window = gate_window
+        # span 判定的帧间隔余量: 离散采样下严格 >= gate_window 数学永假
+        # (2026-09-06 A2 gate 全超时根因; 0.1s 覆盖 22Hz 帧 45ms + 抖动)
+        self._gate_span_eps = gate_span_eps
         self.win_start = 0.0
         self.backlog_n = 0
         self.last_gate_span_s = None
@@ -434,7 +438,10 @@ class MeasureWindow:
                 while d < -180.0: d += 360.0
                 recent.append((f[0], d))   # f[0]=host_rx (帧入队时刻)
                 # 滑动窗剪: 只保留最近 gate_window 内的帧 (回位大摆滑出即可过门)
-                cutoff = recent[-1][0] - self.gate_window
+                # 剪窗阈给一个帧间隔余量: 离散采样下 span 数学上限 = gate_window
+                #   - 帧间隔, 严格 >= gate_window 永假 (生产 22Hz 帧间隔 45ms;
+                #   T5 合成帧同时入队掩盖了该缺陷 — 第二次"夹具匹配实现"教训)
+                cutoff = recent[-1][0] - self.gate_window - self._gate_span_eps
                 recent = [x for x in recent if x[0] >= cutoff]
                 self.last_gate_frames = len(recent)
                 self.last_gate_first_rx = recent[0][0]
@@ -442,7 +449,8 @@ class MeasureWindow:
                 self.last_gate_span_s = (recent[-1][0] - recent[0][0])
                 if len(recent) >= 5:
                     span = self.last_gate_span_s
-                    if span >= self.gate_window:  # 必须覆盖完整窗 (2026-09-05 恢复规划)
+                    if span >= self.gate_window - self._gate_span_eps:
+                        # 必须覆盖完整窗 (2026-09-05 恢复规划; eps=帧间隔余量)
                         pp = max(x[1] for x in recent) - min(x[1] for x in recent)
                         self.last_gate_pp = pp
                         if pp < self.gate_pp:

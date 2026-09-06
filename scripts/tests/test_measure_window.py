@@ -57,9 +57,9 @@ def test_full_2s_stable_true():
 
     def feeder():
         time.sleep(0.01)
-        base = time.time()
-        for i in range(45):  # 45 帧 × 0.05s = 2.2s span (>gate_window)
-            q2.append((base + i * 0.05, "1", 120.0 + (0.01 if i % 2 else -0.01), "0"))
+        for i in range(45):  # 45 帧 × 0.05s = 2.2s span (>gate_window), 真实节拍
+            q2.append((time.time(), "1", 120.0 + (0.01 if i % 2 else -0.01), "0"))
+            time.sleep(0.05)
     t = threading.Thread(target=feeder, daemon=True)
     t.start()
     ok, waited = mw2.wait_stable(120.0, timeout=3.5, angle_index=2)
@@ -103,7 +103,9 @@ def test_late_enter_exit():
 def test_wobble_then_stable_slides_out():
     """T5 (2026-09-06 Kimi 裁决): 先摆后稳 — 滑动窗下回位大摆滑出后过门。
     序列: 前 3s 大摆 (±3°), 后 3s 稳 (±0.02°)。滑动窗 (gate_window=2s) 下,
-    大摆段滑出窗口后窗内只剩稳态帧 → pp 收敛 → 过门。"""
+    大摆段滑出窗口后窗内只剩稳态帧 → pp 收敛 → 过门。
+    feeder 用真实 20Hz 节拍 (sleep 0.05) — 首版合成帧同时入队掩盖了
+    span<=gate_window-帧间隔 的数学缺陷 (第二次"夹具匹配实现"教训)。"""
     q2 = []
     mw2 = foclink.MeasureWindow(q2, win_seconds=2.0, gate_pp=0.1, gate_window=2.0)
     import threading
@@ -111,12 +113,13 @@ def test_wobble_then_stable_slides_out():
     def feeder():
         time.sleep(0.01)
         base = time.time()
-        for i in range(120):  # 6s @20Hz
+        for i in range(120):  # 6s @20Hz 真实节拍
             if i < 60:  # 前 3s 大摆
                 ang = 120.0 + (3.0 if i % 2 else -3.0)
             else:       # 后 3s 稳
                 ang = 120.0 + (0.02 if i % 2 else -0.02)
-            q2.append((base + i * 0.05, "1", ang, "0"))
+            q2.append((time.time(), "1", ang, "0"))
+            time.sleep(0.05)
     t = threading.Thread(target=feeder, daemon=True)
     t.start()
     ok, waited = mw2.wait_stable(120.0, timeout=8.0, angle_index=2)

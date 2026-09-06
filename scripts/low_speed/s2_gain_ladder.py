@@ -435,6 +435,15 @@ def main():
         }
 
     # 配置 (电压模式 S2) — 整体重试 ≤3 次 (初始化读超时/reader 残留, 非真失败)
+    # 2026-09-06 实测: COG_CFG? 后紧跟 FRIC_COMP 偶发丢响应 (手测复现 1 次,
+    #   单发 5/5 过) — 每条 config expect 带 2 次重试
+    def expect_retry(cmd, prefix, timeout=3.0, tries=2):
+        for i in range(tries):
+            if expect(cmd, prefix, timeout=timeout):
+                return True
+            time.sleep(0.2)
+        return False
+
     init_ok = False
     for iatt in range(3):
         unlock_ack = expect("CMD:UNLOCK,1", "UNLOCK,OK", timeout=3.0)
@@ -446,11 +455,11 @@ def main():
             cog_lines = _query("CMD:COG_CFG?", 1.5)
             cog_ack = next((l for l in cog_lines if l.startswith("COG_CFG,OK")), None)
             record_config_ack("COG_CFG", cog_ack)
-            fric_ack = expect("CMD:FRIC_COMP,0.022,0.022", "FRIC_COMP,OK", timeout=3.0)
+            fric_ack = expect_retry("CMD:FRIC_COMP,0.022,0.022", "FRIC_COMP,OK")
             record_config_ack("FRIC_COMP", fric_ack)
-            aw_ack = expect("CMD:POS_AW_MODE,1,0.03", "POS_AW_MODE,OK", timeout=3.0)
+            aw_ack = expect_retry("CMD:POS_AW_MODE,1,0.03", "POS_AW_MODE,OK")
             record_config_ack("POS_AW_MODE", aw_ack)
-            mode_ack = expect("CMD:MODE,3", "MODE,OK", timeout=3.0)
+            mode_ack = expect_retry("CMD:MODE,3", "MODE,OK")
             record_config_ack("MODE", mode_ack)
             if (unlock_ack and fric_ack and aw_ack and mode_ack and
                     cog_ack is not None):

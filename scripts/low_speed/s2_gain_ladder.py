@@ -412,8 +412,12 @@ def main():
         if health["bad_fault"] > 0:
             raise SystemExit("HEALTH FAIL run=%s: fault!=0 ×%d"
                              % (runid, health["bad_fault"]))
-        if health["seq_gap"] > 0:
-            raise SystemExit("HEALTH FAIL run=%s: seq_gap ×%d" % (runid, health["seq_gap"]))
+        # seq_gap: N 共存容忍 ≤2 (F1 仲裁投影候选) — 判定留给 validator + loci
+        # (2026-09-06 Kimi 补救规格: 位置归因先于杀 run; 成簇/超容忍仍当场杀)
+        gap_seen = max(health["seq_gap"], health["parser_seq_gap"])
+        if gap_seen > 2:
+            raise SystemExit("HEALTH FAIL run=%s: seq_gap ×%d > 容忍2 (N共存)"
+                             % (runid, gap_seen))
         if health["crc_err"] > 0:
             raise SystemExit("HEALTH FAIL run=%s: PDB CRC error ×%d" % (runid, health["crc_err"]))
         if health["tick_stall"] > 0:

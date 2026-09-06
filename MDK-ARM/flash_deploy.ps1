@@ -1,8 +1,11 @@
 # Flash deploy: UV4 -b build + -f flash + pyocd reset/go + FW_INFO liveness check (2026-09-05)
-# Usage: powershell -File flash_deploy.ps1 -Commit <sha>   (Commit 必填, 无默认值)
-# 身份链纪律 (2026-09-06 Kimi 定案): HEAD=Commit 且 code/ 干净 (axf==声称 commit)
-#   才许可烧录; MDK-ARM/code/ 残留即 fail, 不 WARN 继续。FW_INFO 仅活体+版本族
-#   (git=unknown), 身份 = HEAD 断言 + 干净树 + 烧录日志三点。
+# Usage: powershell -File flash_deploy.ps1 -Commit <sha>   (Commit required, no default)
+# Identity chain (2026-09-06 Kimi subtree assertion): build inputs of working tree
+#   must equal <Commit> bit-for-bit -- `git diff --quiet <sha> -- <build inputs>`
+#   (covers staged+unstaged) AND `git status --porcelain -- <build inputs>` empty.
+#   HEAD may advance (scripts/docs) -- printed as reference only.
+# Build inputs (from uvprojx, 2026-09-06 F): Core/ + MDK-ARM/code/ + Drivers/ + uvprojx.
+#   FW_INFO only proves liveness+version family (git=unknown).
 param(
     [Parameter(Mandatory=$true)]
     [string]$Commit,
@@ -17,29 +20,31 @@ $BuildLog = "$Root\MDK-ARM\build_log_deploy.txt"
 $FlashLog = "$Root\MDK-ARM\flash_log_deploy.txt"
 $ProbeId = "0001A0000001"
 $PyocdTarget = "stm32h743vitx"
+# Build input path set (2026-09-06 F: subtree assertion; all uvprojx compile inputs)
+$BuildInputs = @("Core/", "MDK-ARM/code/", "Drivers/", "MDK-ARM/24V FOC Controller.uvprojx")
 
-# 1) Git assertion: HEAD == Commit && code/ clean (2026-09-06: code/ 脏则 fail)
+# 1) Subtree identity assertion: working-tree build inputs == <Commit> build inputs
 if (-not $SkipGitCheck) {
     Set-Location $Root
     $head = (git rev-parse --short HEAD).Trim()
-    if ($head -ne $Commit) {
-        Write-Host "FAIL: HEAD=$head expected=$Commit" -ForegroundColor Red
+    Write-Host "git: HEAD=$head (reference only), asserting build inputs == $Commit"
+
+    # a) diff working tree vs commit over build inputs (covers staged+unstaged)
+    git diff --quiet $Commit -- $BuildInputs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL: build inputs differ from $Commit:" -ForegroundColor Red
+        git diff --stat $Commit -- $BuildInputs | Write-Host
         exit 1
     }
-    # code/ 残留 (foc_app.c/h 等) 时 axf != 声称 commit — 身份链破洞, 直接 exit
-    $codeDirty = git status --porcelain -- "MDK-ARM/code/"
-    if ($codeDirty) {
-        Write-Host "FAIL: MDK-ARM/code/ 有残留, axf 不可信任:" -ForegroundColor Red
-        Write-Host "$codeDirty"
+
+    # b) untracked files inside build inputs must be none
+    $dirty = git status --porcelain -- $BuildInputs
+    if ($dirty) {
+        Write-Host "FAIL: build inputs have untracked/modified files:" -ForegroundColor Red
+        Write-Host "$dirty"
         exit 1
     }
-    $status = git status --porcelain
-    if ($status) {
-        Write-Host "WARN: working tree not clean (non-code):" -ForegroundColor Yellow
-        $status | Where-Object { $_ -notmatch "^\?\? .*\.json$" } | Write-Host
-    } else {
-        Write-Host "git: HEAD=$Commit code/clean" -ForegroundColor Green
-    }
+    Write-Host "git: build inputs == $Commit (Core/ code/ Drivers/ uvprojx)" -ForegroundColor Green
 }
 
 # 2) Build -b (must compile first, ensure axf matches current code)
@@ -76,6 +81,7 @@ pyocd commander -u $ProbeId -t $PyocdTarget -c "reset" -c "go" 2>&1 | Out-Host
 # 5) FW_INFO liveness check
 python "$Root\scripts\uart_fw_info.py" COM10
 
-# 身份链输出 (2026-09-06): FW_INFO 看不到 SHA, 结论 = HEAD 断言 + code/干净 + 烧录日志三点
-Write-Host "板=$Commit 源码构建 (HEAD 断言 + code/clean + UV4 Verify OK)" -ForegroundColor Green
+# Identity chain output (2026-09-06 F): FW_INFO lacks SHA; conclusion = subtree
+#   assertion (build inputs == Commit) + UV4 Verify OK + FW_INFO liveness
+Write-Host "Board=$Commit source build (subtree assert + UV4 Verify OK + FW_INFO alive)" -ForegroundColor Green
 Write-Host "DEPLOY_DONE"

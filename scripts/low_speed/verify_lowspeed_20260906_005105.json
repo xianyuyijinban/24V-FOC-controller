@@ -1,0 +1,343 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": true
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 20.0,
+    "ramp_deg_s": 0.5,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.4.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v6,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    }
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "40.50000000000001": 98.8,
+            "41.50000000000001": 98.9,
+            "42.50000000000001": 99.0
+          },
+          "pp": 0.02197954874907282,
+          "max_dev": 19.998331188543688,
+          "n": 1016,
+          "track_pct": 97.5
+        },
+        "step": {
+          "arrival": {
+            "0.5": 91.1,
+            "1.0": 91.6,
+            "2.0": 95.6,
+            "2.8": 98.0
+          },
+          "pp": 0.5053656966891822,
+          "max_dev": 15.301041669780716,
+          "n": 54
+        },
+        "steady": {
+          "pp_deg": 0.09,
+          "resid_deg": 0.192,
+          "backlog": 1,
+          "gate_ok": false,
+          "gate_wait_s": 10.01,
+          "n": 43
+        },
+        "traj": [
+          {
+            "t": 0.015,
+            "theta_deg": 165.1573,
+            "poserr_deg": 0.0281,
+            "ff_iq": 0.00016,
+            "iq_act": 0.0
+          },
+          {
+            "t": 1.489,
+            "theta_deg": 166.3329,
+            "poserr_deg": 0.2722,
+            "ff_iq": -0.00336,
+            "iq_act": -0.00353
+          },
+          {
+            "t": 3.801,
+            "theta_deg": 167.3436,
+            "poserr_deg": 0.1381,
+            "ff_iq": -0.00299,
+            "iq_act": 0.00656
+          },
+          {
+            "t": 8.989,
+            "theta_deg": 169.0575,
+            "poserr_deg": -0.5816,
+            "ff_iq": -0.00464,
+            "iq_act": -0.01019
+          },
+          {
+            "t": 13.303,
+            "theta_deg": 172.3424,
+            "poserr_deg": 0.6154,
+            "ff_iq": -0.00018,
+            "iq_act": -0.00306
+          },
+          {
+            "t": 14.965,
+            "theta_deg": 172.9357,
+            "poserr_deg": 0.3663,
+            "ff_iq": -0.00021,
+            "iq_act": -0.00283
+          },
+          {
+            "t": 18.706,
+            "theta_deg": 174.4737,
+            "poserr_deg": 0.0401,
+            "ff_iq": -0.00011,
+            "iq_act": -0.00657
+          },
+          {
+            "t": 22.309,
+            "theta_deg": 175.9679,
+            "poserr_deg": -0.3746,
+            "ff_iq": 2e-05,
+            "iq_act": -0.00357
+          },
+          {
+            "t": 28.507,
+            "theta_deg": 179.3297,
+            "poserr_deg": 0.0122,
+            "ff_iq": -1e-05,
+            "iq_act": 0.02371
+          },
+          {
+            "t": 35.123,
+            "theta_deg": -177.0448,
+            "poserr_deg": 0.2944,
+            "ff_iq": -6e-05,
+            "iq_act": -0.00268
+          },
+          {
+            "t": 41.884,
+            "theta_deg": -175.0343,
+            "poserr_deg": -0.2045,
+            "ff_iq": 1e-05,
+            "iq_act": -0.01888
+          },
+          {
+            "t": 47.387,
+            "theta_deg": -174.0236,
+            "poserr_deg": -0.4033,
+            "ff_iq": 3e-05,
+            "iq_act": -0.02506
+          },
+          {
+            "t": 52.415,
+            "theta_deg": 166.3658,
+            "poserr_deg": -0.0142,
+            "ff_iq": 4e-05,
+            "iq_act": 0.00241
+          },
+          {
+            "t": 57.353,
+            "theta_deg": 166.6075,
+            "poserr_deg": 0.2165,
+            "ff_iq": 8e-05,
+            "iq_act": 0.00566
+          }
+        ],
+        "health": {
+          "pdb_n": 1348,
+          "seq_gap": 1,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 22.6
+        }
+      },
+      {
+        "ramp": {
+          "arrival": {
+            "40.50000000000001": 100.0,
+            "41.50000000000001": 100.0,
+            "42.50000000000001": 100.0
+          },
+          "pp": 0.001519195706634946,
+          "max_dev": 19.998646530131964,
+          "n": 914,
+          "track_pct": 95.6
+        },
+        "step": {
+          "arrival": {
+            "0.5": 91.7,
+            "1.0": 92.2,
+            "2.0": 97.1,
+            "2.8": 100.1
+          },
+          "pp": 0.582602850093906,
+          "max_dev": 15.342535318795342,
+          "n": 56
+        },
+        "steady": {
+          "pp_deg": 0.02,
+          "resid_deg": -0.003,
+          "backlog": 1,
+          "gate_ok": false,
+          "gate_wait_s": 10.01,
+          "n": 39
+        },
+        "traj": [
+          {
+            "t": 0.034,
+            "theta_deg": 166.5086,
+            "poserr_deg": 0.1396,
+            "ff_iq": -0.00011,
+            "iq_act": 0.00178
+          },
+          {
+            "t": 3.814,
+            "theta_deg": 167.4754,
+            "poserr_deg": -0.9065,
+            "ff_iq": -0.00792,
+            "iq_act": -0.00809
+          },
+          {
+            "t": 8.212,
+            "theta_deg": 170.7933,
+            "poserr_deg": 0.2162,
+            "ff_iq": 5e-05,
+            "iq_act": -0.0
+          },
+          {
+            "t": 10.64,
+            "theta_deg": 172.1666,
+            "poserr_deg": 0.23,
+            "ff_iq": -0.00133,
+            "iq_act": 0.00624
+          },
+          {
+            "t": 13.993,
+            "theta_deg": 173.9024,
+            "poserr_deg": 0.4073,
+            "ff_iq": -0.00037,
+            "iq_act": -0.01023
+          },
+          {
+            "t": 18.175,
+            "theta_deg": 175.2318,
+            "poserr_deg": -0.3616,
+            "ff_iq": -0.01076,
+            "iq_act": -0.00034
+          },
+          {
+            "t": 22.922,
+            "theta_deg": 176.9127,
+            "poserr_deg": -0.9517,
+            "ff_iq": -0.00447,
+            "iq_act": 0.03016
+          },
+          {
+            "t": 29.013,
+            "theta_deg": -178.6598,
+            "poserr_deg": 0.4132,
+            "ff_iq": -0.00104,
+            "iq_act": 0.00844
+          },
+          {
+            "t": 35.749,
+            "theta_deg": -175.6386,
+            "poserr_deg": 0.0333,
+            "ff_iq": 4e-05,
+            "iq_act": -0.01198
+          },
+          {
+            "t": 42.057,
+            "theta_deg": -173.4963,
+            "poserr_deg": -0.0061,
+            "ff_iq": 5e-05,
+            "iq_act": -0.01421
+          },
+          {
+            "t": 47.522,
+            "theta_deg": -172.2987,
+            "poserr_deg": 0.0604,
+            "ff_iq": 4e-05,
+            "iq_act": -0.00853
+          },
+          {
+            "t": 52.252,
+            "theta_deg": 167.6732,
+            "poserr_deg": 0.0759,
+            "ff_iq": 1e-05,
+            "iq_act": 0.01196
+          },
+          {
+            "t": 57.25,
+            "theta_deg": 167.6183,
+            "poserr_deg": -0.012,
+            "ff_iq": 0.0001,
+            "iq_act": 0.0191
+          }
+        ],
+        "health": {
+          "pdb_n": 1247,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 20.9
+        }
+      }
+    ]
+  }
+}

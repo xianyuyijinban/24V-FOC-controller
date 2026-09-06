@@ -1,0 +1,231 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": true
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 6.0,
+    "ramp_deg_s": 2.0,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.4.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v6,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    }
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "3.500000000000004": 107.0,
+            "4.5000000000000036": 102.5,
+            "5.5000000000000036": 102.5
+          },
+          "pp": 0.02196588837077229,
+          "max_dev": 5.995624308130573,
+          "n": 189,
+          "track_pct": 144.2
+        },
+        "step": {
+          "arrival": {
+            "0.5": 101.8,
+            "1.0": 101.8,
+            "2.0": 101.6,
+            "2.8": 101.6
+          },
+          "pp": 0.02196588837077229,
+          "max_dev": 5.991426859313265,
+          "n": 72
+        },
+        "steady": {
+          "pp_deg": 12.23,
+          "resid_deg": 0.018,
+          "backlog": 0,
+          "gate_ok": false,
+          "gate_wait_s": 10.0,
+          "n": 40
+        },
+        "traj": [
+          {
+            "t": 0.014,
+            "theta_deg": 168.1346,
+            "poserr_deg": 0.0345,
+            "ff_iq": 6e-05,
+            "iq_act": -0.00692
+          },
+          {
+            "t": 2.237,
+            "theta_deg": 172.3863,
+            "poserr_deg": 0.075,
+            "ff_iq": -2e-05,
+            "iq_act": -0.00023
+          },
+          {
+            "t": 6.513,
+            "theta_deg": 168.1896,
+            "poserr_deg": 0.0286,
+            "ff_iq": -2e-05,
+            "iq_act": 0.00444
+          },
+          {
+            "t": 10.666,
+            "theta_deg": 168.1456,
+            "poserr_deg": -0.0244,
+            "ff_iq": 2e-05,
+            "iq_act": 0.00692
+          },
+          {
+            "t": 15.649,
+            "theta_deg": 168.2774,
+            "poserr_deg": 0.1184,
+            "ff_iq": -0.0001,
+            "iq_act": 0.01599
+          },
+          {
+            "t": 20.465,
+            "theta_deg": 168.1786,
+            "poserr_deg": -0.0024,
+            "ff_iq": -0.00018,
+            "iq_act": 0.01675
+          }
+        ],
+        "health": {
+          "pdb_n": 541,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 24.0
+        }
+      },
+      {
+        "ramp": {
+          "arrival": {
+            "3.500000000000004": 107.2,
+            "4.5000000000000036": 104.9,
+            "5.5000000000000036": 104.7
+          },
+          "pp": 0.04394543711987353,
+          "max_dev": 5.996026699542455,
+          "n": 145,
+          "track_pct": 162.4
+        },
+        "step": {
+          "arrival": {
+            "0.5": 100.4,
+            "1.0": 100.6,
+            "2.0": 100.6,
+            "2.8": 100.4
+          },
+          "pp": 13.996550233060901,
+          "max_dev": 14.008146115962518,
+          "n": 64
+        },
+        "steady": {
+          "pp_deg": 0.07,
+          "resid_deg": 0.066,
+          "backlog": 0,
+          "gate_ok": false,
+          "gate_wait_s": 10.01,
+          "n": 37
+        },
+        "traj": [
+          {
+            "t": 0.007,
+            "theta_deg": 167.816,
+            "poserr_deg": -0.365,
+            "ff_iq": 7e-05,
+            "iq_act": 0.0034
+          },
+          {
+            "t": 3.535,
+            "theta_deg": 174.265,
+            "poserr_deg": 0.4341,
+            "ff_iq": -8e-05,
+            "iq_act": -0.00274
+          },
+          {
+            "t": 8.804,
+            "theta_deg": 173.8036,
+            "poserr_deg": 0.0335,
+            "ff_iq": -4e-05,
+            "iq_act": 0.00163
+          },
+          {
+            "t": 13.115,
+            "theta_deg": 167.9588,
+            "poserr_deg": 0.1888,
+            "ff_iq": 6e-05,
+            "iq_act": 0.01452
+          },
+          {
+            "t": 17.767,
+            "theta_deg": 167.8929,
+            "poserr_deg": 0.1229,
+            "ff_iq": -4e-05,
+            "iq_act": 0.01101
+          }
+        ],
+        "health": {
+          "pdb_n": 500,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 22.2
+        }
+      }
+    ]
+  }
+}

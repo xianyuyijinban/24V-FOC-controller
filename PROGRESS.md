@@ -1,5 +1,26 @@
 # PROGRESS
 
+## [2026-09-06 凌晨] 电流回归首轮（仪器四修前, 参考值不作关门依据）+ 死区 2°/s 副作用
+
+### 首轮数据 (verify_lowspeed_20260906_005105.json / 005248.json, 旧脚本产物)
+- **A (20°/0.5°/s ×2)**: 斜坡终点 99.0/100.0%、跟踪率 97.5/95.6% — 贴定版 98.8% 区间;
+  稳态真值 pp 0.09/0.02° resid 0.19/-0.003° (gate TIMEOUT 是窗语义 bug, 真值由 collect 窗算出)
+- **B (6°/2°/s ×2)**: 阶跃 2.8s 到位 101.6/100.4% ✓; **斜坡跟踪率 144.2/162.4% —
+  死区 2°/s 过冲副作用 (对比今晨 8e796ea 无死区 133/124%)**。
+  机制: 2°/s=0.035 rad/s 落进 0.06 死区 → 全程满额静摩擦 comp, 真实慢动该吃
+  Stribeck 地板 0.2×。"静止微振"(≤0.03) 与"真实慢动"(0.035) 频段重叠, 任何
+  死区数值都分不开。固件候选: 指令速率门控死区 (|dpos_ref/dt|>阈值→绕过死区),
+  锁定区改动, Phase 2 数据齐后议。
+- **validator 抓 4 类**: schema 假失败 (validator 自身 bug, dispatch 顺序)、
+  seq_gap=1 (A rep1 单帧, 位置待查)、sample_rate 21-24Hz (N 共存, 阈值 mode-aware)、
+  gate TIMEOUT ×4 (窗语义实现偏离计划原文)。
+- **仪器四修 (Kimi 裁决)**: ① validator schema-aware dispatch + 真实 JSON fixture
+  ② rate floor 双档 (N 共存 ≥18Hz / 纯流 ≥150Hz, meta.n_coexist) ③ wait_stable
+  回滑动样本语义 (span≥gate_window 硬判 + 大摆滑出) ④ seq_gap 容忍前提=位置日志
+  (gap_loci 进 JSON, validator 强制校验) — 归因材料先于容忍度。
+- **①未关门**: 修后仪器重跑 A×2+B×2 → validator 全 OK (含 gap_loci) 才关门。
+- 台架顺序不变: F 笔断言式烧录 → 重跑 → ①关门 → ② S2 G2 @126°+160°。
+
 ## [2026-08-31] 主循环黑洞专项（LOOP_PROF 探针 + 判别树 D1-D4，三条挂账全证伪）
 
 ### Problem / Task

@@ -175,6 +175,36 @@ def test_valid_round(tmp):
     assert rc == 0, "合规数据被拒 (rc=%s)" % rc
 
 
+def test_gap_loci_mismatch(tmp):
+    """r2 场景 (2026-09-06 Kimi): seq_gap>0 但 loci 缺失/长度不符 → 无归因不容忍"""
+    result = valid_round()
+    result["health"]["seq_gap"] = 1
+    result["health"]["seq_gap_loci"] = []   # 计数 1 但 loci 空 — 不同源
+    assert_fail(tmp, make_doc([result]), "gap_loci_missing")
+
+
+def test_gap_loci_matched(tmp):
+    """seq_gap=1 + loci 1 条同长 → 容忍生效 (N 共存)"""
+    result = valid_round()
+    result["health"]["seq_gap"] = 1
+    result["health"]["seq_gap_loci"] = [[6213190, "G2-r1-gate"]]
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc([result]),
+                                                "gap_loci_ok.json"))
+    assert rc == 0, "带归因 loci 的单帧 gap 应容忍 (rc=%s)" % rc
+
+
+def test_gate_pp_borderline_warns(tmp):
+    """gate_pp 压线带 (半 LSB 0.0054): 0.1000 → WARN 不 FAIL; 0.1060 → FAIL"""
+    result = valid_round()
+    result["gate_pp_deg"] = 0.100000
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc([result]),
+                                                "gate_pp_border.json"))
+    assert rc == 0, "压线 0.1000 应 WARN 不 FAIL (rc=%s)" % rc
+    result2 = valid_round()
+    result2["gate_pp_deg"] = 0.106000   # >= 0.1+0.0054 → FAIL
+    assert_fail(tmp, make_doc([result2]), "gate_pp_over")
+
+
 if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="gain_ladder_validate_")
     tests = [
@@ -188,6 +218,9 @@ if __name__ == "__main__":
         test_silent_stream,
         test_timeout_warns,
         test_valid_round,
+        test_gap_loci_mismatch,
+        test_gap_loci_matched,
+        test_gate_pp_borderline_warns,
     ]
     for test in tests:
         test(tmp)

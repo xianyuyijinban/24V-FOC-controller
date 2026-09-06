@@ -306,12 +306,13 @@ def main():
     stop = [False]
     health = {          # 逐帧健康状态 (2026-09-05 恢复规划 #48)
         "scope_start": None, "first_hrx": None, "last_hrx": 0.0,
+        "global_last_seq": None, "global_last_tick": None,
         "last_seq": -1, "last_tick": None, "seq_gap": 0, "tick_stall": 0,
         "bad_state": 0, "bad_fault": 0, "pdb_n": 0,
         "parser_seq_gap": 0, "crc_err": 0,
         "scope_seq_gap_base": 0, "scope_crc_err_base": 0,
         "run_seq_gap_base": 0, "run_crc_err_base": 0,
-        "seq_gap_loci": [],   # [(tick_2khz, phase)] — gap 位置归因 (Kimi 2026-09-06)
+        "seq_gap_loci": [],   # [(tick_2khz, phase)] — 全局层记录 (同源, 2026-09-06)
     }
     phase_tag = ["init"]   # 当前阶段标记 (gap 归因用)
 
@@ -322,25 +323,31 @@ def main():
         pdb_rows.append((s.host_rx_time, s.tick_2khz, s.flags,
                          s.pos_err_rad, s.iq_cmd, s.theta_user_rad,
                          s.ff_total, s.iq_act, s.v_mech_rad_s, s.seq))
+        # ── loci 全局层 (2026-09-06 Kimi 同源裁决): seq 推进用 parser 全局 last_seq,
+        # gap 一律记 loci (记当时 phase_tag) — run/scope 计数从 loci 切片派生,
+        # 计数与归因同源自洽 (r2 实证: scope 外 gap 计入 run 级但 loci 缺 → 不同源)
+        seq_gap_now = False
+        if health["global_last_seq"] is not None:
+            expected = (health["global_last_seq"] + 1) & 0xFF
+            if s.seq != expected:
+                seq_gap_now = True
+                if len(health["seq_gap_loci"]) < 16:
+                    health["seq_gap_loci"].append((s.tick_2khz, phase_tag[0]))
+        health["global_last_seq"] = s.seq
+        # last_tick 同源化 (tick_stall 也全局判)
+        if health["global_last_tick"] is not None and health["global_last_tick"] == s.tick_2khz:
+            health["tick_stall"] += 1
+        health["global_last_tick"] = s.tick_2khz
         if (health["scope_start"] is None or
                 s.host_rx_time < health["scope_start"]):
             return
-        # health: seq 推进/state/fault/tick (静默在 watch 里查, 这里累计)
+        # health: scope 内计数从 loci 派生 (同源) + state/fault 本地
         health["pdb_n"] += 1
         if health["first_hrx"] is None:
             health["first_hrx"] = s.host_rx_time
         health["last_hrx"] = s.host_rx_time
-        if health["last_seq"] >= 0:
-            expected = (health["last_seq"] + 1) & 0xFF
-            if s.seq != expected:
-                health["seq_gap"] += 1
-                # gap 位置归因: 容忍度前提是归因材料 (Kimi 2026-09-06 补救规格)
-                if len(health["seq_gap_loci"]) < 16:
-                    health["seq_gap_loci"].append((s.tick_2khz, phase_tag[0]))
-        health["last_seq"] = s.seq
-        if health["last_tick"] == s.tick_2khz:
-            health["tick_stall"] += 1
-        health["last_tick"] = s.tick_2khz
+        if seq_gap_now:
+            health["seq_gap"] += 1
         state = (s.flags >> 8) & 0xFF
         fault = s.flags & 0xFF
         if state != FOC_STATE_RUNNING:
@@ -438,19 +445,20 @@ def main():
                            (health["last_hrx"] - health["first_hrx"]))
         else:
             sample_rate = None
-        stats = parser.stats[foclink.TYPE_PDB2]
+        # seq_gap 同源: scope 计数 = loci 切片长度 (2026-09-06 Kimi 同源裁决) —
+        # 本地 seq_gap 与 loci 都在 scope 内累计, 长度必然一致
+        scope_loci = health["seq_gap_loci"][health["scope_loci_base"]:]
         return {
             "pdb_n": health["pdb_n"],
-            "seq_gap": max(health["seq_gap"],
-                            stats.seq_gap - health["run_seq_gap_base"]),
+            "seq_gap": len(scope_loci),
             "tick_stall": health["tick_stall"],
             "bad_state": health["bad_state"],
             "bad_fault": health["bad_fault"],
             "crc_err": max(health["crc_err"],
-                            stats.crc_err - health["run_crc_err_base"]),
+                            parser.stats[foclink.TYPE_PDB2].crc_err -
+                            health["run_crc_err_base"]),
             "sample_rate_hz": round(sample_rate, 1) if sample_rate is not None else None,
-            # gap 位置归因 (2026-09-06 Kimi 补救规格): scope 内 loci 切片
-            "seq_gap_loci": health["seq_gap_loci"][health["scope_loci_base"]:],
+            "seq_gap_loci": scope_loci,
         }
 
     # 配置 (电压模式 S2) — 整体重试 ≤3 次 (初始化读超时/reader 残留, 非真失败)
@@ -641,7 +649,7 @@ def main():
                                     "gate_span_s": round(mw.last_gate_span_s, 3)
                                     if mw.last_gate_span_s is not None else None,
                                     "gate_frames": mw.last_gate_frames,
-                                    "gate_pp_deg": round(mw.last_gate_pp, 4)
+                                    "gate_pp_deg": round(mw.last_gate_pp, 6)
                                     if mw.last_gate_pp is not None else None,
                                     "config_ack": round_acks,
                                     "health": health_summary(),
@@ -698,7 +706,7 @@ def main():
                     "gate_ok": ok, "gate_wait_s": round(waited, 2),
                     "gate_span_s": round(mw.last_gate_span_s, 3),
                     "gate_frames": mw.last_gate_frames,
-                    "gate_pp_deg": round(mw.last_gate_pp, 4),
+                    "gate_pp_deg": round(mw.last_gate_pp, 6),
                     "config_ack": round_acks,
                     "health": round_health,
                     "steady_pp_deg": round(pp, 4),

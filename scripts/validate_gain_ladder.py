@@ -27,6 +27,7 @@ T95_DWELL = 0.5
 LEAVE_ERR_DEG = 0.1
 GATE_WINDOW = 2.0
 GATE_PP_DEG = 0.1
+GATE_PP_HALF_LSB = 0.0054   # 半 LSB (编码器 0.0107°/LSB) — gate_pp 压线带
 # rate 阈值 mode-aware (2026-09-06 Kimi 裁决): N 帧共存挤占 P1, 实测 ~21-24Hz;
 #   N 共存 ≥18Hz (对最差 20.9 留 15% 裕量), 纯流 ≥150Hz。机制与 8/31 TX 泵专项一致。
 PDB_MIN_RATE_HZ_COEXIST = 18.0
@@ -195,7 +196,7 @@ def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE):
     return sample_rate
 
 
-def _validate_gate(result, label, errors):
+def _validate_gate(result, label, errors, warns=None):
     if result.get("gate_ok") is not True:
         errors.append("V5 FAIL: %s gate_ok 不是 true" % label)
     for key in ("gate_wait_s", "gate_span_s", "gate_frames", "gate_pp_deg"):
@@ -210,9 +211,18 @@ def _validate_gate(result, label, errors):
         errors.append("V5 FAIL: %s gate_frames=%d < %d" %
                       (label, frames, MIN_GATE_FRAMES))
     gate_pp = _number(result.get("gate_pp_deg"))
-    if gate_pp is not None and gate_pp >= GATE_PP_DEG:
-        errors.append("V5 FAIL: %s gate_pp_deg=%.4f >= %.2f" %
-                      (label, gate_pp, GATE_PP_DEG))
+    if gate_pp is not None:
+        # borderline 带 (2026-09-06 Kimi 裁决): [gate_pp, gate_pp+半LSB) → WARN。
+        # 编码器 0.0107°/LSB, 半 LSB=0.0054°; pp 恰好压线 (0.1000) 是量化巧合
+        # 非 0.1+ 违规; >= 上限仍 FAIL
+        if gate_pp >= GATE_PP_DEG + GATE_PP_HALF_LSB:
+            errors.append("V5 FAIL: %s gate_pp_deg=%.6f >= %.2f+半LSB" %
+                          (label, gate_pp, GATE_PP_DEG))
+        elif gate_pp >= GATE_PP_DEG:
+            if warns is not None:
+                warns.append("V5: %s gate_pp_deg=%.6f 压线 [%.2f, %.4f) 半LSB — 量化巧合"
+                             % (label, gate_pp, GATE_PP_DEG,
+                                GATE_PP_DEG + GATE_PP_HALF_LSB))
 
 
 def _validate_round_config(result, label, errors):
@@ -444,7 +454,7 @@ def _validate_ladder_results(doc, errors, warns):
             continue
         _validate_round_config(result, label, errors)
         sample_rate = _validate_health(result, label, errors, rate_floor)
-        _validate_gate(result, label, errors)
+        _validate_gate(result, label, errors, warns)
         reported_n = _number(result.get("pdb_n"))
         if reported_n is None or reported_n < MIN_PDB_N:
             errors.append("V6 FAIL: %s pdb_n=%s 流静默/断开" %

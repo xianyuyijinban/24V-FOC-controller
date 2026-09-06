@@ -184,9 +184,20 @@ def main():
 
     # ── fail-closed 预检: FW_INFO/JDIAG/CH_CFG 解析校验 ──
     # 2026-09-05 恢复规划: 必需项缺失即中止, 不落有效结果。
+    # 2026-09-06 响应丢失家族 (F1 仲裁桌面放大): 单发 _query 实测丢率 ~5-10%
+    #   (预检 JDIAG 丢 1 次 / init FRIC 稳定复现 DT? 后丢 1 次) — 预检查询带重试
+    def _query_retry(cmd, prefix, timeout=2.0, tries=3):
+        """带重试的查询: 每轮 reset 后发, 直到收到 prefix 开头行或重试耗尽。"""
+        for i in range(tries):
+            lines = _query(cmd, timeout)
+            hit = next((l for l in lines if l.startswith(prefix)), None)
+            if hit is not None:
+                return hit
+            time.sleep(0.2)
+        return None
+
     def _precheck():
-        lines = _query("CMD:FW_INFO?", 2.0)
-        fw = next((l for l in lines if l.startswith("FW_INFO,OK,")), None)
+        fw = _query_retry("CMD:FW_INFO?", "FW_INFO,OK,")
         if fw is None:
             print("PRECHECK FAIL: FW_INFO 无有效响应")
             return None
@@ -196,8 +207,7 @@ def main():
                 print("PRECHECK FAIL: FW_INFO 缺 %s" % required)
                 return None
 
-        lines = _query("CMD:JDIAG", 2.0)
-        jd = next((l for l in lines if l.startswith("JDIAG,")), None)
+        jd = _query_retry("CMD:JDIAG", "JDIAG,")
         if jd is None:
             print("PRECHECK FAIL: JDIAG 无响应")
             return None
@@ -210,8 +220,7 @@ def main():
                 print("PRECHECK FAIL: JDIAG 缺 %s" % req)
                 return None
 
-        lines = _query("CMD:CH_CFG?", 2.0)
-        cc = next((l for l in lines if l.startswith("CH_CFG,OK,")), None)
+        cc = _query_retry("CMD:CH_CFG?", "CH_CFG,OK,")
         if cc is None:
             print("PRECHECK FAIL: CH_CFG 无有效响应")
             return None
@@ -235,13 +244,19 @@ def main():
     ser.reset_input_buffer()
 
     dt_cmd_sent = False
+    # DT,0 + DT? 双确认带重试 (响应丢失家族: DT? 后首条 expect 丢率最高, 手测复现)
     dt_command_lines = _query("CMD:DT,0", 2.0)
     dt_cmd_sent = True
     dt_ack = next((l for l in dt_command_lines if l.startswith("DT,OK")), None)
     dt_enabled = parse_dt_enabled(dt_ack)
-    dt_status_lines = _query("CMD:DT?", 2.0)
-    dt_status = next((l for l in dt_status_lines if l.startswith("DT,OK")), None)
-    dt_status_enabled = parse_dt_enabled(dt_status)
+    dt_status = None
+    dt_status_enabled = None
+    for _ in range(3):
+        dt_status_lines = _query("CMD:DT?", 2.0)
+        dt_status = next((l for l in dt_status_lines if l.startswith("DT,OK")), None)
+        dt_status_enabled = parse_dt_enabled(dt_status)
+        if dt_status_enabled is not False:
+            time.sleep(0.2)
     if dt_enabled is not False or dt_status_enabled is not False:
         print("PRECHECK FAIL: DT,0 未获确认 (ack=%r status=%r)" %
               (dt_ack, dt_status))
@@ -465,7 +480,9 @@ def main():
                     cog_ack is not None):
                 init_ok = True
                 break
-        print("init 配置重试 %d/3" % (iatt + 1), flush=True)
+        print("init 配置重试 %d/3 (u=%r p=%r c=%r f=%r a=%r m=%r)"
+              % (iatt + 1, unlock_ack, pos_direct_ack, cog_ack,
+                 fric_ack, aw_ack, mode_ack), flush=True)
         time.sleep(0.8)
     if not init_ok:
         print("初始配置失败 (POS_DIRECT/FRIC/AW/MODE), 停止"); ser.close(); return 1

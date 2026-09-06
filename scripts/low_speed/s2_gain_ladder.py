@@ -467,8 +467,10 @@ def main():
         record_config_ack("POS_DIRECT", pos_direct_ack)
         if pos_direct_ack:
             send("CMD:COG_CFG,0.0,60.0", 0.15)
+            # 固件 COG_CFG? 响应 = "COG_CFG,gain=..,phase_deg=.." (uart_upload.c:1743),
+            # 无 OK 字样 — 检查 gain= 存在即视为有效身份 (2026-09-06 init 3/3 根因)
             cog_lines = _query("CMD:COG_CFG?", 1.5)
-            cog_ack = next((l for l in cog_lines if l.startswith("COG_CFG,OK")), None)
+            cog_ack = next((l for l in cog_lines if l.startswith("COG_CFG,gain=")), None)
             record_config_ack("COG_CFG", cog_ack)
             fric_ack = expect_retry("CMD:FRIC_COMP,0.022,0.022", "FRIC_COMP,OK")
             record_config_ack("FRIC_COMP", fric_ack)

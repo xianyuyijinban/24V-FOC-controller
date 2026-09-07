@@ -78,6 +78,13 @@ extern "C" {
 #define FOC_POS_INTEGRAL_LIMIT_A 0.10f  /* 直连位置环积分输出限幅 A */
 #define FOC_POS_LOOP_TS 0.005f          /* 位置环周期 200Hz */
 #define FOC_POS_INTEGRAL_ERR_RAD 0.035f /* 条件积分误差上限 rad(~2°)，大误差不积分避免加剧过冲 */
+/* 僵持积分逃逸 (CMD:POS_AW_ESC, 默认关; 2026-09-06 卡滞案, 岳翔宇批准锁定区改动):
+ * 静摩擦 > P+comp 满额交付时 err 同号僵持, AW1 回拉把积分钉在 0 → 永不积分 → 死锁
+ * (G2@126° 实测 err -4.70° 顶死, track 1-4%)。逃逸态暂停 AW 回拉并放开积分门。 */
+#define FOC_POS_AW_ESC_TRIG_RAD 0.0524f  /* 触发: |err|>3° 同号持续 ESC_TICKS */
+#define FOC_POS_AW_ESC_TICKS 400U        /* 触发计时 2.0s @200Hz */
+#define FOC_POS_AW_ESC_EXIT_RAD 0.0262f  /* 退出回差: |err|<1.5° */
+#define FOC_POS_AW_ESC_MAX_TICKS 2000U   /* 逃逸最长 10s 强制退出 (真卡死不绕限幅常驻) */
 #define FOC_FRIC_CMD_DIR_UPDATE_RAD 0.0002f /* 指令方向锁存更新阈值 rad(~0.01°) */
 #define FOC_FRIC_CMD_DIR_CLEAR_RAD 0.002f   /* 指令方向清除阈值 rad(~0.11°) */
 #define FOC_FRIC_CMD_DIR_HOLD_CNT 50U       /* 指令方向保持窗口 @200Hz=0.25s(>PC步进间隔0.2s, 保证补偿连续) */
@@ -390,6 +397,12 @@ typedef struct {
     uint16_t pos_cmd_dir_hold;      /* 指令方向保持计数 @200Hz (ref静止后仍保持, 防PC步进间歇清方向) */
     uint8_t  pos_loop_skip_integral;/* 1=本拍位置环只更新PD不积分 (PREF处理器手动即时拍用,
                                          防止PC PREF流率调制等效ki: 积分只允许200Hz TIM1拍) */
+    uint8_t  pos_aw_esc_en;         /* 僵持积分逃逸开关 (CMD:POS_AW_ESC, 默认0) */
+    uint8_t  pos_aw_esc_active;     /* 逃逸态: 暂停AW回拉+放开积分门; PDBBIN flags bit16 */
+    int8_t   pos_aw_esc_sign;       /* 触发时锚定的 err 符号 ±1 */
+    uint16_t pos_aw_esc_timer;      /* 触发计时 @200Hz (翻号/低于触发线清零) */
+    uint16_t pos_aw_esc_run_ticks;  /* 逃逸态计时 (FOC_POS_AW_ESC_MAX_TICKS 强制退出) */
+    uint16_t pos_aw_esc_count_diag; /* 逃逸触发累计 (JDIAG esc_n; CMD:POS_AW_ESC,1 时清零) */
 
     /* 前馈数据 */
     FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */

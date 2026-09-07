@@ -652,9 +652,11 @@ static void UART_CommandServicePosdbg(void)
         p.iq_act         = h->foc.Idq.q;
         p.v_mech_rad_s   = h->speed_mech;
         p.pos_ref_rad    = h->pos_ref;
-        /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04) */
+        /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
+         * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
         p.flags = ((uint32_t)h->state << 8) |
-                  ((uint32_t)h->fault_code & 0xFFU);
+                  ((uint32_t)h->fault_code & 0xFFU) |
+                  ((uint32_t)h->pos_aw_esc_active << 16);
         DebugStream_PushPdb(s_foc_tick_2khz, &p);
     }
     FOC_Profiler_End(FOC_PROBE_POSDBG, posdbg_start);
@@ -2026,6 +2028,31 @@ static void UART_CommandExecute(const char *cmd)
         char resp[80];
         (void)snprintf(resp, sizeof(resp), "POS_AW_MODE,OK,mode=%u,rate=%.3f\r\n",
                        (unsigned int)g_foc_app.pos_aw_mode, (double)g_foc_app.pos_aw_rate);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_AW_ESC,%u", &uint_arg) == 1) {
+        /* 僵持积分逃逸开关 (2026-09-06 卡滞案, 默认关): 1=开(清零计数) 0=关(逃逸态强制复位) */
+        if (uint_arg <= 1U) {
+            g_foc_app.pos_aw_esc_en = (uint8_t)uint_arg;
+            if (uint_arg != 0U) {
+                g_foc_app.pos_aw_esc_count_diag = 0U;   /* 开 = 新一轮实验, 计数清零 */
+            } else {
+                g_foc_app.pos_aw_esc_active = 0U;       /* 关 = 立即退出逃逸, AW 恢复 */
+                g_foc_app.pos_aw_esc_timer = 0U;
+            }
+            UART_CommandSendText("POS_AW_ESC,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_ESC,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:POS_AW_ESC?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp), "POS_AW_ESC,OK,en=%u,active=%u,count=%u\r\n",
+                       (unsigned int)g_foc_app.pos_aw_esc_en,
+                       (unsigned int)g_foc_app.pos_aw_esc_active,
+                       (unsigned int)g_foc_app.pos_aw_esc_count_diag);
         UART_CommandSendText(resp);
         return;
     }

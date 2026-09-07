@@ -177,6 +177,12 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     handle->pos_aw_mode = 1U;      /* 积分抗饱和律定版: 1=超阈值回拉 (2026-08-20 台架) */
     handle->pos_aw_rate = 0.03f;   /* 回拉速率定版 (0.5°/s 98.8%, 阶跃剩 3.5%) */
     handle->pos_aw_decay_diag = 0.0f;
+    handle->pos_aw_esc_en = 0U;          /* 僵持逃逸默认关 (锁定区改动 2026-09-06 岳翔宇批准) */
+    handle->pos_aw_esc_active = 0U;
+    handle->pos_aw_esc_sign = 0;
+    handle->pos_aw_esc_timer = 0U;
+    handle->pos_aw_esc_run_ticks = 0U;
+    handle->pos_aw_esc_count_diag = 0U;
     handle->pos_ref_prev = handle->pos_ref;
 
     /* 电压开环模式 (FOC_MODE_VOLTAGE) 初始化 */
@@ -1638,6 +1644,8 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         handle->pos_integral = 0.0f;
         handle->pos_cmd_dir = 0.0f;
         handle->pos_cmd_dir_hold = 0U;
+        handle->pos_aw_esc_active = 0U;  /* 逃逸态随积分复位 (count_diag 保留供 JDIAG 归因) */
+        handle->pos_aw_esc_timer = 0U;
     }
 
     /* 位置环（位置模式 或 电压闭环模式 且运行状态执行） */
@@ -1702,6 +1710,50 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
                 &handle->pos_pd_direct, pos_error, speed_mech_user_pos);
             uint8_t pd_sat = ((pd_out >= handle->pos_pd_direct.output_max) ||
                               (pd_out <= handle->pos_pd_direct.output_min)) ? 1U : 0U;
+            /* 僵持积分逃逸状态机 (CMD:POS_AW_ESC, 默认关; 2026-09-06 卡滞案,
+             * 岳翔宇批准锁定区改动): 静摩擦 > P+comp 满额交付时 err 同号僵持,
+             * AW1 以 3%/tick 把积分抽在 0 附近 → 永不积分 → 死锁。
+             * 触发: |err|>FOC_POS_AW_ESC_TRIG_RAD 同号持续 FOC_POS_AW_ESC_TICKS;
+             * 动作(见下): 暂停 AW 回拉 + 放开积分门 (pd_sat 冻结保留,
+             * ki_out ±FOC_POS_INTEGRAL_LIMIT_A 限幅不动);
+             * 退出(任一): |err|<EXIT 回差 / err 翻号(立即退, 错号积分交 AW1 回拉) /
+             * 10s 强制 (真机械卡死不绕限幅常驻, 退出后僵持重新计时)。 */
+            if (handle->pos_aw_esc_en != 0U) {
+                if (handle->pos_aw_esc_active == 0U) {
+                    if (fabsf(pos_error) > FOC_POS_AW_ESC_TRIG_RAD) {
+                        int8_t esc_s = (pos_error > 0.0f) ? 1 : -1;
+                        if ((handle->pos_aw_esc_timer == 0U) ||
+                            (esc_s != handle->pos_aw_esc_sign)) {
+                            handle->pos_aw_esc_sign = esc_s;   /* 起始/翻号重锚符号 */
+                            handle->pos_aw_esc_timer = 1U;
+                        } else if (handle->pos_aw_esc_timer < 0xFFFFU) {
+                            handle->pos_aw_esc_timer++;
+                        }
+                        if (handle->pos_aw_esc_timer >= FOC_POS_AW_ESC_TICKS) {
+                            handle->pos_aw_esc_active = 1U;
+                            handle->pos_aw_esc_timer = 0U;
+                            handle->pos_aw_esc_run_ticks = 0U;
+                            handle->pos_aw_esc_count_diag++;
+                        }
+                    } else {
+                        handle->pos_aw_esc_timer = 0U;      /* 低于触发线清零 */
+                    }
+                } else {
+                    int8_t esc_s = (pos_error > 0.0f) ? 1 : -1;
+                    if ((fabsf(pos_error) < FOC_POS_AW_ESC_EXIT_RAD) ||
+                        (esc_s != handle->pos_aw_esc_sign) ||
+                        (handle->pos_aw_esc_run_ticks >= FOC_POS_AW_ESC_MAX_TICKS)) {
+                        handle->pos_aw_esc_active = 0U;
+                        handle->pos_aw_esc_timer = 0U;
+                    } else if (handle->pos_aw_esc_run_ticks < 0xFFFFU) {
+                        handle->pos_aw_esc_run_ticks++;
+                    }
+                }
+            } else {
+                /* 开关关闭时强制复位 (防运行中关 ESC 后 AW 永久旁路) */
+                handle->pos_aw_esc_active = 0U;
+                handle->pos_aw_esc_timer = 0U;
+            }
             /* 积分律 (CMD:POS_AW_MODE):
              * 0=条件冻结 (旧): |err|<阈值 才积分, 超阈值冻结 → 死锁(实测 err 9.9°
              *   积分反向 -0.06A 顶住, 净力矩被抵消, 掉队锁定)
@@ -1709,7 +1761,7 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
              * 2=Clegg 过零复位: err 过零时积分清零 (描述函数相位 -90°→-38°)
              * 3=非对称泄放: 积分与误差反向时 4× 速率泄放, 同向正常充电 */
             float aw_decay = 0.0f;
-            if (handle->pos_aw_mode != 0U) {
+            if ((handle->pos_aw_mode != 0U) && (handle->pos_aw_esc_active == 0U)) {
                 if (handle->pos_aw_mode == 2U) {
                     /* Clegg: 误差过零复位 (用上一拍 err 符号检测过零) */
                     if ((handle->pos_integral != 0.0f) &&
@@ -1730,7 +1782,8 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
                 }
             }
             if ((handle->pos_loop_skip_integral == 0U) &&
-                (pd_sat == 0U) && (fabsf(pos_error) < handle->pos_integral_err_rad)) {
+                (pd_sat == 0U) && ((fabsf(pos_error) < handle->pos_integral_err_rad) ||
+                                   (handle->pos_aw_esc_active != 0U))) {
                 handle->pos_integral += pos_error * FOC_POS_LOOP_TS;
             }
             float ki_out = handle->pos_direct_ki * handle->pos_integral;

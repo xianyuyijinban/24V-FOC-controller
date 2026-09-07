@@ -29,7 +29,8 @@ extern "C" {
 typedef struct {
     uint8_t  seq;       /* 发射点递增, 丢帧定位核心 */
     uint32_t tick_2khz; /* 硬件时基 tick (t=tick/2000) */
-    uint32_t flags;     /* 次 8 位=state (bits 15:8), 低 8 位=fault_code (2026-09-04) */
+    uint32_t flags;     /* 次 8 位=state (bits 15:8), 低 8 位=fault_code (2026-09-04);
+                         * bit16=pos_aw_esc_active 僵持逃逸态 (2026-09-06) */
     float    pos_err_rad;   /* 位置误差 rad (control 帧, =文本 PDB p[1]) */
     float    iq_cmd;        /* FF 前位置环指令 A (= p[7]) */
     float    ff_total;      /* FF 层总注入 A (= p[9]) */

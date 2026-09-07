@@ -1695,7 +1695,7 @@ bool DrvUart_UploadJDiag(void)
         DrvUart_FormatFixed(cogPhaseText, sizeof(cogPhaseText),
                             g_foc_app.cogging_lut.phase_offset_rad * 180.0f / FOC_PI, 1U);
         len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
-                       "JDIAG,v6,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_bins=%u,cog_save=%u,cog_gain=%s,cog_phase=%s,cog_min=%s,cog_max=%s\r\n",
+                       "JDIAG,v7,J=%s,B=%s,Tc=%s,enc=%d,valid=0x%08lX,cog_valid=%u,cog_size=%u,cog_bins=%u,cog_save=%u,cog_gain=%s,cog_phase=%s,cog_min=%s,cog_max=%s,esc=%u,esc_n=%u\r\n",
                        jText, bText, tcText,
                        (int)g_foc_app.motor_param.encoder_dir,
                        (unsigned long)g_foc_app.motor_param.valid_flag,
@@ -1704,7 +1704,9 @@ bool DrvUart_UploadJDiag(void)
                        (unsigned)cog_nonzero,
                        (unsigned)g_foc_app.cogging_lut.save_attempted,
                        cogGainText, cogPhaseText,
-                       cogMinText, cogMaxText);
+                       cogMinText, cogMaxText,
+                       (unsigned)g_foc_app.pos_aw_esc_en,
+                       (unsigned)g_foc_app.pos_aw_esc_count_diag);
     }
 #else
     len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,

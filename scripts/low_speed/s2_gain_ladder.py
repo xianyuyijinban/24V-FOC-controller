@@ -266,6 +266,11 @@ def main():
         "fw_info": pre["fw_info"],
         "jdiag": pre["jdiag"],
         "ch_cfg": pre["ch_cfg"],
+        # raw 身份行必须入 meta (2026-09-07 实证: 缺失 → validator V1 三连 FAIL;
+        # verify 脚本一直带, ladder 漏 — 9/5 起 8 份 ladder JSON 身份链均不完整)
+        "fw_raw": pre["fw_raw"],
+        "jdiag_raw": pre["jdiag_raw"],
+        "ch_raw": pre["ch_raw"],
         "dt_enabled": False,
         "dt_cmd_sent": dt_cmd_sent,
         "dt_ack": dt_ack,
@@ -465,11 +470,15 @@ def main():
     # 2026-09-06 实测: COG_CFG? 后紧跟 FRIC_COMP 偶发丢响应 (手测复现 1 次,
     #   单发 5/5 过) — 每条 config expect 带 2 次重试
     def expect_retry(cmd, prefix, timeout=3.0, tries=2):
+        """成功返回响应原文 (config_ack 证据链必须是行, 不是布尔 — 2026-09-07
+        validator 实证: FRIC_COMP=[True] 存布尔不构成身份证据), 失败 None。"""
+        ack = None
         for i in range(tries):
-            if expect(cmd, prefix, timeout=timeout):
-                return True
+            ack = expect(cmd, prefix, timeout=timeout)
+            if ack:
+                return ack
             time.sleep(0.2)
-        return False
+        return ack
 
     init_ok = False
     for iatt in range(3):

@@ -35,13 +35,15 @@ def valid_meta():
         "dt_status": "DT,OK,en=0,amp_mV=0,comp=0",
         "n_coexist": True,   # 真实 ladder/verify: N 帧共存 (P1/P2 仲裁 ~21-24Hz)
         "config_ack": {
-            "UNLOCK": ["UNLOCK,OK"],
-            "POS_DIRECT": ["POS_DIRECT,OK"],
-            "COG_CFG": ["COG_CFG,OK"],
+            # ack 必须存响应原文 (2026-09-07 实证: expect_retry 存布尔 →
+            # FRIC_COMP=[True] 不构成身份证据); COG_CFG 无 OK 字样 (uart_upload.c:1743)
+            "UNLOCK": ["UNLOCK,OK,1"],
+            "POS_DIRECT": ["POS_DIRECT,OK,1"],
+            "COG_CFG": ["COG_CFG,gain=0.000,phase_deg=60.0"],
             "FRIC_COMP": ["FRIC_COMP,OK"],
             "POS_AW_MODE": ["POS_AW_MODE,OK"],
             "MODE": ["MODE,OK"],
-            "ENABLE": ["ENABLE,OK"],
+            "ENABLE": ["ENABLE,OK,1"],
         },
     }
 

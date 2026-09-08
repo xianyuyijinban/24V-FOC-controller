@@ -143,7 +143,9 @@ def _validate_meta(doc, errors):
     required_acks = {
         "UNLOCK": "UNLOCK,OK",
         "POS_DIRECT": "POS_DIRECT,OK",
-        "COG_CFG": "COG_CFG,OK",
+        # 固件 COG_CFG? 响应 = "COG_CFG,gain=..,phase_deg=.." (uart_upload.c:1743),
+        # 无 OK 字样 — 与脚本 6b39739 同口径 (2026-09-07 实证: OK 前缀永远 FAIL)
+        "COG_CFG": "COG_CFG,gain=",
         "FRIC_COMP": "FRIC_COMP,OK",
         "POS_AW_MODE": "POS_AW_MODE,OK",
         "MODE": "MODE,OK",

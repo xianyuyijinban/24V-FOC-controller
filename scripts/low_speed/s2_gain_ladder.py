@@ -435,9 +435,11 @@ def main():
         if health["bad_fault"] > 0:
             raise SystemExit("HEALTH FAIL run=%s: fault!=0 ×%d"
                              % (runid, health["bad_fault"]))
-        # seq_gap: N 共存容忍 ≤2 (F1 仲裁投影候选) — 判定留给 validator + loci
-        # (2026-09-06 Kimi 补救规格: 位置归因先于杀 run; 成簇/超容忍仍当场杀)
-        gap_seen = max(health["seq_gap"], health["parser_seq_gap"])
+        # seq_gap: N 共存容忍 ≤2, 与 validator 同源 (每轮 scope_loci 切片计数,
+        #   非 run 级累计 — 010815 实证: 三轮各 1 帧 → run 级累计 3 被 watch 杀,
+        #   validator 口径却是每轮 ≤2+loci; 固件 tx_p1_drop=0 证明丢帧在主机侧
+        #   RX 抖动, 数据本体无损, 判定留给 validator+loci)
+        gap_seen = len(health["seq_gap_loci"][health["scope_loci_base"]:])
         if gap_seen > 2:
             raise SystemExit("HEALTH FAIL run=%s: seq_gap ×%d > 容忍2 (N共存)"
                              % (runid, gap_seen))
@@ -495,6 +497,10 @@ def main():
 
     init_ok = False
     for iatt in range(3):
+        # 全部 ack 预置 None: POS_DIRECT 首试丢响应时重试打印不炸
+        # (2026-09-08 实证: UnboundLocalError cog_ack, 台架 G2-ESC 首跑即崩)
+        unlock_ack = pos_direct_ack = cog_ack = None
+        fric_ack = aw_ack = mode_ack = None
         unlock_ack = expect("CMD:UNLOCK,1", "UNLOCK,OK", timeout=3.0)
         record_config_ack("UNLOCK", unlock_ack)
         pos_direct_ack = expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK", timeout=3.0)
@@ -835,6 +841,13 @@ def main():
         out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "s2_gain_ladder_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
         meta = dict(run_meta)
+        # run 级健康快照入 meta (090952 实证: r0 中途杀时 results 空,
+        #   loci 只在 health dict — 无落盘则超容忍 abort 无法归因)
+        meta["run_health"] = {
+            "seq_gap_loci": list(health["seq_gap_loci"]),
+            "esc_active_frames": health["esc_active_frames"],
+            "tick_stall": health["tick_stall"],
+        }
         with open(out, "w", encoding="utf-8") as f:
             json.dump({"schema": "s2_gain_ladder.v2", "args": vars(args),
                        "run_status": {"valid": run_completed,

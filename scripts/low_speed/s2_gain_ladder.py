@@ -435,14 +435,12 @@ def main():
         if health["bad_fault"] > 0:
             raise SystemExit("HEALTH FAIL run=%s: fault!=0 ×%d"
                              % (runid, health["bad_fault"]))
-        # seq_gap: N 共存容忍 ≤2, 与 validator 同源 (每轮 scope_loci 切片计数,
-        #   非 run 级累计 — 010815 实证: 三轮各 1 帧 → run 级累计 3 被 watch 杀,
-        #   validator 口径却是每轮 ≤2+loci; 固件 tx_p1_drop=0 证明丢帧在主机侧
-        #   RX 抖动, 数据本体无损, 判定留给 validator+loci)
-        gap_seen = len(health["seq_gap_loci"][health["scope_loci_base"]:])
-        if gap_seen > 2:
-            raise SystemExit("HEALTH FAIL run=%s: seq_gap ×%d > 容忍2 (N共存)"
-                             % (runid, gap_seen))
+        # seq_gap 不当场杀 (2026-09-09): 固件 tx_p1_drop=0 证明丢帧在主机侧 RX
+        # 抖动, 数据本体无损 (CRC=0); loci 已全局记录, 判定完全交给 validator
+        # (每轮 ≤2+归因)。watch 只保留对数据本体致命的项: 静默/state/fault/
+        # crc/tick_stall。012849 实证: r2 同相成簇 3 帧 (真拥塞) 与 r1 跨轮散布
+        # (RX 抖动) 在 watch 层无法区分, 强行判 = 口径发明 — 归因材料齐全留给
+        # validator 裁。
         if health["crc_err"] > 0:
             raise SystemExit("HEALTH FAIL run=%s: PDB CRC error ×%d" % (runid, health["crc_err"]))
         if health["tick_stall"] > 0:

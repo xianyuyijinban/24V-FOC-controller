@@ -32,7 +32,7 @@ if (-not $SkipGitCheck) {
     # a) diff working tree vs commit over build inputs (covers staged+unstaged)
     git diff --quiet $Commit -- $BuildInputs
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "FAIL: build inputs differ from $Commit:" -ForegroundColor Red
+        Write-Host "FAIL: build inputs differ from ${Commit}:" -ForegroundColor Red
         git diff --stat $Commit -- $BuildInputs | Write-Host
         exit 1
     }

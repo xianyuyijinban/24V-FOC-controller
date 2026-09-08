@@ -33,6 +33,16 @@ DEG2RAD = math.pi / 180.0
 FOC_STATE_RUNNING = 4
 
 
+def parse_status_fields(line):
+    """Parse comma-separated k=v fields after a protocol status prefix."""
+    fields = {}
+    for field in line.split(","):
+        if "=" in field:
+            key, value = field.split("=", 1)
+            fields[key] = value
+    return fields
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="COM10")

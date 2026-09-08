@@ -115,6 +115,9 @@ def main():
                     help="档位过滤 (逗号分隔, 如 G1,G2; 默认全跑)")
     ap.add_argument("--ki-retry", type=int, default=3,
                     help="GAIN/KI 命令重试次数 (reader 瞬断/挤占恢复, 每次重发)")
+    ap.add_argument("--esc", action="store_true",
+                    help="开启僵持积分逃逸 CMD:POS_AW_ESC,1 (默认关; ESC 轮断言 "
+                         "esc_count>0, 无触发=数据无法归因 → invalid)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: --power-ok")
@@ -277,6 +280,7 @@ def main():
         "dt_status": dt_status,
         "config_ack": {},
         "n_coexist": True,   # N 帧共存 (PDBBIN P1 与 N 帧 P2 仲裁, ~20-24Hz; 见 verify)
+        "esc_enabled": bool(args.esc),   # 僵持积分逃逸 (CMD:POS_AW_ESC, 默认关)
     }
 
     def expect2(cmd, prefix, timeout=5.0):
@@ -318,6 +322,8 @@ def main():
         "scope_seq_gap_base": 0, "scope_crc_err_base": 0,
         "run_seq_gap_base": 0, "run_crc_err_base": 0,
         "seq_gap_loci": [],   # [(tick_2khz, phase)] — 全局层记录 (同源, 2026-09-06)
+        "esc_frames": 0,      # scope 内帧数 (ESC 观测分母)
+        "esc_active_frames": 0,   # flags bit16=1 帧数 (pos_aw_esc_active 逃逸态)
     }
     phase_tag = ["init"]   # 当前阶段标记 (gap 归因用)
 
@@ -359,6 +365,10 @@ def main():
             health["bad_state"] += 1
         if fault:
             health["bad_fault"] += 1
+        # ESC 观测链 (2026-09-07): flags bit16 = pos_aw_esc_active (it.c:659)
+        health["esc_frames"] += 1
+        if (s.flags >> 16) & 1:
+            health["esc_active_frames"] += 1
 
     def on_line(line):
         l = line.strip()
@@ -387,6 +397,7 @@ def main():
             "scope_seq_gap_base": stats.seq_gap,
             "scope_crc_err_base": stats.crc_err,
             "scope_loci_base": len(health["seq_gap_loci"]),   # loci 切片起点
+            "esc_frames": 0, "esc_active_frames": 0,
         })
 
     def reader():
@@ -464,6 +475,8 @@ def main():
                             health["run_crc_err_base"]),
             "sample_rate_hz": round(sample_rate, 1) if sample_rate is not None else None,
             "seq_gap_loci": scope_loci,
+            "esc_frames": health["esc_frames"],
+            "esc_active_frames": health["esc_active_frames"],
         }
 
     # 配置 (电压模式 S2) — 整体重试 ≤3 次 (初始化读超时/reader 残留, 非真失败)
@@ -520,6 +533,23 @@ def main():
         send("CMD:CLEAR_FAULT", 0.8)
     if not en_ok:
         print("ENABLE fail"); ser.close(); return 1
+
+    # 僵持积分逃逸 (2026-09-07): --esc 时开 (enable 前不碰电机动态), 命令+回读双确认。
+    # POS_AW_ESC,1 同时清零 count_diag → 每轮 count=本轮逃逸次数, 可归因。
+    esc_confirmed = not args.esc
+    if args.esc:
+        esc_ack = expect_retry("CMD:POS_AW_ESC,1", "POS_AW_ESC,OK", tries=3)
+        record_config_ack("POS_AW_ESC", esc_ack)
+        esc_q = _query("CMD:POS_AW_ESC?", 1.5)
+        esc_state = next((l for l in esc_q if l.startswith("POS_AW_ESC,OK,en=1")), None)
+        record_config_ack("POS_AW_ESC_Q", esc_state)
+        esc_confirmed = bool(esc_ack) and esc_state is not None
+        if not esc_confirmed:
+            print("ESC enable 未确认 (ack=%r q=%r), 停止" % (esc_ack, esc_state))
+            ser.write(b"CMD:POS_AW_ESC,0\n")   # 兜底关闭, 不带病续跑
+            ser.close()
+            return 1
+        print("ESC: enabled (count 清零)")
     ser.write(b"CMD:ON\n")
     time.sleep(0.4)
     ser.reset_input_buffer()
@@ -596,6 +626,16 @@ def main():
                     resp_tail = resp_q[-15:]
                     print("KI fail resp_tail=%r" % (resp_tail,))
                     raise SystemExit(1)
+
+                # ── ESC 轮级观测 (2026-09-07): 轮初/轮末 count 差 = 本轮逃逸次数 ──
+                esc_count0 = None
+                esc_count1 = None
+                esc_active_end = None
+                if args.esc:
+                    l0 = expect2("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
+                    f0 = parse_status_fields(l0) if l0 else {}
+                    esc_count0 = int(f0["count"]) if f0.get("count", "").isdigit() else None
+                    round_acks.setdefault("POS_AW_ESC_Q", []).append(l0)
 
                 # ── 静止阶跃 +6° (从 a0 静止发) — t95 重定义 (恢复规划 #50) ──
                 # 旧 t95 缺陷: 首帧 |err|<0.1° 即达标 (阶跃未生效/旧帧), 12:09 轮0
@@ -709,6 +749,26 @@ def main():
                        ("%.2fs" % (t_leave - t_cmd)) if t_leave is not None else "N/A",
                        ("%.0f%%" % track) if track else "N/A",
                        ("%.2f°" % lc_pp_deg) if lc_pp_deg else "N/A", len(traj)), flush=True)
+                if args.esc:
+                    l1 = expect2("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
+                    f1 = parse_status_fields(l1) if l1 else {}
+                    esc_count1 = (int(f1["count"])
+                                  if f1.get("count", "").isdigit() else None)
+                    esc_active_end = f1.get("active")
+                    round_acks.setdefault("POS_AW_ESC_Q", []).append(l1)
+                    # ESC 轮断言 (Kimi 规格): count 差>0 = 逃逸确实触发过, 数据可归因;
+                    # count 差 0 → 该轮数据无法归因 (ESC 没触发=测的是旧行为) → invalid
+                    esc_delta = (esc_count1 - esc_count0
+                                 if esc_count1 is not None and esc_count0 is not None
+                                 else None)
+                    if esc_delta is None or esc_delta <= 0:
+                        print("ESC FAIL %s 轮%d: esc_count %s→%s 无触发 — "
+                              "数据无法归因, run invalid" %
+                              (gname, rnd, esc_count0, esc_count1), flush=True)
+                        raise SystemExit(1)
+                    print("ESC: count %d→%d (delta=%d) active_end=%s" %
+                          (esc_count0, esc_count1, esc_delta, esc_active_end),
+                          flush=True)
                 results.append({
                     "gain": gname, "kp": kp, "kd": kd, "ki": ki,
                     "round": rnd, "ts": ts, "backlog": backlog,
@@ -736,6 +796,10 @@ def main():
                     if t_settle_0p1_deg is not None else None,
                     "track_pct": round(track, 1) if track else None,
                     "limit_cycle_pp_deg": round(lc_pp_deg, 4) if lc_pp_deg is not None else None,
+                    "esc_count_delta": (esc_count1 - esc_count0)
+                    if args.esc and esc_count1 is not None
+                    and esc_count0 is not None else None,
+                    "esc_active_end": esc_active_end if args.esc else None,
                     "pdb_n": len(traj),
                     "theta_traj": [(round(r[0], 3), round(r[5] / DEG2RAD, 4)) for r in traj[::8]],
                     "poserr_traj": [(round(r[0], 3), round(r[3] / DEG2RAD, 4), round(r[4], 5))
@@ -758,6 +822,8 @@ def main():
     finally:
         stop[0] = True
         time.sleep(0.3)
+        ser.write(b"CMD:POS_AW_ESC,0\n")   # 兜底: 掉链即关 ESC, 恢复旧行为 (Kimi 兜底规格)
+        time.sleep(0.2)
         ser.write(b"CMD:VOLT_OFF\n")
         send("CMD:OFF")
         send("CMD:MODE,0")

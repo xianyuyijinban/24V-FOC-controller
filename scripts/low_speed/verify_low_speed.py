@@ -48,6 +48,9 @@ def main():
                     help="COG LUT 增益 (默认0=固件定版OFF; 覆盖会改默认行为)")
     ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")
     ap.add_argument("--reps", type=int, default=1, help="斜坡+阶跃+稳态 重复轮数 (回归 ×2)")
+    ap.add_argument("--esc", action="store_true",
+                    help="开启僵持积分逃逸 CMD:POS_AW_ESC,1 (惰性证明轮: 断言 "
+                         "esc_count==0, >0 即 fail — 方向与 ladder 相反)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: need --power-ok")
@@ -197,6 +200,23 @@ def main():
         ser.close()
         return 1
     config_ack["ENABLE"] = True
+
+    # 僵持积分逃逸 (2026-09-07): --esc 时开 + 回读确认; verify 断言方向 = count==0
+    esc_confirmed = not args.esc
+    if args.esc:
+        esc_ack = expect("CMD:POS_AW_ESC,1", "POS_AW_ESC,OK")
+        config_ack["POS_AW_ESC"] = esc_ack
+        esc_q = _query("CMD:POS_AW_ESC?", 2.0)
+        esc_state = next((l for l in esc_q if l.startswith("POS_AW_ESC,OK,en=1")), None)
+        config_ack["POS_AW_ESC_Q"] = esc_state
+        esc_confirmed = bool(esc_ack) and esc_state is not None
+        if not esc_confirmed:
+            print("ESC enable 未确认 (ack=%r q=%r), 停止" % (esc_ack, esc_state))
+            ser.write(b"CMD:POS_AW_ESC,0\n")
+            ser.close()
+            return 1
+        print("ESC: enabled (count 清零)")
+
     # 恢复 N 帧 (预清理 CMD:OFF 关掉了主遥测)
     ser.write(b"CMD:ON\n")
     time.sleep(0.3)
@@ -226,6 +246,7 @@ def main():
     # ── reader 线程 (PDBBIN + N帧) — 此后主线程不得直读串口 (家族 segfault 教训) ──
     pdb_rows = []    # (hrx, tick, flags, pos_err, iq_cmd, theta_user_rad, ff_total, iq_act)
     nframe_q = []    # (hrx, p1, p3_ang_deg, p6_iq, p8_fault, p2_state)
+    resp_q = []      # reader 填充的文本响应行 (ESC count 查询用, 同 ladder)
     stop = [False]
     phase_tag = ["init"]   # 当前阶段标记 (on_pdb 归因 gap 位置用, list 可变共享)
     health = {       # 逐帧健康摘要 (2026-09-06 #52, 同 ladder 标准)
@@ -254,6 +275,9 @@ def main():
 
     def on_line(line):
         l = line.strip()
+        resp_q.append(l)   # reader 后 expect_q 查询用 (ESC count 等)
+        while len(resp_q) > 2000:
+            del resp_q[0:1000]
         if l.startswith("N,"):
             p = l.split(",")
             if len(p) >= 21:
@@ -285,6 +309,18 @@ def main():
                 if time.time() - f[0] < 0.3:
                     return f[2]
             time.sleep(0.02)
+        return None
+
+    def expect_q(cmd, prefix, timeout=2.0):
+        """reader 启动后的 expect: 走 resp_q (线程安全), 不直读串口 (家族教训)。"""
+        resp_q.clear()
+        ser.write((cmd + "\n").encode())
+        dl = time.time() + timeout
+        while time.time() < dl:
+            for l in resp_q:
+                if l.startswith(prefix):
+                    return l
+            time.sleep(0.005)
         return None
 
     # 开 PDBBIN 后再启 reader (二进制帧由 parser 消化, 不乱文本行)
@@ -350,6 +386,7 @@ def main():
         return " ".join(out)
 
     results = {"reps": []}
+    run_error = None
     try:
         for rep in range(args.reps):
             rep_res = {}
@@ -366,6 +403,12 @@ def main():
             rb = len(pdb_rows)
             # rep 起点 health 快照 (2026-09-06 #52: 本 rep 期间的差值)
             hp0 = dict(health)   # 快照 (含 pdb_n/seq_gap/bad_state/bad_fault)
+            # ESC 惰性证明 (2026-09-07): rep 起点 count 快照
+            esc_c0 = None
+            if args.esc:
+                lq = expect_q("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
+                fq = parse_status_fields(lq) if lq else {}
+                esc_c0 = int(fq["count"]) if fq.get("count", "").isdigit() else None
             print("\n=== rep%d 斜坡 +%.1f° @%.1f°/s (dur=%.1fs) ===" %
                   (rep + 1, step, ramp_s, dur), flush=True)
             while time.time() - t0 < dur + 3.0:
@@ -474,10 +517,26 @@ def main():
                 "seq_gap_loci": health["seq_gap_loci"][hp0.get("_loci_n", 0):],
             }
             health["_loci_n"] = len(health["seq_gap_loci"])   # 下 rep 起点
+            # ESC 惰性断言 (2026-09-07, 方向与 ladder 相反): count 必须不变。
+            # 电流模式全场景 err 离 3° 触发线 4 倍裕量 → 任何触发 = 惰性破坏 = fail
+            if args.esc:
+                lq = expect_q("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
+                fq = parse_status_fields(lq) if lq else {}
+                esc_c1 = int(fq["count"]) if fq.get("count", "").isdigit() else None
+                if esc_c1 is None or esc_c0 is None or esc_c1 != esc_c0:
+                    print("ESC FAIL rep%d: count %s→%s 变化 — 惰性破坏, fail" %
+                          (rep + 1, esc_c0, esc_c1), flush=True)
+                    rep_res["esc_violation"] = True
+                    raise RuntimeError("ESC count changed in current-mode verify")
+                rep_res["esc_count"] = esc_c1
             results["reps"].append(rep_res)
+    except (RuntimeError, SystemExit) as exc:
+        run_error = str(exc)
+        print("RUN ABORT: %s" % run_error, flush=True)   # 数据带回: JSON 照落 (run_status invalid)
     finally:
         stop[0] = True
         time.sleep(0.3)
+        ser.write(b"CMD:POS_AW_ESC,0\n")   # 兜底: 掉链即关 ESC (Kimi 兜底规格)
         ser.write(b"CMD:PDBBIN,0\n")   # 缺 \n 命令不进解析器 → 电机保持使能 (Kimi 2026-09-05)
         ser.write(b"CMD:STOP\n")
         ser.write(b"CMD:CLEAR_FAULT\n")
@@ -496,9 +555,11 @@ def main():
                 "config_ack": config_ack,
                 # N 帧共存: PDBBIN P1 与 N 帧 P2 仲裁, 实测 ~20-24Hz (8/31 TX 泵
                 #   专项一致); validator mode-aware rate 用 (2026-09-06 Kimi)
-                "n_coexist": True}
+                "n_coexist": True,
+                "esc_enabled": bool(args.esc)}
     doc = {"schema": "verify_low_speed.v2",
-           "run_status": {"valid": bool(pre != 1)},
+           "run_status": {"valid": bool(pre != 1 and run_error is None),
+                          "abort_reason": run_error},
            "args": vars(args), "meta": meta, "results": results}
     with open(out, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)

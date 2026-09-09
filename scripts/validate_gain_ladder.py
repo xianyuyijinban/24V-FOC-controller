@@ -202,8 +202,8 @@ def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE,
                 if not isinstance(loci, list) or len(loci) != int(value):
                     errors.append("V4 FAIL: %s seq_gap=%d 但 seq_gap_loci 缺失/长度"
                                   "不符 — 无归因不容忍" % (label, value))
-                # gap>2 → 固件 TX 丢帧真值裁决 (2026-09-09 Kimi A 规格)
-                _validate_gap_delta(health, label, int(value), errors, warns or [])
+            # gap>2 → 固件 TX 丢帧真值裁决 (2026-09-09 Kimi A 规格, 与 loci 检查并列)
+            _validate_gap_delta(health, label, int(value), errors, warns or [])
         elif key != "pdb_n" and value != 0:
             errors.append("V4 FAIL: %s health.%s=%s" % (label, key, health[key]))
 
@@ -396,8 +396,10 @@ def _validate_verify(doc, errors, warns):
                     errors.append("V4 FAIL: %s health.%s 缺失/非数值" % (label, key))
                 elif key == "seq_gap":
                     if val > gap_tol:
-                        errors.append("V4 FAIL: %s health.seq_gap=%s > 容忍%d (N共存)"
-                                      % (label, h.get(key), gap_tol))
+                        # 超容忍不直接 FAIL — 由 tx_p1_drop_delta 三分支裁决
+                        # (2026-09-09 Kimi A 规格): delta=0 → WARN (主机侧 RX,
+                        # 归因齐); delta>0/缺失 → FAIL。原双罚实现让 delta=0
+                        # 的 WARN 永远伴生 FAIL, 三分支形同虚设 (084215 实证)。
                         _validate_gap_delta(h, label, int(val), errors, warns)
                     elif val > 0:
                         loci = h.get("seq_gap_loci")

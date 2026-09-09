@@ -141,16 +141,28 @@ def main():
 
     # ── fail-closed 预检 (2026-09-06 恢复规划 #52, 同 ladder 标准): FW_INFO/JDIAG/CH_CFG ──
     def _precheck():
-        lines = _query("CMD:FW_INFO?", 2.0)
-        fw = next((l for l in lines if l.startswith("FW_INFO,")), None)
+        # FW_INFO 带重试 (响应丢失家族: 上 run 遗留 PDB 流活跃时单发被挤掉,
+        # 2026-09-09 台架实证两连 FAIL, 手动清流后秒回)
+        fw = None
+        for _ in range(3):
+            lines = _query("CMD:FW_INFO?", 2.0)
+            fw = next((l for l in lines if l.startswith("FW_INFO,")), None)
+            if fw is not None:
+                break
+            time.sleep(0.3)
         if fw is None:
             print("PRECHECK FAIL: FW_INFO 无响应"); ser.close(); return 1
         fw_ver = dict(kv.split("=", 1) for kv in fw.split(",")[2:] if "=" in kv)
         if "version" not in fw_ver:
             print("PRECHECK FAIL: FW_INFO 缺 version"); ser.close(); return 1
 
-        lines = _query("CMD:JDIAG", 2.0)
-        jd = next((l for l in lines if l.startswith("JDIAG,")), None)
+        jd = None
+        for _ in range(3):
+            lines = _query("CMD:JDIAG", 2.0)
+            jd = next((l for l in lines if l.startswith("JDIAG,")), None)
+            if jd is not None:
+                break
+            time.sleep(0.3)
         if jd is None:
             print("PRECHECK FAIL: JDIAG 无响应"); ser.close(); return 1
         jd_map = {}
@@ -162,8 +174,13 @@ def main():
             if req not in jd_map:
                 print("PRECHECK FAIL: JDIAG 缺 %s" % req); ser.close(); return 1
 
-        lines = _query("CMD:CH_CFG?", 2.0)
-        cc = next((l for l in lines if l.startswith("CH_CFG,")), None)
+        cc = None
+        for _ in range(2):
+            lines = _query("CMD:CH_CFG?", 2.0)
+            cc = next((l for l in lines if l.startswith("CH_CFG,")), None)
+            if cc is not None:
+                break
+            time.sleep(0.3)
         cc_map = None
         if cc is None:
             print("PRECHECK WARN: CH_CFG 无响应 (记录, 不中止)")

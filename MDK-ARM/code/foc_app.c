@@ -599,11 +599,15 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 exit_cycle:
     ADC_Sampling_EndControlCycle();
     /* TRIG ring 采样 (③): 20kHz 原速 O(1) 写, 控制循环末尾全部字段就绪。
-     * Idq/Vdq 在 RUNNING 前 (无控制输出拍) 是旧值/0 — 照实记录, 验尸口径。 */
+     * Idq/Vdq 在 RUNNING 前 (无控制输出拍) 是旧值/0 — 照实记录, 验尸口径。
+     * 独立 20kHz 时基: control_count 在 IDLE 态被提前 goto 跳过 (恒 0),
+     * 验尸帧 tick 需全态递增计数 — TrigRing 内部 tick, 不动 control_count
+     * 语义 (Rs 在线估计 %40 相位依赖它)。 */
+    TrigRing_TickTick();
     TrigRing_Sample(handle->foc.Idq.d, handle->foc.Idq.q,
                     handle->foc.Vdq.d, handle->foc.Vdq.q,
                     handle->foc.theta_elec, handle->Iq_ref,
-                    handle->control_count);
+                    TrigRing_GetTick());
     FOC_App_PushCurrentStream(handle);
 }
 

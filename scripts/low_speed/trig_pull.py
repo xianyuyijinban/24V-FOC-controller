@@ -39,8 +39,10 @@ def crc16_ccitt(data):
 
 
 class TrigPuller:
-    def __init__(self, port, baud=1000000):
-        self.ser = serial.Serial(port, baud, timeout=0.05)
+    def __init__(self, port=None, baud=1000000, ser=None):
+        """ser 传入已开串口则复用 (bench 共口); 否则自开 port。"""
+        self.ser = ser if ser is not None else serial.Serial(port, baud, timeout=0.05)
+        self._own = ser is None
         self.frames = []
         self.blocks_ok = 0
         self.blocks_crc_fail = []
@@ -130,7 +132,8 @@ class TrigPuller:
         assert len(self.frames) == TRIG_RING_SIZE
 
     def close(self):
-        self.ser.close()
+        if self._own:
+            self.ser.close()
 
     def frame_dict(self, i):
         f = self.frames[i]

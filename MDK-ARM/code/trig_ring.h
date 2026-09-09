@@ -81,6 +81,11 @@ uint32_t TrigRing_GetPostCount(void);   /* 已采 post 帧数 (FROZEN=TRIG_POST_
  *       即帧 0 = 触发前 768 帧, 帧 767 = 触发前一帧, 帧 768 = 触发帧。 */
 uint16_t TrigRing_Pull(uint16_t off, uint16_t len, uint8_t *out_buf);
 
+/* 独立 20kHz 时基 (IDLE 态也递增 — control_count 在非 RUNNING 拍被跳过,
+ * 无法作验尸时基); ISR 每拍调一次, Sample 用 GetTick() 取值。 */
+void TrigRing_TickTick(void);
+uint32_t TrigRing_GetTick(void);
+
 /* 复位 (CMD:TRIG,CLR): 任意态 → IDLE, 重新滚动可再触发 */
 void TrigRing_Clear(void);
 

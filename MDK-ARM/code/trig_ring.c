@@ -13,6 +13,7 @@ static volatile uint32_t s_write_idx = 0U;      /* 滚动写指针 (IDLE 态推�
 static volatile uint32_t s_trig_idx = 0U;       /* 触发帧的 ring 索引 (触发即锁存) */
 static volatile uint32_t s_trig_tick = 0U;      /* 触发帧 tick (锁存) */
 static volatile uint32_t s_post_count = 0U;     /* post 段已采帧数 */
+static volatile uint32_t s_tick_20k = 0U;       /* 独立 20kHz 时基 (全态递增) */
 
 void TrigRing_Init(void)
 {
@@ -22,6 +23,17 @@ void TrigRing_Init(void)
     s_trig_idx = 0U;
     s_trig_tick = 0U;
     s_post_count = 0U;
+    s_tick_20k = 0U;
+}
+
+void TrigRing_TickTick(void)
+{
+    s_tick_20k++;
+}
+
+uint32_t TrigRing_GetTick(void)
+{
+    return s_tick_20k;
 }
 
 uint16_t TrigRing_CRC16(const uint8_t *data, uint32_t len)

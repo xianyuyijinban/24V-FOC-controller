@@ -1,5 +1,42 @@
 # PROGRESS
 
+## [2026-09-09] AI 链路协议增量 ③: TRIG 故障触发 ring buffer — 完成闭环
+
+- 落码 09e2379 + 4e6773c + 777d636 + b7e9f1d (四笔, 台架三轮实证驱动):
+  trig_ring.c/h 2048 槽 × 28B = 56KB ZI; 20kHz 电流环 ISR 原速 O(1) 单写者
+  (任务卡"2kHz"为笔误 — FOC_CONTROL_FREQ=20000); 验尸窗 pre 768 + 触发帧 1
+  + post 256 = 1025 帧 (51.25ms)。触发源: fault 闩锁/state 掉 RUNNING
+  (MainLoop 监视) + CMD:TRIG,NOW。命令族 TRIG,NOW/STAT?/PULL,off,len/CLR,
+  拉取 32 帧/块 CRC16-CCITT-FALSE 逐块验, PDBBIN 拉取期间暂停。
+- 台架实证驱动三修:
+  (a) 4e6773c 时基 — trig_tick=0 实证 control_count 在 IDLE 态被 exit_cycle
+      提前 goto 跳过 (恒 0), 加独立 s_tick_20k 全态递增;
+  (b) 777d636 溢栈 — PULL 单块 128 帧处理中板死 hard fault (栈上 pullbuf
+      258B vs TrigRing_Pull 写 3586B), 板须重烧恢复; 单块上限 32 帧
+      (896B+头+CRC < TX ring 1024B);
+  (c) b7e9f1d 环形几何 — 1024 槽时 post 末帧恰好覆写 pre 首帧
+      (trig_idx+256 ≡ trig_idx-768 mod 1024), 帧 0 tick=1426511=post 末帧
+      实证; 扩 2048 槽后 pre 段完整。
+- 解析端: trig_pull.py (32 帧/块 ×32, CRC 逐块验, tick 连续性, JSON 入库);
+  单测 test_trig_pull 5/5 (CRC 标准向量 0x29B1/帧打包/重组/坏块/pre-post
+  环形映射)。
+- 合成验尸 (trig_bench_20260909_213057.json, 板=b7e9f1d, 原文数值):
+  TRIG,NOW → FROZEN state=2,src=2,trig_tick=1097191,post=256; 32 块 CRC
+  全过 0.51s; tick 断点 0/1023; 帧 768 tick=1097191=trig_tick (768/256
+  精确); pre tick 1096423..1097190 / post 1097192..1097446;
+  LOOP_PROF CURRENT_PATH idle max_cyc=1298 (2.704us) vs frozen max_cyc=1094
+  (2.279us) — 20kHz 拍预算 50us 占 5.4% 无 jitter 越界; CLR 再触发 OK。
+- 真 fault 验尸 (岳翔宇裁定: 电压模式 Vq 阶梯爬流, E1 案 9/3 波形;
+  trig_fault_bench_20260909_223202.json, 原文数值): 爬流 400→2800mV
+  iq_est 48→337mA 线性 (Rs 8.8 线线口径自洽); **过流物理不可达如实入账**
+  — vq_ramped 0.05V/s 被 Vbus/√3 (6.9V) 总限幅封顶 → 真实电流 0.78A <
+  软限幅 2.4A < 过流阈 3.0A; 末端手动触发 (src=2), 验尸窗 iq_absmax=
+  0.0726A, 32 块 CRC 全过 tick 断点 0; 恢复链 VOLT_OFF/ENABLE,0/
+  CLEAR_FAULT/MODE,0 全过。fault 触发路径与手动共用 TrigRing_Trigger
+  入口, 真实过流现场验证留运行期。
+- RAM/实时性 (任务卡要求, 数据进验收 JSON): ZI 41084→98436 (+57KB, ring
+  56KB), CURRENT_PATH jitter 对比见上 (触发/冻结均无越界)。
+
 ## [2026-09-09] AI 链路协议增量 ②: EVT 事件帧 — 完成闭环（含 ①纯流脚本补账）
 
 - 落码 08126aa: 固件 type 0x22 (DBG_TYPE_EVT) payload 13B = tick4(2kHz 同 PDBBIN

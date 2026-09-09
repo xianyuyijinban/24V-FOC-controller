@@ -1,0 +1,64 @@
+{
+  "checks": {
+    "fault_unreachable": {
+      "reason": "vq ramped capped by Vbus/sqrt3 (6.9V) -> 0.78A < 2.4A soft limit < 3.0A OC threshold",
+      "final_iq_est_mA": "337"
+    },
+    "fault_triggered": false,
+    "manual_trigger": true,
+    "stat_frozen": "TRIG,OK,state=2,src=2,trig_tick=74488578,post=256",
+    "pull": {
+      "blocks_ok": 32,
+      "crc_fail": [],
+      "tick_discontinuity": 0,
+      "iq_absmax_A": 0.0726,
+      "iq_at_trig_A": -0.036,
+      "iq_pre_avg_A": 0.0262,
+      "iq_post_avg_A": 0.0222
+    }
+  },
+  "ladder": [
+    {
+      "vq_mV": 400,
+      "iq_est_mA": "48",
+      "bemf_mV": "0",
+      "vbus_mV": "11899"
+    },
+    {
+      "vq_mV": 800,
+      "iq_est_mA": "96",
+      "bemf_mV": "0",
+      "vbus_mV": "11883"
+    },
+    {
+      "vq_mV": 1200,
+      "iq_est_mA": null,
+      "bemf_mV": null,
+      "vbus_mV": null
+    },
+    {
+      "vq_mV": 1600,
+      "iq_est_mA": "192",
+      "bemf_mV": "0",
+      "vbus_mV": "11899"
+    },
+    {
+      "vq_mV": 2000,
+      "iq_est_mA": "241",
+      "bemf_mV": "0",
+      "vbus_mV": "11947"
+    },
+    {
+      "vq_mV": 2400,
+      "iq_est_mA": "289",
+      "bemf_mV": "0",
+      "vbus_mV": "11915"
+    },
+    {
+      "vq_mV": 2800,
+      "iq_est_mA": "337",
+      "bemf_mV": "0",
+      "vbus_mV": "11915"
+    }
+  ]
+}

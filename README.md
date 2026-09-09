@@ -27,6 +27,7 @@
 - DQ 域 Rs 电阻压降前馈、齿槽补偿，以及可选 BEMF 解耦诊断。
 - 位置环直连电流环模式（`POS_DIRECT`）：低速稳态抖动比级联改善 69%，适合云台/关节电机低速定位（详见下方"低速平滑优化"）。
 - 低速静摩擦连续补偿：指令方向锁存 + FF 库仑前馈（低速指令方向兜底）+ Stribeck 平滑，消除低速爬行与阶跃过冲。
+- 僵持积分逃逸（`CMD:POS_AW_ESC`，默认 OFF）：静摩擦 > 满额交付时积分被抗饱和回拉钉死导致的卡滞逃逸——触发后暂停回拉并放开积分门，以微幅棘轮慢爬 + 振动助破退出僵持。
 - **电压模式（`MODE 3`）**：`Vq*` 直给旁路电流环 PI 的力矩代理控制；`pos_direct=1` 时进入 **S2 电压闭环位置伺服**——位置环直通 PD 输出经 FF 层后按相口径 Rs/2≈4.4 换算为 Vq（±2V/0.8A 软限幅），稳态可行性已由增益阶梯 9 轮实测确认（详见下方"电压闭环"）。
 
 ### 产品模式
@@ -52,6 +53,7 @@
 - 100 帧、50Hz 故障黑匣子；发生 fault 后自动冻结，可通过 UART 导出 CSV。
 - `FAULT_DETAIL`、`PWM_DIAG`、`UART_RX_STAT`、ADC 噪声等诊断命令。
 - 自动标定向导具备 precheck、busy 保护、STOP 中断和进度回报。
+- TX 丢帧直接测量（`CMD:UART_RX?` 的 `tx_p1_drop` 计数）——序列 gap 归因不靠推断。
 
 ### 高速通信与遥测
 
@@ -68,10 +70,19 @@
   - CRC-8 多项式：`0x07`。
   - `BIN 1000`：当前推荐档位，约 1000 fps。
   - `BIN 2000`：实验档，受 1Mbaud 和 TX ring 反压限制，无法稳定达到完整 2000 fps。
-- **PDBBIN 二进制调试流**（v1.4.0 新增）：`A5 5A | 20 | 37B payload | CRC-8`，200Hz 固定采样，
-  `CMD:PDBBIN,1|0` 开关，含 seq/tick/pos_err/iq_cmd/ff_total/theta/v_mech/iq_act/pos_ref。
+- **PDBBIN 二进制调试流**（v1.4.0 新增，v1.5.0 增 v2 帧）：v1 `A5 5A | 20 | 37B payload | CRC-8`
+  逐比特不变，200Hz 固定采样，`CMD:PDBBIN,1|0` 开关，含 seq/tick/pos_err/iq_cmd/ff_total/theta/v_mech/iq_act/pos_ref；
+  v2（`CMD:PDBBIN,2`，type `21`，49B）在 v1 尾部追加 `ff_coulomb` / `ff_cogging` / `pos_integral`
+  三个 float——前馈分账与积分通道直读，不再靠 N 帧倒推（`CMD:PDBBIN,?` 查当前版本）。
   `flags` 字段携带状态字：高 8 位=FOC state（0-5），低 8 位=fault_code——环死/掉态不再静默（2026-09-04）。
   时间门控（5ms 硬基准）与主循环频率解耦（详见 docs/20khz_lowspeed_diag_report_20260830.md §7）。
+- **EVT 事件帧**（v1.5.0 新增）：`A5 5A | 22 | 13B payload | CRC-8`，P0 优先级异步上行——
+  state 迁移 / fault set-clear / ESC 触发退出 / AW 模式切换 / tx_p1_drop 变化五类事件，
+  同类 100ms 限速（溢出计数回填），tick 与 PDBBIN 同 2kHz 基准可对齐。
+- **TRIG 故障触发 ring buffer**（v1.5.0 新增）：20kHz 电流环原速采样 1025 帧验尸窗
+  （pre 768 + 触发帧 1 + post 256 ≈ 51.25ms），fault 闩锁 / state 掉出 RUNNING 自动触发，
+  `CMD:TRIG,NOW` 手动合成，`CMD:TRIG,PULL` 分块拉取（CRC16 逐块校验）。
+  RAM 56KB（DTCM 内），电流环路径实测 max 2.7µs（20kHz 拍预算 50µs 的 5.4%）。
 - **LOOP_PROF 主循环探针**（v1.4.0 新增）：`CMD:LOOP_PROF?` / `CMD:LOOP_PROF,CLEAR`，
   主循环五段 DWT 探针（SEG_CMD/PREF/PDB/NFRAME/OTHER）+ ISR 税校正，`LOOP_PROF_EN` 编译开关（默认 1，置 0 零成本）。
 
@@ -102,6 +113,7 @@ flowchart LR
 | 速度环 | 2kHz |
 | 位置环 | 200Hz |
 | 速度估算 LPF | 20Hz |
+| 固件版本 | v1.5.0 |
 
 > **20kHz 升频（v1.4.0）**：控制 ISR（40kHz）与 ADC 帧（40kHz）同频但相位差仅 0.52µs 导致 fault=7
 > （ADC_SAMPLING），改下溢执行控制环 + 上溢推电流流后锁相解决。20kHz 下死区占比 2%（0.5µs/25µs）。
@@ -166,9 +178,14 @@ COG LUT          = 264 点标定（主导 22 次/圈磁阻力矩，`cogging_lut_
   0.2s 步进反复重置使反号释放永不触发）。
 - **修复（8e796ea）**：补偿方向锁存优先级重排——误差反号立即释放 + hold 清零，
   置于 hold 递减之前；粘住段 err 同号行为逐比特不变。待回归（台架 A+B）。
-- **已评估**：电压伺服可行（无环死、无 PWM 量化副产物），但低速率品质当前劣于
-  电流模式定版；改善候选①comp 锁存快速释放（已改）②持续僵持积分逃逸（排队）
-  ③COG LUT 精确标定启用。
+- **僵持积分逃逸（65bb4f1，2026-09-06 卡滞案）**：G2@126° 静摩擦 > 满额交付时
+  err 同号僵持，抗饱和回拉把积分抽在 0 附近 → 永不积分 → 死锁。逃逸态暂停回拉 +
+  放开积分门，破壁以**积分驱动微幅棘轮慢爬 + 振动助破**（破壁 iq 峰 0.044-0.048A
+  低于摩擦线 0.070A，非力矩硬碾）。G2@126°×3 验收 t95 4.43-4.53s（历史全 N/A），
+  破壁后无 lurch；**默认 OFF**（电流模式 10 reps esc_count=0 惰性证明，S2 实验态按需开）。
+- **已评估**：电压伺服可行（无环死、无 PWM 量化副产物），低速率品质与电流模式定版
+  **同量级**（2026-09-10 门控死区案终审：同 B 序列 track 值域 S2 124.2-146.9% vs
+  电流 128.9-143.7% 重叠，收敛同档；无 2× 超差证据）。改善候选：COG LUT 精确标定启用。
 
 ## v1.4.0 调试链路与诊断（2026-08-31 ~ 09-01）
 
@@ -181,21 +198,27 @@ v1.4.0 在 20kHz 升频基础上补齐了调试链路与主循环诊断能力，
 - **F1/C7 风险分析**：TIM1 抢占 UART TX ≤15µs 节流空隙，扩容路线 2M 波特率（推荐）/ NVIC 提级（否），
   等"N 帧 + PDBBIN 双开满速"需求再现再动。
 
-## 2026-09 增量（v1.4.0 之后）
+## 2026-09 增量（v1.4.0 → v1.5.0）
 
+- **版本更替 v1.5.0**（仪器与观测链强化版）：身份链（raw/ack 证据）、gap 归因
+  （`tx_p1_drop` 直接测量）、ESC 观测链（flags bit16/count/active）、PDBBIN v2、
+  EVT 事件帧、TRIG 验尸 ring buffer。
+- **AI 链路协议增量三件闭环**（2026-09-09，①PDBBIN v2 / ②EVT / ③TRIG）：
+  详见上方"高速通信与遥测"与 `docs/UART_COMMANDS.md`。
+- **卡滞案②POS_AW_ESC 结案**（默认 OFF）+ **门控死区案关闭**（假设证伪：v2 帧直读
+  斜坡段 ff_coulomb 为 Stribeck 衰减档而非满额 comp；两模式同量级）。
 - **电压闭环 S2**：`FOC_MODE_VOLTAGE` + `pos_direct` 的电压模式位置伺服——位置环直通
-  控制律经 FF 层按相口径 Rs/2≈4.4 换算 Vq*（详见上方"电压闭环"）。10 笔提交含
-  FOC_MODE_VOLTAGE 移植（41871b7）、S2 控制律（eec5852）、PDBBIN flags 状态字（bdb7fb0）、
-  补偿方向锁存优先级重排（8e796ea）。
+  控制律经 FF 层按相口径 Rs/2≈4.4 换算 Vq*（详见上方"电压闭环"）。
 - **PDBBIN flags**：`(state<<8)|fault_code` 进帧，环死/掉态不再静默（观测链修复，18:43 案）。
 - **观测家族第五条**：积压帧混入测量窗伪影（9/4 定案）——`foclink.MeasureWindow`
   （排压+时间戳过滤+稳定门），所有稳态判读必须用它。慢速 9/3-9/4 的"双态漂移 6°"系
   该伪影，非电机问题（12 轮复测全净）。
 - **测量稳定性**：verify_low_speed.py 迁移（PDBBIN 单源 + MeasureWindow + state/fault
-  健康链），s2_gain_ladder.py 增加 `--gains G1,G2` 档位过滤。
+  健康链），s2_gain_ladder.py 增加 `--gains G1,G2` 档位过滤；abort 路径自动拉取 TRIG
+  验尸窗（2026-09-10）。
 - **环死案（独立未决，最高优先）**：18:43 position loop 静默冻结（pos_err bit-exact 0、
   theta 冻结、iq_cmd 冻结），stall/haptic 已排除，最可能 state 掉 RUNNING；flags 已接，
-  下次捕获记录 state/fault。
+  下次捕获记录 state/fault（EVT 0x01 事件帧 + TRIG 验尸窗已就位）。
 
 ## 上位机
 

@@ -115,7 +115,7 @@ uint16_t TrigRing_Pull(uint16_t off, uint16_t len, uint8_t *out_buf)
     uint32_t ring_idx;
 
     if (out_buf == NULL || len == 0U ||
-        (uint32_t)off + (uint32_t)len > TRIG_RING_SIZE) {
+        (uint32_t)off + (uint32_t)len > TRIG_WINDOW_FRAMES) {
         return 0U;
     }
     if (s_state != TRIG_STATE_FROZEN) {

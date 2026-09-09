@@ -3,15 +3,16 @@
  * @brief   TRIG 故障触发 ring buffer — 20kHz 电流环原速采样 + 触发冻结 + 分块拉取
  * @note    2026-09-09 ③协议增量 (docs/plans/2026-09-09-ai-link-taskcards-deepseek.md)。
  *          任务卡口径 "2kHz" 实为电流环 20kHz (FOC_CONTROL_FREQ=20000, TIM1 下溢沿);
- *          1024 帧 @20kHz = 51.2ms 验尸窗 (pre 768=38.4ms + post 256=12.8ms)。
+ *          验尸窗 = pre 768 + 触发帧 1 + post 256 = 1025 帧 @20kHz (51.25ms)。
  *
  * 写入: 20kHz ISR 内 O(1) 单写者无锁 (写指针自进, 读侧只在触发冻结后访问)。
  * 触发: fault 闩锁 / state 掉出 RUNNING (主循环监视) / CMD:TRIG,NOW (手动合成)。
  * 触发后 post 段 (256 帧) 计满即冻结 (防覆写 pre 段历史)。
- * 拉取: CMD:TRIG,PULL,off,len 分块上行 (≤256B/块), 每块 CRC16 (CCITT-FALSE,
+ * 拉取: CMD:TRIG,PULL,off,len 分块上行 (≤32 帧/块), 每块 CRC16 (CCITT-FALSE,
  *       poly 0x1021 init 0xFFFF); 拉取期间 PDBBIN 暂停 (it.c 门控), 拉完恢复。
  *
- * RAM: 1024 × 28B = 28KB (默认 ZI 域, DTCM 128KB 充裕; scatter RW_IRAM1/2 自动放置)。
+ * RAM: 2048 × 28B = 56KB (DTCM 128KB 内; 1024 槽时 post 末帧恰好覆写 pre 首帧
+ *      — trig_idx+256 ≡ trig_idx-768 (mod 1024), 212303 台架实证)。
  */
 
 #ifndef __TRIG_RING_H
@@ -23,10 +24,12 @@ extern "C" {
 
 #include <stdint.h>
 
-#define TRIG_RING_SIZE      1024U   /* 帧数 (2 的幂, 索引 &1023) */
+/* 2048 槽: pre 768 + 触发帧 1 + post 256 = 1025 < 1024 会溢出覆写 pre 首帧 (212303 实证) — 取 2 的幂 2048 */
+#define TRIG_RING_SIZE      2048U   /* 帧数 (2 的幂, 索引 &2047) */
 #define TRIG_PRE_FRAMES     768U    /* 触发点前保留帧 (75%) */
 #define TRIG_POST_FRAMES    256U    /* 触发点后采集帧 (25%), 计满冻结 */
 #define TRIG_FRAME_SIZE     28U     /* 7×float32 */
+#define TRIG_WINDOW_FRAMES  (TRIG_PRE_FRAMES + 1U + TRIG_POST_FRAMES)  /* 1025 帧验尸窗 */
 #define TRIG_PULL_MAX_BYTES  896U   /* 单块数据上限 32 帧 × 28B (TX ring 1024B 预算:
                                      * 头 ~17B + 896B + CRC 2B < 1024B) */
 #define TRIG_PULL_MAX_FRAMES 32U    /* 单块帧数上限 (与上式同步) */

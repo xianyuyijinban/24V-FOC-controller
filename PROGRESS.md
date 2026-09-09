@@ -1,5 +1,67 @@
 # PROGRESS
 
+## [2026-09-06 → 09-09] 候选② POS_AW_ESC 全链闭环：锁定区落码 → ⑦ ESC ON 验收 → ⑧ 电流回归关门
+
+### ②固件落码（65bb4f1，岳翔宇批准锁定区改动）
+- 僵持积分逃逸状态机 (foc_app.c:1713)：触发 |err|>3° 同号持续 2s (200Hz tick) →
+  暂停 AW1 回拉 + 放开积分门 (ki_out ±0.10A 限幅不动, pd_sat 冻结保留)；退出
+  三条件 |err|<1.5° 回差 / err 翻号立即 / 10s 强制。默认 OFF，
+  `CMD:POS_AW_ESC,1` (清零计数) / `,0` (立即退逃逸)；查询
+  `POS_AW_ESC,OK,en=,active=,count=`；JDIAG v7 增 esc=/esc_n=；
+  PDBBIN flags bit16 = esc_active 逐帧可见 (stm32h7xx_it.c:659)。
+- 台账措辞（Kimi 定）：逃逸机制 = **积分驱动微幅棘轮慢爬 + 振动助破**，与 G3
+  "坡道微动助破"同族；**不是"积分余量碾压摩擦线"**（破壁 iq 峰 0.044-0.048A
+  指令口径 < G3 标定摩擦线 0.070A 交付口径）。
+
+### ⑦ G2@126°×3 ESC ON 验收 — 通过（s2_gain_ladder_20260909_013624.json, validator OK）
+- t95 从"永不"（G2 卡滞档历史全部 N/A）→ **4.43/4.53/4.48s**（8s 窗内破壁）；
+  esc_count 0→1→2→3（每轮独立触发恰好一次）；esc_active 112-115 帧 (~1.5s)；
+  僵持末 +0.98-1.45s（2s 计时含在阶跃头）；破壁后 max|err| 1.19-1.80°
+  （G3 预演对照 0.94-0.98° 同档, 无 lurch）；极限环 pp 0.03°；回程 track
+  81.7/123.6/127.5%（破壁后追赶形态, 锁存反号释放压住无振荡）。
+- 执行链插曲（全数据带回）：092103 锚定 177.4°（转子被人为转动, 回位脚本
+  /tmp/move_to_126.py 分段 ≤12° 回 126.5°）→ UnboundLocalError cog_ack
+  （init 首试丢响应时重试打印崩, 修）→ 三连 seq_gap abort（见下）。
+
+### gap 口径改朝换代：tx_p1_drop 直接测量（Kimi A 裁决, 07b4274 + a1e1e32）
+- 原口径"容忍≤2 (F1 N 帧仲裁投影候选)"被 **CMD:UART_RX? 的 tx_p1_drop=0 证伪**：
+  静默/纯流/运动负载下固件 TX 环 P1 丢帧始终为 0 → gap 全在**主机侧 RX 抖动**
+  （CH340, PollingPeriod 已=0 无可修）, 数据本体 CRC=0 逐帧无损。
+  0906 背景 0 帧 / 0909 背景 2-3 帧 per 40s 窗 — 环境噪声, "等环境好转"=
+  把仪器有效性寄托给天气。
+- 判定升级为测量：脚本每轮 scope 首尾取 tx_p1_drop 差值（无符号回绕安全）进
+  health.tx_p1_drop_delta；validator 三分支（gap>2 时）：delta 缺失=FAIL（无证据
+  fail-closed）/ **delta=0=WARN（主机侧 RX 损耗, 归因齐）** / delta>0=FAIL（固件
+  真丢）。gap≤2 现状不动（loci 容忍）。单测 16/16。
+- watch 守卫两修：run 级累计改逐轮 scope_loci（010815 实证三轮各 1 帧→累计 3
+  被误杀）→ 再改 gap 不当场杀、判定完全交 validator（012849 实证：同相成簇与
+  跨轮散布在 watch 层不可分, 强判=口径发明）。
+
+### ⑧ 电流回归 ESC ON — 关门（惰性证明 esc_count=0 × 10 reps）
+- **A (20°/0.5°/s ×2)**: verify_lowspeed_20260909_084215.json — track 90.7/90.5%
+  （历史带 92.8-97.2% 下缘, 0909 背景 gap 4/6 帧 delta=0×2 归因齐 WARN）、
+  step@2.8s 98.0/98.3%、稳态 pp 0.09/0.10°、esc_count=0×2 → **validator OK**。
+- **B (6°/2°/s ×2)**: verify_lowspeed_20260909_084549.json — **validator OK 零
+  WARN**：step@2.8s 101.4/98.6%、稳态 pp 0.02-0.03°、gap 1/0、esc_count=0×2。
+- ②定版姿态（⑧关门后生效, Kimi 裁决）：**默认值维持 OFF**。定版电流模式不需要
+  它（10 reps esc_count=0 证惰性且不需要）；S2 电压模式仍是实验态, 逃逸是它的
+  诊断工具不默认绑死。
+
+### 仪器链修一笔账（9/6-9/9 累计）
+- f7122e1 ladder meta raw/ack 证据链（9/5 起 8 份 ladder JSON 身份链不完整,
+  G3 首跑 7 条 V1 实证; validator COG_CFG 前缀 OK→gain= 对齐固件 uart_upload.c:1743）
+- 6c47b3f flash_deploy `${Commit}` PS 5.1 语法（F 笔血缘）
+- d6bc952 ESC 观测链（ladder --esc 断言 count>0 / verify --esc 断言 count==0
+  方向相反; flags bit16 逐帧; finally 兜底 POS_AW_ESC,0）
+- a679d8c verify 补 parse_status_fields（ESC count 解析 NameError）
+- watch 预检重试：verify FW_INFO/JDIAG/CH_CFG 带重试（上 run 遗留 PDB 流活跃时
+  单发被挤掉, 台架两连 FAIL 实证）
+
+### 挂账不变（三件）
+- 门控死区（死区 2°/s 过冲副作用 133-142%, 指令速率门控候选, 锁定区）
+- 18:43 环死案
+- AI 协议增量三件
+
 ## [2026-09-06 凌晨] 电流回归首轮（仪器四修前, 参考值不作关门依据）+ 死区 2°/s 副作用
 
 ### 首轮数据 (verify_lowspeed_20260906_005105.json / 005248.json, 旧脚本产物)

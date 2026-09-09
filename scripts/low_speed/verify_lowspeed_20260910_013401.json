@@ -1,0 +1,234 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": false,
+    "abort_reason": "fault latched mid-run: flags=0x507 (fault=7)"
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 6.0,
+    "ramp_deg_s": 2.0,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2,
+    "esc": false,
+    "pdbver": 2
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.5.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133",
+      "esc": "0",
+      "esc_n": "0"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.5.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v7,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133,esc=0,esc_n=0",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,0",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    },
+    "n_coexist": true,
+    "esc_enabled": false,
+    "pdbbin_ver": 2
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "3.4999999999999916": 99.6,
+            "4.499999999999991": 99.6,
+            "5.499999999999991": 99.6
+          },
+          "pp": 0.032962492934487386,
+          "max_dev": 5.998146293582266,
+          "n": 329,
+          "track_pct": 139.4
+        },
+        "step": {
+          "arrival": {
+            "0.5": 93.3,
+            "1.0": 99.7,
+            "2.0": 99.7,
+            "2.8": 99.7
+          },
+          "pp": 0.028029395845379668,
+          "max_dev": 4.809545155702011,
+          "n": 190
+        },
+        "steady": {
+          "pp_deg": 0.02,
+          "resid_deg": -0.469,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 2.14,
+          "n": 96
+        },
+        "traj": [
+          {
+            "t": 0.014,
+            "theta_deg": 110.7091,
+            "poserr_deg": -0.0006,
+            "ff_iq": -0.00013,
+            "iq_act": 0.00246,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.0001
+          },
+          {
+            "t": 2.527,
+            "theta_deg": 114.9828,
+            "poserr_deg": -0.7228,
+            "ff_iq": -0.00455,
+            "iq_act": 0.0267,
+            "ff_coulomb": -0.0044,
+            "pos_integral": -0.01269
+          },
+          {
+            "t": 4.077,
+            "theta_deg": 116.6747,
+            "poserr_deg": -0.0143,
+            "ff_iq": -2e-05,
+            "iq_act": -0.00131,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.01304
+          },
+          {
+            "t": 5.578,
+            "theta_deg": 116.6637,
+            "poserr_deg": -0.0143,
+            "ff_iq": 0.00018,
+            "iq_act": 0.00075,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.01326
+          },
+          {
+            "t": 7.733,
+            "theta_deg": 116.466,
+            "poserr_deg": -0.4152,
+            "ff_iq": -0.00459,
+            "iq_act": 0.00233,
+            "ff_coulomb": -0.0044,
+            "pos_integral": -0.00704
+          },
+          {
+            "t": 9.303,
+            "theta_deg": 116.8505,
+            "poserr_deg": -0.0197,
+            "ff_iq": -0.00011,
+            "iq_act": -0.01,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00841
+          },
+          {
+            "t": 10.722,
+            "theta_deg": 110.4126,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          },
+          {
+            "t": 11.411,
+            "theta_deg": 110.4016,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          },
+          {
+            "t": 12.08,
+            "theta_deg": 110.4016,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          },
+          {
+            "t": 12.771,
+            "theta_deg": 110.4126,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          },
+          {
+            "t": 13.478,
+            "theta_deg": 110.4016,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          },
+          {
+            "t": 14.154,
+            "theta_deg": 110.4016,
+            "poserr_deg": 0.0,
+            "ff_iq": 0.01088,
+            "iq_act": 0.0,
+            "ff_coulomb": 0.0044,
+            "pos_integral": -0.00734
+          }
+        ],
+        "v2_fields": {
+          "ff_coulomb_absmax": 0.02197,
+          "ff_cogging_absmax": 0.0,
+          "pos_integral_absmax": 0.01332
+        },
+        "health": {
+          "pdb_n": 1177,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 596,
+          "bad_fault": 596,
+          "crc_err": 0,
+          "sample_rate_hz": 80.3,
+          "seq_gap_loci": [],
+          "tx_p1_drop_delta": 1
+        }
+      }
+    ]
+  }
+}

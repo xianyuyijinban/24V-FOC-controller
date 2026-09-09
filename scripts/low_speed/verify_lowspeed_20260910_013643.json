@@ -1,0 +1,207 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": false,
+    "abort_reason": "fault latched mid-run: flags=0x507 (fault=7)"
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 6.0,
+    "ramp_deg_s": 2.0,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2,
+    "esc": false,
+    "pdbver": 2
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.5.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133",
+      "esc": "0",
+      "esc_n": "0"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.5.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v7,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133,esc=0,esc_n=0",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": null,
+    "dt_status": "DT,OK,0",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    },
+    "n_coexist": true,
+    "esc_enabled": false,
+    "pdbbin_ver": 2
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "3.499999999999998": 100.5,
+            "4.499999999999998": 100.5,
+            "5.499999999999998": 100.5
+          },
+          "pp": 0.032948832556144225,
+          "max_dev": 5.9965896268125505,
+          "n": 313,
+          "track_pct": 139.7
+        },
+        "step": {
+          "arrival": {
+            "0.5": 100.7,
+            "1.0": 100.7,
+            "2.0": 100.7,
+            "2.8": 100.7
+          },
+          "pp": 0.02196588837075808,
+          "max_dev": 4.948009752526076,
+          "n": 208
+        },
+        "steady": {
+          "pp_deg": 0.02,
+          "resid_deg": 6.033,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 1.94,
+          "n": 76
+        },
+        "traj": [
+          {
+            "t": 0.005,
+            "theta_deg": 110.3356,
+            "poserr_deg": -0.0046,
+            "ff_iq": 1e-05,
+            "iq_act": 0.0048,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00041
+          },
+          {
+            "t": 2.578,
+            "theta_deg": 115.2904,
+            "poserr_deg": -0.0523,
+            "ff_iq": -0.00521,
+            "iq_act": 0.01224,
+            "ff_coulomb": -0.0044,
+            "pos_integral": -0.01408
+          },
+          {
+            "t": 4.228,
+            "theta_deg": 116.3781,
+            "poserr_deg": 0.0281,
+            "ff_iq": -4e-05,
+            "iq_act": 0.00096,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.01243
+          },
+          {
+            "t": 5.797,
+            "theta_deg": 116.3781,
+            "poserr_deg": 0.0281,
+            "ff_iq": -6e-05,
+            "iq_act": -0.00417,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.01218
+          },
+          {
+            "t": 7.974,
+            "theta_deg": 116.6198,
+            "poserr_deg": 0.051,
+            "ff_iq": 5e-05,
+            "iq_act": -0.00464,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00594
+          },
+          {
+            "t": 9.402,
+            "theta_deg": 116.6198,
+            "poserr_deg": 0.0401,
+            "ff_iq": -1e-05,
+            "iq_act": 0.00216,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00556
+          },
+          {
+            "t": 10.839,
+            "theta_deg": 116.5978,
+            "poserr_deg": 0.0291,
+            "ff_iq": 0.00021,
+            "iq_act": -0.00047,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.0052
+          },
+          {
+            "t": 12.256,
+            "theta_deg": 116.6198,
+            "poserr_deg": 0.0401,
+            "ff_iq": -9e-05,
+            "iq_act": 0.00412,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00487
+          },
+          {
+            "t": 13.673,
+            "theta_deg": 116.6088,
+            "poserr_deg": 0.0291,
+            "ff_iq": 1e-05,
+            "iq_act": -0.00535,
+            "ff_coulomb": 0.0,
+            "pos_integral": -0.00457
+          }
+        ],
+        "v2_fields": {
+          "ff_coulomb_absmax": 0.0143,
+          "ff_cogging_absmax": 0.0,
+          "pos_integral_absmax": 0.01416
+        },
+        "health": {
+          "pdb_n": 857,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 59.3,
+          "seq_gap_loci": [],
+          "tx_p1_drop_delta": 0
+        }
+      }
+    ]
+  }
+}

@@ -1269,6 +1269,7 @@ ff_layers:
                     float smooth = handle->fric_kin
                                    + (1.0f - handle->fric_kin) * stick;
                     friction_total += coulomb * smooth;
+                    handle->ff_diag.coulomb_iq = coulomb * smooth;  /* 只读镜像: PDBBIN v2 ff_coulomb */
                 }
                 /* Viscous: proportional to speed */
                 friction_total += handle->motor_param.B * omega / Kt;
@@ -1280,10 +1281,12 @@ ff_layers:
                 iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
             } else {
                 handle->ff_diag.friction_iq = 0.0f;
+                handle->ff_diag.coulomb_iq = 0.0f;   /* 镜像随归零 (v2 ff_coulomb) */
             }
         }
 #else
         handle->ff_diag.friction_iq = 0.0f;
+        handle->ff_diag.coulomb_iq = 0.0f;
         handle->ff_diag.friction_enabled = 0U;
 #endif
 

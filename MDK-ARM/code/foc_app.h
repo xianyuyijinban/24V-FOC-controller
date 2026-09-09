@@ -274,7 +274,9 @@ typedef struct {
     float bemf_vd;              /* P1 BEMF解耦 Vd补偿量 V */
     float bemf_vq;              /* P1 BEMF解耦 Vq补偿量 V */
     float inertia_iq;           /* P2 惯量前馈 Iq贡献 A */
-    float friction_iq;          /* P3 摩擦前馈 Iq贡献 A */
+    float friction_iq;          /* P3 摩擦前馈 Iq贡献 A (库仑+粘滞+观测器T_hat) */
+    float coulomb_iq;           /* P3 库仑分量只读镜像 (Stribeck×方向生效值, 不含粘滞;
+                                 * PDBBIN v2 ff_coulomb 取数点, 2026-09-09 ①) */
     float cogging_iq;           /* P0 齿槽前馈 Iq贡献 A */
     float observer_iq;          /* P4 观测器前馈 Iq贡献 A */
     float ff_total_iq;          /* 前馈总Iq贡献 A */

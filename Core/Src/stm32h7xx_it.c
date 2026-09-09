@@ -640,24 +640,48 @@ static void UART_CommandServicePosdbg(void)
         DrvUart_SendTextP1(line);
     }
 
-    /* PDBBIN: 与文本 PDB 同一 gate 同拍发射 (独立开关, seq 丢帧定位) */
+    /* PDBBIN: 与文本 PDB 同一 gate 同拍发射 (独立开关, seq 丢帧定位)
+     * v2 (2026-09-09 ①): 49B = v1 37B + ff_coulomb/ff_cogging/pos_integral 3×float */
     if (s_pdbbin_stream != 0U) {
-        PdbBinPayload_t p;
-        p.seq = 0U;  /* PushPdb 内自递增 */
-        /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
-        p.pos_err_rad    = h->position_loop_error_diag;
-        p.iq_cmd         = h->pos_direct_iq_cmd;
-        p.ff_total       = h->ff_diag.ff_total_iq;
-        p.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
-        p.iq_act         = h->foc.Idq.q;
-        p.v_mech_rad_s   = h->speed_mech;
-        p.pos_ref_rad    = h->pos_ref;
-        /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
-         * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
-        p.flags = ((uint32_t)h->state << 8) |
-                  ((uint32_t)h->fault_code & 0xFFU) |
-                  ((uint32_t)h->pos_aw_esc_active << 16);
-        DebugStream_PushPdb(s_foc_tick_2khz, &p);
+        if (DebugStream_GetVer() == 2U) {
+            PdbBinV2Payload_t p2;
+            p2.v1.seq = 0U;  /* PushPdb 内自递增 */
+            /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
+            p2.v1.pos_err_rad    = h->position_loop_error_diag;
+            p2.v1.iq_cmd         = h->pos_direct_iq_cmd;
+            p2.v1.ff_total       = h->ff_diag.ff_total_iq;
+            p2.v1.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
+            p2.v1.iq_act         = h->foc.Idq.q;
+            p2.v1.v_mech_rad_s   = h->speed_mech;
+            p2.v1.pos_ref_rad    = h->pos_ref;
+            /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
+             * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
+            p2.v1.flags = ((uint32_t)h->state << 8) |
+                          ((uint32_t)h->fault_code & 0xFFU) |
+                          ((uint32_t)h->pos_aw_esc_active << 16);
+            /* v2 追加: 取数口径见 PdbBinV2Payload_t 注释 (2026-09-09 核实) */
+            p2.ff_coulomb   = h->ff_diag.coulomb_iq;
+            p2.ff_cogging   = h->ff_diag.cogging_iq;
+            p2.pos_integral = h->pos_ki_out_prev;   /* 饱和后 ki_out (AW/ESC 作用后生效值) */
+            DebugStream_PushPdbV2(s_foc_tick_2khz, &p2);
+        } else {
+            PdbBinPayload_t p;
+            p.seq = 0U;  /* PushPdb 内自递增 */
+            /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
+            p.pos_err_rad    = h->position_loop_error_diag;
+            p.iq_cmd         = h->pos_direct_iq_cmd;
+            p.ff_total       = h->ff_diag.ff_total_iq;
+            p.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
+            p.iq_act         = h->foc.Idq.q;
+            p.v_mech_rad_s   = h->speed_mech;
+            p.pos_ref_rad    = h->pos_ref;
+            /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
+             * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
+            p.flags = ((uint32_t)h->state << 8) |
+                      ((uint32_t)h->fault_code & 0xFFU) |
+                      ((uint32_t)h->pos_aw_esc_active << 16);
+            DebugStream_PushPdb(s_foc_tick_2khz, &p);
+        }
     }
     FOC_Profiler_End(FOC_PROBE_POSDBG, posdbg_start);
 }
@@ -2077,12 +2101,24 @@ static void UART_CommandExecute(const char *cmd)
         }
         return;
     }
+    if (strcmp(cmd, "CMD:PDBBIN,?") == 0) {
+        /* PDBBIN 版本查询: 0=关 1=v1(37B) 2=v2(49B) (2026-09-09 ①) */
+        char resp[24];
+        (void)snprintf(resp, sizeof(resp), "PDBBIN,OK,ver=%u\r\n",
+                       (unsigned int)((s_pdbbin_stream == 0U) ? 0U : DebugStream_GetVer()));
+        UART_CommandSendText(resp);
+        return;
+    }
     if (sscanf(cmd, "CMD:PDBBIN,%u", &uint_arg) == 1) {
-        /* PDBBIN 二进制调试流: 1=开 0=关 (文本 PDB 二进制孪生, seq+CRC8) */
-        if (uint_arg <= 1U) {
-            s_pdbbin_stream = (uint8_t)uint_arg;
-            if (s_pdbbin_stream == 0U) {
+        /* PDBBIN 二进制调试流: 0=关 1=v1(37B) 2=v2(49B, 尾部追加
+         * ff_coulomb/ff_cogging/pos_integral) (2026-09-09 ①);
+         * v1 逐比特不变 (铁律 2). */
+        if (uint_arg <= 2U) {
+            s_pdbbin_stream = (uint8_t)((uint_arg == 0U) ? 0U : 1U);
+            if (uint_arg == 0U) {
                 s_posdbg_last_tick = s_foc_tick_2khz;
+            } else {
+                DebugStream_SetVer((uint8_t)uint_arg);
             }
             UART_CommandSendText("PDBBIN,OK\r\n");
         } else {

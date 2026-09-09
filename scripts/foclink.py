@@ -7,7 +7,8 @@
 通道:
   - 'C'  (0x43): 电流流 CurrentSample (payload 20B)
   - 'W'  (0x57): 轮事件 WheelEvent   (payload 16B)
-  - 'D'  (0x20 DBG_TYPE_PDB2): PDBBIN 调试流 (payload 37B) — 本任务新增
+  - 0x20 (TYPE_PDB2): PDBBIN v1 调试流 (payload 37B)
+  - 0x21 (TYPE_PDB2V2): PDBBIN v2 调试流 (payload 49B, 2026-09-09 ①)
 
 per-channel 计数: rx_count / crc_err / seq_gap (seq 按 mod 256 判 gap)。
 
@@ -20,7 +21,8 @@ SYNC = b"\xA5\x5A"
 
 TYPE_CURRENT = 0x43   # 'C'
 TYPE_WHEEL   = 0x57   # 'W'
-TYPE_PDB2    = 0x20   # DBG_TYPE_PDB2 — debug_stream.h
+TYPE_PDB2    = 0x20   # DBG_TYPE_PDB2 — debug_stream.h (v1, 37B)
+TYPE_PDB2V2  = 0x21   # DBG_TYPE_PDB2V2 — PDBBIN v2 (2026-09-09 ①, 49B)
 
 
 @dataclass
@@ -37,6 +39,10 @@ class PdbBinSample:
     v_mech_rad_s: float = 0.0
     pos_ref_rad: float = 0.0
     host_rx_time: float = 0.0    # 解析层打戳: PC 收讫时刻 (epoch s)
+    ver: int = 1                 # 帧版本: 1=v1 (37B), 2=v2 (49B)
+    ff_coulomb: float = 0.0      # v2: 库仑分量生效值 (Stribeck×方向, 不含粘滞) A
+    ff_cogging: float = 0.0      # v2: COG LUT 分量 A
+    pos_integral: float = 0.0    # v2: 位置环积分饱和后生效输出 (ki_out 口径) A
 
     @property
     def t(self) -> float:
@@ -107,6 +113,7 @@ class MixedStreamParser:
         TYPE_CURRENT: 20,
         TYPE_WHEEL:   16,
         TYPE_PDB2:    37,
+        TYPE_PDB2V2:  49,
     }
 
     def __init__(self, line_cb=None, pdb2_cb=None, current_cb=None, wheel_cb=None):
@@ -198,7 +205,7 @@ class MixedStreamParser:
                 self.line_cb(line.decode(errors="replace"))
 
     def _dispatch(self, type_byte: int, payload: bytes) -> None:
-        if type_byte == TYPE_PDB2:
+        if type_byte in (TYPE_PDB2, TYPE_PDB2V2):
             s = self._decode_pdb2(payload)
             s.host_rx_time = __import__("time").time()   # C4: 收讫时刻
             self._track_seq(type_byte, s.seq)
@@ -218,6 +225,15 @@ class MixedStreamParser:
     # ── 解码 ──
     @staticmethod
     def _decode_pdb2(p: bytes) -> PdbBinSample:
+        if len(p) >= 49:
+            seq, tick, flags, e, iq, ff, th, iqa, v, pr, fc, fg, pi = \
+                struct.unpack("<BIIffffffffff", p)
+            return PdbBinSample(seq=seq, tick_2khz=tick, flags=flags,
+                                pos_err_rad=e, iq_cmd=iq, ff_total=ff,
+                                theta_user_rad=th, iq_act=iqa,
+                                v_mech_rad_s=v, pos_ref_rad=pr,
+                                ver=2, ff_coulomb=fc, ff_cogging=fg,
+                                pos_integral=pi)
         seq, tick, flags, e, iq, ff, th, iqa, v, pr = struct.unpack("<BIIfffffff", p)
         return PdbBinSample(seq=seq, tick_2khz=tick, flags=flags, pos_err_rad=e,
                             iq_cmd=iq, ff_total=ff, theta_user_rad=th, iq_act=iqa,
@@ -234,7 +250,8 @@ class MixedStreamParser:
     def _track_seq(self, type_byte: int, seq: int) -> None:
         last = self._last_seq[type_byte]
         if last >= 0:
-            expected = (last + 1) & 0xFF if type_byte == TYPE_PDB2 else (last + 1) & 0xFFFF
+            expected = (last + 1) & 0xFF if type_byte in (TYPE_PDB2, TYPE_PDB2V2) \
+                else (last + 1) & 0xFFFF
             if seq != expected:
                 self.stats[type_byte].seq_gap += 1
         self._last_seq[type_byte] = seq

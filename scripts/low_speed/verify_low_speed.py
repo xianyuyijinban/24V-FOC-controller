@@ -61,6 +61,9 @@ def main():
     ap.add_argument("--esc", action="store_true",
                     help="开启僵持积分逃逸 CMD:POS_AW_ESC,1 (惰性证明轮: 断言 "
                          "esc_count==0, >0 即 fail — 方向与 ladder 相反)")
+    ap.add_argument("--pdbver", type=int, default=1, choices=(1, 2),
+                    help="PDBBIN 帧版本 (2026-09-09 ①: 1=v1 37B, 2=v2 49B "
+                         "追加 ff_coulomb/ff_cogging/pos_integral)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: need --power-ok")
@@ -365,7 +368,7 @@ def main():
 
     # 开 PDBBIN 后再启 reader (二进制帧由 parser 消化, 不乱文本行)
     ser.reset_input_buffer()
-    ser.write(b"CMD:PDBBIN,1\n")
+    ser.write(b"CMD:PDBBIN,%d\n" % args.pdbver)   # ①: 1=v1 37B, 2=v2 49B
     time.sleep(0.3)
     threading.Thread(target=reader, daemon=True).start()
     time.sleep(0.3)
@@ -605,7 +608,8 @@ def main():
                 # N 帧共存: PDBBIN P1 与 N 帧 P2 仲裁, 实测 ~20-24Hz (8/31 TX 泵
                 #   专项一致); validator mode-aware rate 用 (2026-09-06 Kimi)
                 "n_coexist": True,
-                "esc_enabled": bool(args.esc)}
+                "esc_enabled": bool(args.esc),
+                "pdbbin_ver": int(args.pdbver)}
     doc = {"schema": "verify_low_speed.v2",
            "run_status": {"valid": bool(pre != 1 and run_error is None),
                           "abort_reason": run_error},

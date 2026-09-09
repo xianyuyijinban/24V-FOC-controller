@@ -118,6 +118,9 @@ def main():
     ap.add_argument("--esc", action="store_true",
                     help="开启僵持积分逃逸 CMD:POS_AW_ESC,1 (默认关; ESC 轮断言 "
                          "esc_count>0, 无触发=数据无法归因 → invalid)")
+    ap.add_argument("--pdbver", type=int, default=1, choices=(1, 2),
+                    help="PDBBIN 帧版本 (2026-09-09 ①: 1=v1 37B, 2=v2 49B "
+                         "追加 ff_coulomb/ff_cogging/pos_integral)")
     args = ap.parse_args()
     if not args.power_ok:
         print("DRY-RUN: --power-ok")
@@ -281,6 +284,7 @@ def main():
         "config_ack": {},
         "n_coexist": True,   # N 帧共存 (PDBBIN P1 与 N 帧 P2 仲裁, ~20-24Hz; 见 verify)
         "esc_enabled": bool(args.esc),   # 僵持积分逃逸 (CMD:POS_AW_ESC, 默认关)
+        "pdbbin_ver": int(args.pdbver),  # PDBBIN 帧版本 (①: 1=v1 37B, 2=v2 49B)
     }
 
     def expect2(cmd, prefix, timeout=5.0):
@@ -399,10 +403,13 @@ def main():
                     pass
 
     parser = foclink.MixedStreamParser(line_cb=on_line, pdb2_cb=on_pdb)
+    # PDBBIN 帧版本决定 parser stats 键 (v1=TYPE_PDB2 0x20, v2=TYPE_PDB2V2 0x21;
+    # 同一 pdb2_cb 消费两种帧, PdbBinSample.ver 标记来源)
+    pdb_stats_key = (foclink.TYPE_PDB2V2 if args.pdbver == 2 else foclink.TYPE_PDB2)
 
     def begin_health_scope(start_time):
         """Reset per-round health counters without discarding captured PDB rows."""
-        stats = parser.stats[foclink.TYPE_PDB2]
+        stats = parser.stats[pdb_stats_key]
         health.update({
             "scope_start": start_time, "first_hrx": None, "last_hrx": 0.0,
             "last_seq": -1, "last_tick": None, "seq_gap": 0,
@@ -429,7 +436,7 @@ def main():
         """逐帧健康检查 (2026-09-05 恢复规划 #48): 流静默/掉帧/state/fault 越界
         即 raise SystemExit — 该 run invalid, 不让其混入汇总。"""
         now = time.time()
-        stats = parser.stats[foclink.TYPE_PDB2]
+        stats = parser.stats[pdb_stats_key]
         parser_seq_gap = stats.seq_gap - health["run_seq_gap_base"]
         crc_err = stats.crc_err - health["run_crc_err_base"]
         health["parser_seq_gap"] = max(0, parser_seq_gap)
@@ -485,7 +492,7 @@ def main():
             "bad_state": health["bad_state"],
             "bad_fault": health["bad_fault"],
             "crc_err": max(health["crc_err"],
-                            parser.stats[foclink.TYPE_PDB2].crc_err -
+                            parser.stats[pdb_stats_key].crc_err -
                             health["run_crc_err_base"]),
             "sample_rate_hz": round(sample_rate, 1) if sample_rate is not None else None,
             "seq_gap_loci": scope_loci,
@@ -593,10 +600,10 @@ def main():
     print("锚定位: %.2f°" % a0, flush=True)
     ser.write(b"CMD:PREF,%.6f\n" % (a0 * DEG2RAD))
     time.sleep(2.0)
-    ser.write(b"CMD:PDBBIN,1\n")
+    ser.write(b"CMD:PDBBIN,%d\n" % args.pdbver)   # ①: 1=v1 37B, 2=v2 49B
     time.sleep(0.3)
     import threading
-    stats = parser.stats[foclink.TYPE_PDB2]
+    stats = parser.stats[pdb_stats_key]
     health["run_seq_gap_base"] = stats.seq_gap
     health["run_crc_err_base"] = stats.crc_err
     threading.Thread(target=reader, daemon=True).start()

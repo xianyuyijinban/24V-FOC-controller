@@ -115,6 +115,17 @@ def _validate_gap_delta(health, label, gap, errors, warns):
                       "固件 TX 真丢帧" % (label, gap, delta))
 
 
+def _validate_pdbbin_ver(meta, label, errors):
+    """PDBBIN 帧版本 (2026-09-09 ①): 旧 JSON 无该字段按 v1 过 (容忍);
+    新 JSON 带该字段时必须 ∈ {1, 2}。"""
+    ver = meta.get("pdbbin_ver")
+    if ver is None:
+        return
+    if ver not in (1, 2):
+        errors.append("V1 FAIL: %s meta.pdbbin_ver=%r 非法 (合法 1=v1/2=v2)"
+                      % (label, ver))
+
+
 def _validate_meta(doc, errors):
     if doc.get("schema") != "s2_gain_ladder.v2":
         errors.append("V1 FAIL: schema 不是 s2_gain_ladder.v2")
@@ -127,6 +138,8 @@ def _validate_meta(doc, errors):
     if not isinstance(meta, dict):
         errors.append("V1 FAIL: meta 缺失")
         return
+
+    _validate_pdbbin_ver(meta, "ladder", errors)
 
     fw = meta.get("fw_info")
     if not _has_fields(fw, ("version", "param", "baseline")):
@@ -331,6 +344,7 @@ def _validate_verify_meta(doc, errors):
     if not isinstance(meta, dict):
         errors.append("V1 FAIL: meta 缺失")
         return None
+    _validate_pdbbin_ver(meta, "verify", errors)
     fw = meta.get("fw_info")
     if not _has_fields(fw, ("version", "param", "baseline")):
         errors.append("V1 FAIL: meta.fw_info 缺 version/param/baseline")

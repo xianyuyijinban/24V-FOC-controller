@@ -243,6 +243,29 @@ def test_gap5_no_delta_fails(tmp):
     assert_fail(tmp, make_doc([result]), "gap5_no_delta")
 
 
+def test_pdbbin_ver2_accepts(tmp):
+    """①: meta.pdbbin_ver=2 → 合法, validator 容忍 (帧版本升级不杀数据)"""
+    meta = valid_meta()
+    meta["pdbbin_ver"] = 2
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc(meta=meta),
+                                                "pdbver2.json"))
+    assert rc == 0, "pdbbin_ver=2 应通过 (rc=%s)" % rc
+
+
+def test_pdbbin_ver3_fails(tmp):
+    """①: meta.pdbbin_ver=3 → 非法版本 FAIL (fail-closed)"""
+    meta = valid_meta()
+    meta["pdbbin_ver"] = 3
+    assert_fail(tmp, make_doc(meta=meta), "pdbbin_ver3")
+
+
+def test_pdbbin_ver_absent_passes(tmp):
+    """①: 旧 JSON 无 pdbbin_ver 字段 → 按 v1 过 (容忍, 不破坏旧链路)"""
+    # valid_meta() 不带 pdbbin_ver — 即此场景
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc(), "pdbver_absent.json"))
+    assert rc == 0, "无 pdbbin_ver 字段 (旧 JSON) 应通过 (rc=%s)" % rc
+
+
 if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="gain_ladder_validate_")
     tests = [
@@ -262,6 +285,9 @@ if __name__ == "__main__":
         test_gap5_delta0_warns,
         test_gap5_delta_pos_fails,
         test_gap5_no_delta_fails,
+        test_pdbbin_ver2_accepts,
+        test_pdbbin_ver3_fails,
+        test_pdbbin_ver_absent_passes,
     ]
     for test in tests:
         test(tmp)

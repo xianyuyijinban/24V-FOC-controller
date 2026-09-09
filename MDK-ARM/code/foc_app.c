@@ -1270,6 +1270,11 @@ ff_layers:
                                    + (1.0f - handle->fric_kin) * stick;
                     friction_total += coulomb * smooth;
                     handle->ff_diag.coulomb_iq = coulomb * smooth;  /* 只读镜像: PDBBIN v2 ff_coulomb */
+                } else {
+                    /* coulomb_dir=0 (静止无指令): 本拍无库仑项, 镜像随归零 —
+                     * 否则残留上一次锁存值, 与 friction_iq/ff_total 口径脱钩
+                     * (2026-09-09 ②台架实证: 静止帧 coulomb=-0.022 vs total≈0) */
+                    handle->ff_diag.coulomb_iq = 0.0f;
                 }
                 /* Viscous: proportional to speed */
                 friction_total += handle->motor_param.B * omega / Kt;

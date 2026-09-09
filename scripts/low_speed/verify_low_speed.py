@@ -544,12 +544,15 @@ def main():
                 rep_res["steady"] = {"n": len(angs), "gate_ok": ok_gate}
 
             # 轨迹列 (判读爬行/过冲/掉零用, 每 100 帧抽稀 ≈2Hz)
+            # v2_fields 列 (r[8]=ff_coulomb, r[10]=pos_integral): 门控死区分账直读
             rep_res["traj"] = [
                 {"t": round(r[0] - t0, 3),
                  "theta_deg": round(r[5] / DEG2RAD, 4),
                  "poserr_deg": round(r[3] / DEG2RAD, 4),
                  "ff_iq": round(r[6], 5),
-                 "iq_act": round(r[7], 5)}
+                 "iq_act": round(r[7], 5),
+                 "ff_coulomb": round(r[8], 5),
+                 "pos_integral": round(r[10], 5)}
                 for r in pdb_rows[rb:][::100]]
             # v2 三新字段运动摘要 (2026-09-09 ①; v1 帧列补 0 → 摘要全 0 可判 v1)
             rows_rep = pdb_rows[rb:]

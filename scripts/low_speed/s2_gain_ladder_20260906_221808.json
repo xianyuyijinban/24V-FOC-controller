@@ -1,0 +1,71 @@
+{
+ "schema": "s2_gain_ladder.v2",
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "rounds": 3,
+  "gains": "G2",
+  "ki_retry": 3
+ },
+ "run_status": {
+  "valid": false,
+  "abort_reason": "HEALTH FAIL run=r0: seq_gap ×1"
+ },
+ "meta": {
+  "fw_info": {
+   "version": "1.4.0",
+   "param": "1",
+   "baseline": "12V_STANDARD",
+   "git": "unknown"
+  },
+  "jdiag": {
+   "J": "0.00005294",
+   "B": "0.00100000",
+   "Tc": "0.000000",
+   "enc": "-1",
+   "valid": "0xFFFFFFFF",
+   "cog_valid": "1",
+   "cog_size": "264",
+   "cog_bins": "263",
+   "cog_save": "0",
+   "cog_gain": "0.000",
+   "cog_phase": "60.0",
+   "cog_min": "-0.0093",
+   "cog_max": "0.0133"
+  },
+  "ch_cfg": {
+   "gain_c": "1.000",
+   "recon": "0"
+  },
+  "dt_enabled": false,
+  "dt_cmd_sent": true,
+  "dt_ack": "DT,OK,0",
+  "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+  "config_ack": {
+   "UNLOCK": [
+    "UNLOCK,OK,1"
+   ],
+   "POS_DIRECT": [
+    "POS_DIRECT,OK,1"
+   ],
+   "COG_CFG": [
+    "COG_CFG,gain=0.000,phase_deg=60.0"
+   ],
+   "FRIC_COMP": [
+    true
+   ],
+   "POS_AW_MODE": [
+    true
+   ],
+   "MODE": [
+    true
+   ],
+   "ENABLE": [
+    "ENABLE,OK,1"
+   ]
+  },
+  "n_coexist": true
+ },
+ "results": []
+}

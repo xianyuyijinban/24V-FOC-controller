@@ -1,0 +1,110 @@
+{
+ "schema": "s2_gain_ladder.v2",
+ "args": {
+  "port": "COM10",
+  "baud": 1000000,
+  "power_ok": true,
+  "rounds": 3,
+  "gains": "G2",
+  "ki_retry": 3,
+  "esc": true
+ },
+ "run_status": {
+  "valid": false,
+  "abort_reason": "HEALTH FAIL run=r0: seq_gap ×5 > 容忍2 (N共存)"
+ },
+ "meta": {
+  "fw_info": {
+   "version": "1.4.0",
+   "param": "1",
+   "baseline": "12V_STANDARD",
+   "git": "unknown"
+  },
+  "jdiag": {
+   "J": "0.00005294",
+   "B": "0.00100000",
+   "Tc": "0.000000",
+   "enc": "-1",
+   "valid": "0xFFFFFFFF",
+   "cog_valid": "1",
+   "cog_size": "264",
+   "cog_bins": "263",
+   "cog_save": "0",
+   "cog_gain": "0.000",
+   "cog_phase": "60.0",
+   "cog_min": "-0.0093",
+   "cog_max": "0.0133",
+   "esc": "0",
+   "esc_n": "1"
+  },
+  "ch_cfg": {
+   "gain_c": "1.000",
+   "recon": "0"
+  },
+  "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=unknown",
+  "jdiag_raw": "JDIAG,v7,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133,esc=0,esc_n=1",
+  "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+  "dt_enabled": false,
+  "dt_cmd_sent": true,
+  "dt_ack": "DT,OK,0",
+  "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+  "config_ack": {
+   "UNLOCK": [
+    "UNLOCK,OK,1"
+   ],
+   "POS_DIRECT": [
+    "POS_DIRECT,OK,1"
+   ],
+   "COG_CFG": [
+    "COG_CFG,gain=0.000,phase_deg=60.0"
+   ],
+   "FRIC_COMP": [
+    "FRIC_COMP,OK"
+   ],
+   "POS_AW_MODE": [
+    "POS_AW_MODE,OK"
+   ],
+   "MODE": [
+    "MODE,OK,3"
+   ],
+   "ENABLE": [
+    "ENABLE,OK,1"
+   ],
+   "POS_AW_ESC": [
+    "POS_AW_ESC,OK"
+   ],
+   "POS_AW_ESC_Q": [
+    "POS_AW_ESC,OK,en=1,active=0,count=0"
+   ]
+  },
+  "n_coexist": true,
+  "esc_enabled": true,
+  "run_health": {
+   "seq_gap_loci": [
+    [
+     5478021,
+     "init"
+    ],
+    [
+     5479650,
+     "init"
+    ],
+    [
+     5481164,
+     "init"
+    ],
+    [
+     5485090,
+     "init"
+    ],
+    [
+     5486055,
+     "init"
+    ]
+   ],
+   "esc_active_frames": 0,
+   "tick_stall": 0
+  }
+ },
+ "results": []
+}

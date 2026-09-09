@@ -1,0 +1,720 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": true,
+    "abort_reason": null
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 20.0,
+    "ramp_deg_s": 0.5,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2,
+    "esc": true
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.4.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133",
+      "esc": "0",
+      "esc_n": "0"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v7,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133,esc=0,esc_n=0",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true,
+      "POS_AW_ESC": true,
+      "POS_AW_ESC_Q": "POS_AW_ESC,OK,en=1,active=0,count=0"
+    },
+    "n_coexist": true,
+    "esc_enabled": true
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "40.50000000000001": 100.4,
+            "41.50000000000001": 100.0,
+            "42.50000000000001": 99.9
+          },
+          "pp": 0.010982944185371935,
+          "max_dev": 19.99944185902048,
+          "n": 3124,
+          "track_pct": 94.7
+        },
+        "step": {
+          "arrival": {
+            "0.5": 98.1,
+            "1.0": 98.2,
+            "2.0": 98.4,
+            "2.8": 98.5
+          },
+          "pp": 0.04394543711984511,
+          "max_dev": 19.998046623807397,
+          "n": 140
+        },
+        "steady": {
+          "pp_deg": 0.08,
+          "resid_deg": 0.201,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 2.41,
+          "n": 91
+        },
+        "traj": [
+          {
+            "t": 0.006,
+            "theta_deg": 126.4306,
+            "poserr_deg": -0.0105,
+            "ff_iq": 0.00027,
+            "iq_act": 0.00712
+          },
+          {
+            "t": 0.758,
+            "theta_deg": 126.6283,
+            "poserr_deg": -0.103,
+            "ff_iq": -5e-05,
+            "iq_act": 0.00131
+          },
+          {
+            "t": 1.795,
+            "theta_deg": 126.925,
+            "poserr_deg": -0.3381,
+            "ff_iq": -0.00012,
+            "iq_act": 0.00253
+          },
+          {
+            "t": 2.963,
+            "theta_deg": 127.2545,
+            "poserr_deg": -0.6337,
+            "ff_iq": -0.00438,
+            "iq_act": 0.02565
+          },
+          {
+            "t": 4.17,
+            "theta_deg": 128.1115,
+            "poserr_deg": -0.2981,
+            "ff_iq": 2e-05,
+            "iq_act": 0.02113
+          },
+          {
+            "t": 5.353,
+            "theta_deg": 128.9025,
+            "poserr_deg": -0.1311,
+            "ff_iq": -7e-05,
+            "iq_act": 0.022
+          },
+          {
+            "t": 6.578,
+            "theta_deg": 129.6496,
+            "poserr_deg": -0.0079,
+            "ff_iq": -5e-05,
+            "iq_act": 0.02089
+          },
+          {
+            "t": 8.31,
+            "theta_deg": 130.4845,
+            "poserr_deg": -0.0032,
+            "ff_iq": 8e-05,
+            "iq_act": 0.01384
+          },
+          {
+            "t": 10.126,
+            "theta_deg": 131.4623,
+            "poserr_deg": 0.0418,
+            "ff_iq": -7e-05,
+            "iq_act": 0.01037
+          },
+          {
+            "t": 12.089,
+            "theta_deg": 132.528,
+            "poserr_deg": 0.0242,
+            "ff_iq": -0.00137,
+            "iq_act": 0.00205
+          },
+          {
+            "t": 14.063,
+            "theta_deg": 133.5387,
+            "poserr_deg": 0.1444,
+            "ff_iq": 1e-05,
+            "iq_act": -0.00515
+          },
+          {
+            "t": 16.12,
+            "theta_deg": 134.2858,
+            "poserr_deg": -0.0326,
+            "ff_iq": 0.00017,
+            "iq_act": -0.00637
+          },
+          {
+            "t": 18.066,
+            "theta_deg": 135.4503,
+            "poserr_deg": 0.0822,
+            "ff_iq": 0.00013,
+            "iq_act": -0.00443
+          },
+          {
+            "t": 19.951,
+            "theta_deg": 136.4171,
+            "poserr_deg": 0.1069,
+            "ff_iq": 4e-05,
+            "iq_act": -0.00357
+          },
+          {
+            "t": 21.599,
+            "theta_deg": 137.1752,
+            "poserr_deg": 0.0596,
+            "ff_iq": 5e-05,
+            "iq_act": -0.00357
+          },
+          {
+            "t": 22.72,
+            "theta_deg": 137.8124,
+            "poserr_deg": 0.0751,
+            "ff_iq": -1e-05,
+            "iq_act": -0.0
+          },
+          {
+            "t": 23.549,
+            "theta_deg": 138.3507,
+            "poserr_deg": 0.1865,
+            "ff_iq": -3e-05,
+            "iq_act": 0.00264
+          },
+          {
+            "t": 24.295,
+            "theta_deg": 138.5704,
+            "poserr_deg": 0.105,
+            "ff_iq": 0.00013,
+            "iq_act": -0.00337
+          },
+          {
+            "t": 25.251,
+            "theta_deg": 139.1088,
+            "poserr_deg": 0.1138,
+            "ff_iq": -9e-05,
+            "iq_act": 0.00322
+          },
+          {
+            "t": 26.503,
+            "theta_deg": 139.8888,
+            "poserr_deg": 0.2907,
+            "ff_iq": 0.0003,
+            "iq_act": 0.00241
+          },
+          {
+            "t": 27.949,
+            "theta_deg": 140.526,
+            "poserr_deg": 0.1904,
+            "ff_iq": -0.00018,
+            "iq_act": 0.00255
+          },
+          {
+            "t": 29.397,
+            "theta_deg": 141.1852,
+            "poserr_deg": 0.1115,
+            "ff_iq": -0.00039,
+            "iq_act": 8e-05
+          },
+          {
+            "t": 30.75,
+            "theta_deg": 141.6686,
+            "poserr_deg": -0.0395,
+            "ff_iq": -0.00011,
+            "iq_act": -0.00581
+          },
+          {
+            "t": 32.049,
+            "theta_deg": 142.3058,
+            "poserr_deg": -0.1206,
+            "ff_iq": -0.00079,
+            "iq_act": 0.00706
+          },
+          {
+            "t": 32.946,
+            "theta_deg": 142.5365,
+            "poserr_deg": -0.2966,
+            "ff_iq": -7e-05,
+            "iq_act": 0.0016
+          },
+          {
+            "t": 33.748,
+            "theta_deg": 142.91,
+            "poserr_deg": -0.3506,
+            "ff_iq": -8e-05,
+            "iq_act": 0.0
+          },
+          {
+            "t": 34.931,
+            "theta_deg": 143.2506,
+            "poserr_deg": -0.6571,
+            "ff_iq": -0.00452,
+            "iq_act": 0.01526
+          },
+          {
+            "t": 36.145,
+            "theta_deg": 143.5692,
+            "poserr_deg": -0.8379,
+            "ff_iq": -0.0044,
+            "iq_act": 0.02993
+          },
+          {
+            "t": 37.375,
+            "theta_deg": 144.4811,
+            "poserr_deg": -0.5488,
+            "ff_iq": -0.00552,
+            "iq_act": 0.04031
+          },
+          {
+            "t": 38.702,
+            "theta_deg": 145.4808,
+            "poserr_deg": -0.2768,
+            "ff_iq": -0.00842,
+            "iq_act": 0.04609
+          },
+          {
+            "t": 40.092,
+            "theta_deg": 146.5026,
+            "poserr_deg": 0.1309,
+            "ff_iq": 2e-05,
+            "iq_act": 0.0216
+          },
+          {
+            "t": 42.483,
+            "theta_deg": 146.4257,
+            "poserr_deg": -0.0046,
+            "ff_iq": -6e-05,
+            "iq_act": 0.02428
+          },
+          {
+            "t": 43.864,
+            "theta_deg": 126.87,
+            "poserr_deg": 0.44,
+            "ff_iq": 0.00013,
+            "iq_act": 0.00707
+          },
+          {
+            "t": 45.12,
+            "theta_deg": 146.4806,
+            "poserr_deg": -0.3696,
+            "ff_iq": 5e-05,
+            "iq_act": 0.01677
+          },
+          {
+            "t": 47.542,
+            "theta_deg": 143.9977,
+            "poserr_deg": 18.499,
+            "ff_iq": 0.00656,
+            "iq_act": -0.05308
+          },
+          {
+            "t": 48.621,
+            "theta_deg": 127.1007,
+            "poserr_deg": 0.2507,
+            "ff_iq": 4e-05,
+            "iq_act": 0.0099
+          },
+          {
+            "t": 49.711,
+            "theta_deg": 127.0897,
+            "poserr_deg": 0.2288,
+            "ff_iq": -6e-05,
+            "iq_act": -0.00057
+          },
+          {
+            "t": 50.793,
+            "theta_deg": 127.0568,
+            "poserr_deg": 0.2068,
+            "ff_iq": 1e-05,
+            "iq_act": 0.00632
+          },
+          {
+            "t": 51.898,
+            "theta_deg": 127.0238,
+            "poserr_deg": 0.1738,
+            "ff_iq": -0.0001,
+            "iq_act": 0.00593
+          }
+        ],
+        "health": {
+          "pdb_n": 3804,
+          "seq_gap": 3,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 73.3,
+          "seq_gap_loci": [
+            [
+              125953216,
+              "rep1-ramp"
+            ],
+            [
+              125955037,
+              "rep1-ramp"
+            ],
+            [
+              125972889,
+              "rep1-ramp"
+            ]
+          ]
+        },
+        "esc_count": 0
+      },
+      {
+        "ramp": {
+          "arrival": {
+            "40.50000000000001": 100.3,
+            "41.50000000000001": 100.7,
+            "42.50000000000001": 100.7
+          },
+          "pp": 0.02196588837077229,
+          "max_dev": 19.99618528809151,
+          "n": 2991,
+          "track_pct": 96.0
+        },
+        "step": {
+          "arrival": {
+            "0.5": 97.8,
+            "1.0": 98.1,
+            "2.0": 98.2,
+            "2.8": 98.4
+          },
+          "pp": 0.04394543711984511,
+          "max_dev": 18.736129100525574,
+          "n": 157
+        },
+        "steady": {
+          "pp_deg": 0.05,
+          "resid_deg": 0.191,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 2.18,
+          "n": 90
+        },
+        "traj": [
+          {
+            "t": 0.003,
+            "theta_deg": 127.0018,
+            "poserr_deg": 0.1628,
+            "ff_iq": 8e-05,
+            "iq_act": 0.00242
+          },
+          {
+            "t": 1.12,
+            "theta_deg": 127.2985,
+            "poserr_deg": -0.2512,
+            "ff_iq": 9e-05,
+            "iq_act": 0.01116
+          },
+          {
+            "t": 2.274,
+            "theta_deg": 127.661,
+            "poserr_deg": -0.3858,
+            "ff_iq": -0.00438,
+            "iq_act": 0.02653
+          },
+          {
+            "t": 3.427,
+            "theta_deg": 127.9027,
+            "poserr_deg": -0.779,
+            "ff_iq": -0.00431,
+            "iq_act": 0.03596
+          },
+          {
+            "t": 4.703,
+            "theta_deg": 129.331,
+            "poserr_deg": 0.0154,
+            "ff_iq": 5e-05,
+            "iq_act": 0.02507
+          },
+          {
+            "t": 6.022,
+            "theta_deg": 130.078,
+            "poserr_deg": 0.149,
+            "ff_iq": -4e-05,
+            "iq_act": 0.01683
+          },
+          {
+            "t": 7.834,
+            "theta_deg": 130.891,
+            "poserr_deg": 0.028,
+            "ff_iq": -8e-05,
+            "iq_act": 0.01374
+          },
+          {
+            "t": 9.693,
+            "theta_deg": 131.9127,
+            "poserr_deg": 0.1251,
+            "ff_iq": -5e-05,
+            "iq_act": 0.0071
+          },
+          {
+            "t": 11.746,
+            "theta_deg": 132.8795,
+            "poserr_deg": 0.0404,
+            "ff_iq": 0.00032,
+            "iq_act": 0.00395
+          },
+          {
+            "t": 13.723,
+            "theta_deg": 133.9013,
+            "poserr_deg": 0.1363,
+            "ff_iq": 0.00019,
+            "iq_act": -0.00296
+          },
+          {
+            "t": 15.764,
+            "theta_deg": 134.8351,
+            "poserr_deg": 0.0181,
+            "ff_iq": 0.00018,
+            "iq_act": -0.00109
+          },
+          {
+            "t": 17.622,
+            "theta_deg": 135.8239,
+            "poserr_deg": 0.08,
+            "ff_iq": -2e-05,
+            "iq_act": -0.0012
+          },
+          {
+            "t": 19.463,
+            "theta_deg": 136.7137,
+            "poserr_deg": 0.0122,
+            "ff_iq": 3e-05,
+            "iq_act": -0.00182
+          },
+          {
+            "t": 20.733,
+            "theta_deg": 137.4608,
+            "poserr_deg": 0.1354,
+            "ff_iq": -1e-05,
+            "iq_act": 0.00355
+          },
+          {
+            "t": 21.773,
+            "theta_deg": 137.9332,
+            "poserr_deg": 0.0759,
+            "ff_iq": -7e-05,
+            "iq_act": -0.00593
+          },
+          {
+            "t": 22.572,
+            "theta_deg": 138.6583,
+            "poserr_deg": 0.4169,
+            "ff_iq": 0.00037,
+            "iq_act": 0.00057
+          },
+          {
+            "t": 23.66,
+            "theta_deg": 138.955,
+            "poserr_deg": 0.1707,
+            "ff_iq": 0.00013,
+            "iq_act": -0.0
+          },
+          {
+            "t": 24.916,
+            "theta_deg": 139.5043,
+            "poserr_deg": 0.1181,
+            "ff_iq": -0.00022,
+            "iq_act": 0.00929
+          },
+          {
+            "t": 26.385,
+            "theta_deg": 140.2514,
+            "poserr_deg": 0.1352,
+            "ff_iq": -9e-05,
+            "iq_act": -0.00104
+          },
+          {
+            "t": 27.839,
+            "theta_deg": 140.8886,
+            "poserr_deg": 0.0205,
+            "ff_iq": 5e-05,
+            "iq_act": 0.00157
+          },
+          {
+            "t": 29.304,
+            "theta_deg": 141.6137,
+            "poserr_deg": 0.0301,
+            "ff_iq": -7e-05,
+            "iq_act": -0.00284
+          },
+          {
+            "t": 30.585,
+            "theta_deg": 142.0311,
+            "poserr_deg": -0.199,
+            "ff_iq": -4e-05,
+            "iq_act": 0.00358
+          },
+          {
+            "t": 31.543,
+            "theta_deg": 142.4706,
+            "poserr_deg": -0.2468,
+            "ff_iq": -1e-05,
+            "iq_act": -0.01073
+          },
+          {
+            "t": 32.392,
+            "theta_deg": 142.8112,
+            "poserr_deg": -0.321,
+            "ff_iq": -0.00014,
+            "iq_act": 0.00356
+          },
+          {
+            "t": 33.515,
+            "theta_deg": 143.4154,
+            "poserr_deg": -0.4604,
+            "ff_iq": -0.02346,
+            "iq_act": 0.02412
+          },
+          {
+            "t": 34.735,
+            "theta_deg": 143.9428,
+            "poserr_deg": -0.3441,
+            "ff_iq": 0.0002,
+            "iq_act": 0.00746
+          },
+          {
+            "t": 35.989,
+            "theta_deg": 144.4481,
+            "poserr_deg": -0.4528,
+            "ff_iq": -0.00453,
+            "iq_act": 0.02144
+          },
+          {
+            "t": 37.233,
+            "theta_deg": 144.6788,
+            "poserr_deg": -0.8547,
+            "ff_iq": -0.00432,
+            "iq_act": 0.04354
+          },
+          {
+            "t": 38.566,
+            "theta_deg": 146.3048,
+            "poserr_deg": 0.0413,
+            "ff_iq": -0.0001,
+            "iq_act": 0.02212
+          },
+          {
+            "t": 40.771,
+            "theta_deg": 147.0738,
+            "poserr_deg": 0.054,
+            "ff_iq": -0.00023,
+            "iq_act": 0.02134
+          },
+          {
+            "t": 43.132,
+            "theta_deg": 127.2655,
+            "poserr_deg": 0.2344,
+            "ff_iq": 0.00599,
+            "iq_act": 0.00345
+          },
+          {
+            "t": 44.224,
+            "theta_deg": 127.3095,
+            "poserr_deg": 0.3003,
+            "ff_iq": -9e-05,
+            "iq_act": 0.01204
+          },
+          {
+            "t": 45.668,
+            "theta_deg": 146.931,
+            "poserr_deg": -0.389,
+            "ff_iq": -7e-05,
+            "iq_act": 0.01461
+          },
+          {
+            "t": 47.714,
+            "theta_deg": 127.5402,
+            "poserr_deg": 0.2204,
+            "ff_iq": 0.00434,
+            "iq_act": 0.00608
+          },
+          {
+            "t": 48.81,
+            "theta_deg": 127.5402,
+            "poserr_deg": 0.2204,
+            "ff_iq": -0.00012,
+            "iq_act": 0.00876
+          },
+          {
+            "t": 49.902,
+            "theta_deg": 127.5182,
+            "poserr_deg": 0.1984,
+            "ff_iq": 4e-05,
+            "iq_act": 0.00535
+          },
+          {
+            "t": 51.001,
+            "theta_deg": 127.4962,
+            "poserr_deg": 0.1874,
+            "ff_iq": -9e-05,
+            "iq_act": 0.00873
+          }
+        ],
+        "health": {
+          "pdb_n": 3663,
+          "seq_gap": 2,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 70.8,
+          "seq_gap_loci": [
+            [
+              126054425,
+              "rep2-ramp"
+            ],
+            [
+              126073303,
+              "rep2-ramp"
+            ]
+          ]
+        },
+        "esc_count": 0
+      }
+    ]
+  }
+}

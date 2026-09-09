@@ -1,0 +1,253 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": true
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 6.0,
+    "ramp_deg_s": 2.0,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 0.0,
+    "aw": "1,0.03",
+    "reps": 2
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.4.0",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "0.000",
+      "cog_phase": "60.0",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.4.0,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v6,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=0.000,cog_phase=60.0,cog_min=-0.0093,cog_max=0.0133",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    },
+    "n_coexist": true
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "3.500000000000004": 97.4,
+            "4.5000000000000036": 96.9,
+            "5.5000000000000036": 97.1
+          },
+          "pp": 0.010982944185400356,
+          "max_dev": 5.997805842232026,
+          "n": 94,
+          "track_pct": 133.2
+        },
+        "step": {
+          "arrival": {
+            "0.5": 77.2,
+            "1.0": 83.0,
+            "2.0": 90.7,
+            "2.8": 94.4
+          },
+          "pp": 0.28562485071159927,
+          "max_dev": 5.993600756959012,
+          "n": 54
+        },
+        "steady": {
+          "pp_deg": 0.06,
+          "resid_deg": 0.008,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 5.21,
+          "n": 78
+        },
+        "traj": [
+          {
+            "t": 0.036,
+            "theta_deg": 178.1212,
+            "poserr_deg": -0.1768,
+            "ff_iq": -9e-05,
+            "iq_act": 0.00881
+          },
+          {
+            "t": 6.256,
+            "theta_deg": 179.3846,
+            "poserr_deg": 1.2549,
+            "ff_iq": -0.00016,
+            "iq_act": -0.00351
+          },
+          {
+            "t": 9.022,
+            "theta_deg": -176.1659,
+            "poserr_deg": -0.777,
+            "ff_iq": -0.00015,
+            "iq_act": -0.01519
+          },
+          {
+            "t": 12.445,
+            "theta_deg": 178.9122,
+            "poserr_deg": 0.3231,
+            "ff_iq": 3e-05,
+            "iq_act": 0.00175
+          },
+          {
+            "t": 13.853,
+            "theta_deg": 178.7145,
+            "poserr_deg": 0.1144,
+            "ff_iq": 0.00011,
+            "iq_act": 0.0
+          },
+          {
+            "t": 15.224,
+            "theta_deg": 178.6375,
+            "poserr_deg": 0.0374,
+            "ff_iq": -4e-05,
+            "iq_act": -0.00404
+          },
+          {
+            "t": 16.567,
+            "theta_deg": 178.6265,
+            "poserr_deg": 0.0045,
+            "ff_iq": -0.0,
+            "iq_act": -0.00337
+          }
+        ],
+        "health": {
+          "pdb_n": 688,
+          "seq_gap": 1,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 38.8,
+          "seq_gap_loci": [
+            [
+              2308922,
+              "rep1-ramp"
+            ]
+          ]
+        }
+      },
+      {
+        "ramp": {
+          "arrival": {
+            "3.500000000000004": 92.0,
+            "4.5000000000000036": 96.9,
+            "5.5000000000000036": 97.1
+          },
+          "pp": 0.02196588837074387,
+          "max_dev": 5.996399243040997,
+          "n": 105,
+          "track_pct": 141.9
+        },
+        "step": {
+          "arrival": {
+            "0.5": 76.0,
+            "1.0": 81.7,
+            "2.0": 90.3,
+            "2.8": 94.3
+          },
+          "pp": 0.2966351156536575,
+          "max_dev": 4.075335205230203,
+          "n": 54
+        },
+        "steady": {
+          "pp_deg": 0.03,
+          "resid_deg": 0.01,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 4.9,
+          "n": 80
+        },
+        "traj": [
+          {
+            "t": 0.003,
+            "theta_deg": 178.5936,
+            "poserr_deg": -0.0065,
+            "ff_iq": 4e-05,
+            "iq_act": -0.00063
+          },
+          {
+            "t": 5.742,
+            "theta_deg": -175.5836,
+            "poserr_deg": -0.1734,
+            "ff_iq": 0.0001,
+            "iq_act": -0.01898
+          },
+          {
+            "t": 10.205,
+            "theta_deg": -175.342,
+            "poserr_deg": -0.3511,
+            "ff_iq": 1e-05,
+            "iq_act": -0.02544
+          },
+          {
+            "t": 13.451,
+            "theta_deg": 179.1209,
+            "poserr_deg": 0.0899,
+            "ff_iq": -6e-05,
+            "iq_act": 0.00347
+          },
+          {
+            "t": 15.272,
+            "theta_deg": 179.0441,
+            "poserr_deg": 0.024,
+            "ff_iq": 8e-05,
+            "iq_act": 0.0
+          },
+          {
+            "t": 16.596,
+            "theta_deg": 179.0221,
+            "poserr_deg": 0.002,
+            "ff_iq": -0.00018,
+            "iq_act": -0.00254
+          }
+        ],
+        "health": {
+          "pdb_n": 561,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 32.2,
+          "seq_gap_loci": []
+        }
+      }
+    ]
+  }
+}

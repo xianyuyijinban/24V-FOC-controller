@@ -1,0 +1,72 @@
+{
+  "events": [],
+  "checks": {
+    "storm_sent": 3,
+    "storm_overflow_sum": 8,
+    "state_transition": {
+      "old": 3,
+      "new": 4
+    },
+    "esc_trigger": {
+      "err_rad": -0.06921,
+      "tick": 1334881
+    },
+    "tick_alignment": {
+      "pdb_first": 1330251,
+      "pdb_last": 1354885,
+      "evt_monotonic": true
+    },
+    "pdb_integrity": {
+      "rx": 1264,
+      "crc_err": 0,
+      "seq_gap": 1,
+      "rate_hz": 102.6
+    },
+    "evt_stats": {
+      "rx": 7,
+      "crc_err": 0
+    },
+    "tx_p1_drop_delta": 0
+  },
+  "storm_events": [
+    {
+      "tick": 1310135,
+      "old": 1,
+      "new": 2,
+      "overflow": 0
+    },
+    {
+      "tick": 1310341,
+      "old": 3,
+      "new": 1,
+      "overflow": 4
+    },
+    {
+      "tick": 1310546,
+      "old": 2,
+      "new": 3,
+      "overflow": 4
+    }
+  ],
+  "state_events": [
+    {
+      "tick": 1315046,
+      "old": 3,
+      "new": 4
+    }
+  ],
+  "esc_events": [
+    {
+      "tick": 1334881,
+      "err_rad": -0.06921,
+      "trigger": true,
+      "overflow": 0
+    },
+    {
+      "tick": 1337481,
+      "err_rad": -0.02281,
+      "trigger": false,
+      "overflow": 0
+    }
+  ]
+}

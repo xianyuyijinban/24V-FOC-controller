@@ -1,5 +1,26 @@
 # PROGRESS
 
+## [2026-09-09] AI 链路协议增量 ①: PDBBIN v2 帧 — 完成闭环
+
+- 落码 70aeb70: 固件 type 0x21 (DBG_TYPE_PDB2V2) payload 49B = v1 37B 前缀逐比特一致
+  + 尾部 3×float (ff_coulomb/ff_cogging/pos_integral); `CMD:PDBBIN,2` 开 v2, `,1` v1
+  逐比特不变, `,?` 报版本。解析端 foclink TYPE_PDB2V2 分流, ladder/verify 增
+  `--pdbver` (默认 1), meta 增 `pdbbin_ver`, validator 容忍新旧。
+- 取数口径 (核实后): ff_coulomb = Coulomb 段 coulomb×smooth 生效值 (FFDiag.coulomb_iq
+  最小只读镜像, 赋值两处不动逻辑); ff_cogging = ff_diag.cogging_iq (已有);
+  pos_integral = pos_ki_out_prev 饱和后 ki_out (已有, 任务卡"static 局部变量"担忧不成立)。
+- 单测: test_foclink_pdbv2 5/5 (v2 解析/边界值/负值 + v1 回归 + 混合流 + CRC/len 防护);
+  validator 19/19 (增 pdbbin_ver=2 过/ver=3 FAIL/缺省过 3 例)。
+- 台架验收 (板=70aeb70, 断言式烧录, FW_INFO 1.5.0 alive):
+  - 纯流 60s (scripts/low_speed/pdbv2_pure_stream_20260909_170414.json): 12004 帧 200.1Hz,
+    CRC=0, seq gap=0, tick 间隔 9/10/11 全在 drain 抖动带内; v1 5s 回归流照常。
+  - v2 运动轮 (verify_lowspeed_20260909_170937.json, --pdbver 2, validator OK):
+    ff_coulomb_absmax=0.022 (comp 定版值精确复现), ff_cogging=0 (COG 关照实),
+    pos_integral_absmax=0.0134A (阶跃充电量级合理); health gap=0 CRC=0 delta=0。
+  - v1 回归 (verify_lowspeed_20260909_171210.json, --pdbver 1, validator OK):
+    阶跃 2.8s=100.8% (98-101% 历史带内) — "逐比特不变"非嘴上说的。
+- 文档: docs/UART_COMMANDS.md PDBBIN v2 帧格式 + 命令表同步。
+
 ## [2026-09-09] 挂账：门控死区诊断任务卡 + AI 链路协议增量设计案
 
 ### 门控死区（2°/s 斜坡过冲 125-143%）— 诊断先行，规格待定

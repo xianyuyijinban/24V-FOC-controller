@@ -288,7 +288,10 @@ def main():
     def on_pdb(s):
         pdb_rows.append((s.host_rx_time, s.tick_2khz, s.flags,
                          s.pos_err_rad, s.iq_cmd, s.theta_user_rad,
-                         s.ff_total, s.iq_act))
+                         s.ff_total, s.iq_act,
+                         getattr(s, "ff_coulomb", 0.0),
+                         getattr(s, "ff_cogging", 0.0),
+                         getattr(s, "pos_integral", 0.0)))
         health["pdb_n"] += 1
         state = (s.flags >> 8) & 0xFF
         fault = s.flags & 0xFF
@@ -548,6 +551,14 @@ def main():
                  "ff_iq": round(r[6], 5),
                  "iq_act": round(r[7], 5)}
                 for r in pdb_rows[rb:][::100]]
+            # v2 三新字段运动摘要 (2026-09-09 ①; v1 帧列补 0 → 摘要全 0 可判 v1)
+            rows_rep = pdb_rows[rb:]
+            if rows_rep:
+                rep_res["v2_fields"] = {
+                    "ff_coulomb_absmax": round(max(abs(r[8]) for r in rows_rep), 5),
+                    "ff_cogging_absmax": round(max(abs(r[9]) for r in rows_rep), 5),
+                    "pos_integral_absmax": round(max(abs(r[10]) for r in rows_rep), 5),
+                }
             # health 摘要 (2026-09-06 #52, validator V4/V6 用) — rep 起点快照差
             dur_s = max(0.1, time.time() - t0)
             # gap 归因直接测量 (Kimi A 规格): scope 尾取样 + 无符号回绕安全差值

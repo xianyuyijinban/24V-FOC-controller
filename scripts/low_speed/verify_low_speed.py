@@ -333,6 +333,19 @@ def main():
             time.sleep(0.005)
         return None
 
+    def read_tx_p1_drop():
+        """固件 TX 环 P1 丢帧计数器 (CMD:UART_RX?) — gap 归因直接测量
+        (2026-09-09 Kimi A 规格)。返回 int 或 None (丢响应不阻塞)。"""
+        for _ in range(2):
+            l = expect_q("CMD:UART_RX?", "UART_RX,OK,")
+            if l:
+                f = parse_status_fields(l)
+                v = f.get("tx_p1_drop", "")
+                if v.isdigit():
+                    return int(v)
+            time.sleep(0.2)
+        return None
+
     # 开 PDBBIN 后再启 reader (二进制帧由 parser 消化, 不乱文本行)
     ser.reset_input_buffer()
     ser.write(b"CMD:PDBBIN,1\n")
@@ -415,6 +428,8 @@ def main():
             hp0 = dict(health)   # 快照 (含 pdb_n/seq_gap/bad_state/bad_fault)
             # ESC 惰性证明 (2026-09-07): rep 起点 count 快照
             esc_c0 = None
+            # gap 归因直接测量取样点 (Kimi A 规格): scope 首尾 tx_p1_drop
+            tx_p1_0 = read_tx_p1_drop()
             if args.esc:
                 lq = expect_q("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
                 fq = parse_status_fields(lq) if lq else {}
@@ -515,6 +530,12 @@ def main():
                 for r in pdb_rows[rb:][::100]]
             # health 摘要 (2026-09-06 #52, validator V4/V6 用) — rep 起点快照差
             dur_s = max(0.1, time.time() - t0)
+            # gap 归因直接测量 (Kimi A 规格): scope 尾取样 + 无符号回绕安全差值
+            tx_p1_1 = read_tx_p1_drop()
+            if tx_p1_0 is not None and tx_p1_1 is not None:
+                tx_p1_delta = (tx_p1_1 - tx_p1_0) & 0xFFFFFFFF
+            else:
+                tx_p1_delta = None
             rep_res["health"] = {
                 "pdb_n": health["pdb_n"] - hp0["pdb_n"],
                 "seq_gap": health["seq_gap"] - hp0["seq_gap"],
@@ -525,6 +546,7 @@ def main():
                 "sample_rate_hz": round((health["pdb_n"] - hp0["pdb_n"]) / dur_s, 1),
                 # gap 位置归因 (2026-09-06 Kimi 补救规格): 本 rep 的 loci 切片
                 "seq_gap_loci": health["seq_gap_loci"][hp0.get("_loci_n", 0):],
+                "tx_p1_drop_delta": tx_p1_delta,
             }
             health["_loci_n"] = len(health["seq_gap_loci"])   # 下 rep 起点
             # ESC 惰性断言 (2026-09-07, 方向与 ladder 相反): count 必须不变。

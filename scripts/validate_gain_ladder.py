@@ -97,6 +97,24 @@ def _trajectory(result):
     return decoded
 
 
+def _validate_gap_delta(health, label, gap, errors, warns):
+    """gap 归因直接测量 (2026-09-09 Kimi A 规格): gap>2 时查固件 TX 丢帧真值。
+    delta 缺失 = FAIL (无证据 fail-closed); delta=0 = WARN (主机侧 RX 损耗,
+    归因齐); delta>0 = FAIL (固件真丢)。gap≤2 现状不动 (loci 容忍)。"""
+    if gap <= 2:
+        return
+    delta = health.get("tx_p1_drop_delta")
+    if delta is None:
+        errors.append("V4 FAIL: %s seq_gap=%d>2 且 tx_p1_drop_delta 缺失 — "
+                      "无归因证据 fail-closed" % (label, gap))
+    elif delta == 0:
+        warns.append("V4: %s seq_gap=%d>2 但 tx_p1_drop_delta=0 — 丢帧在主机侧 "
+                     "RX (固件 TX 零丢), 归因齐" % (label, gap))
+    else:
+        errors.append("V4 FAIL: %s seq_gap=%d 且 tx_p1_drop_delta=%s>0 — "
+                      "固件 TX 真丢帧" % (label, gap, delta))
+
+
 def _validate_meta(doc, errors):
     if doc.get("schema") != "s2_gain_ladder.v2":
         errors.append("V1 FAIL: schema 不是 s2_gain_ladder.v2")
@@ -159,7 +177,8 @@ def _validate_meta(doc, errors):
                 errors.append("V1 FAIL: meta.config_ack 缺 %s" % name)
 
 
-def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE):
+def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE,
+                     warns=None):
     health = result.get("health")
     if not isinstance(health, dict):
         errors.append("V4 FAIL: %s 缺 health 摘要" % label)
@@ -183,6 +202,8 @@ def _validate_health(result, label, errors, rate_floor=PDB_MIN_RATE_HZ_PURE):
                 if not isinstance(loci, list) or len(loci) != int(value):
                     errors.append("V4 FAIL: %s seq_gap=%d 但 seq_gap_loci 缺失/长度"
                                   "不符 — 无归因不容忍" % (label, value))
+                # gap>2 → 固件 TX 丢帧真值裁决 (2026-09-09 Kimi A 规格)
+                _validate_gap_delta(health, label, int(value), errors, warns or [])
         elif key != "pdb_n" and value != 0:
             errors.append("V4 FAIL: %s health.%s=%s" % (label, key, health[key]))
 
@@ -364,9 +385,10 @@ def _validate_verify(doc, errors, warns):
                         "bad_fault", "crc_err", "sample_rate_hz"):
                 if _number(h.get(key)) is None:
                     errors.append("V4 FAIL: %s health.%s 缺失/非数值" % (label, key))
-            # seq_gap 阈值: N 共存容忍 ≤2 帧 (F1 N 帧仲裁投影候选, 8/31 TX 泵专项);
-            # 容忍前提 = gap_loci 位置归因材料齐全 (2026-09-06 Kimi 补救规格) —
-            # loci 缺失/长度不符 = 无归因 = 直接 fail
+            # seq_gap 阈值: N 共存容忍 ≤2 帧 (容忍依据 2026-09-09 已修订: 原口径
+            # "F1 仲裁投影"被 CMD:UART_RX? tx_p1_drop=0 证伪 — 丢帧在主机侧 RX,
+            # 固件 TX 零丢); 容忍前提 = gap_loci 位置归因材料齐全 (2026-09-06);
+            # gap>2 → tx_p1_drop_delta 三分支裁决 (2026-09-09 Kimi A 规格)
             gap_tol = 2 if meta.get("n_coexist") is True else 0
             for key in ("seq_gap", "tick_stall", "bad_state", "bad_fault", "crc_err"):
                 val = _number(h.get(key))
@@ -376,6 +398,7 @@ def _validate_verify(doc, errors, warns):
                     if val > gap_tol:
                         errors.append("V4 FAIL: %s health.seq_gap=%s > 容忍%d (N共存)"
                                       % (label, h.get(key), gap_tol))
+                        _validate_gap_delta(h, label, int(val), errors, warns)
                     elif val > 0:
                         loci = h.get("seq_gap_loci")
                         if not isinstance(loci, list) or len(loci) != int(val):
@@ -455,7 +478,7 @@ def _validate_ladder_results(doc, errors, warns):
             warns.append("V4/V5: %s 稳定门超时 (记录为 WARN, 需要复跑)" % label)
             continue
         _validate_round_config(result, label, errors)
-        sample_rate = _validate_health(result, label, errors, rate_floor)
+        sample_rate = _validate_health(result, label, errors, rate_floor, warns)
         _validate_gate(result, label, errors, warns)
         reported_n = _number(result.get("pdb_n"))
         if reported_n is None or reported_n < MIN_PDB_N:

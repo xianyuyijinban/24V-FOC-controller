@@ -307,6 +307,20 @@ def main():
         run_meta["config_ack"].setdefault(name, []).append(ack)
         return bool(ack)
 
+    def read_tx_p1_drop():
+        """固件 TX 环 P1 丢帧计数器 (CMD:UART_RX?, uart_upload.c:1876) —
+        gap 归因直接测量 (2026-09-09 Kimi A 规格): delta=0 → 丢帧在主机侧 RX,
+        delta>0 → 固件真丢。返回 int 或 None (查询丢响应不阻塞主流程)。"""
+        for _ in range(2):
+            l = expect2("CMD:UART_RX?", "UART_RX,OK,")
+            if l:
+                f = parse_status_fields(l)
+                v = f.get("tx_p1_drop", "")
+                if v.isdigit():
+                    return int(v)
+            time.sleep(0.2)
+        return None
+
     # 单线程 reader (PDBBIN + N帧) — 主线程不得再直读串口 (家族 segfault 教训)
     pdb_rows = []
     nframe_q = []   # (host_rx, p1_ts, p3_ang_deg, p6_iq, p8_fault, p2_state)
@@ -635,6 +649,8 @@ def main():
                 esc_count0 = None
                 esc_count1 = None
                 esc_active_end = None
+                # gap 归因直接测量取样点 (Kimi A 规格): scope 首尾 tx_p1_drop
+                tx_p1_0 = read_tx_p1_drop()
                 if args.esc:
                     l0 = expect2("CMD:POS_AW_ESC?", "POS_AW_ESC,OK,en=")
                     f0 = parse_status_fields(l0) if l0 else {}
@@ -744,6 +760,12 @@ def main():
                 t95 = t95_state["t95_rx"]
                 t_settle_0p1_deg = t95_state["settle_0p1_rx"]
                 round_health = health_summary()
+                # gap 归因直接测量 (Kimi A 规格): scope 尾取样 + 无符号回绕安全差值
+                tx_p1_1 = read_tx_p1_drop()
+                if tx_p1_0 is not None and tx_p1_1 is not None:
+                    round_health["tx_p1_drop_delta"] = (tx_p1_1 - tx_p1_0) & 0xFFFFFFFF
+                else:
+                    round_health["tx_p1_drop_delta"] = None
 
                 ts = time.strftime("%H:%M:%S")
                 print("%s 轮%d: ts=%s overflow_backlog=%d gate=%.1fs pp=%.3f° "

@@ -207,6 +207,42 @@ def test_gate_pp_borderline_warns(tmp):
     assert_fail(tmp, make_doc([result2]), "gate_pp_over")
 
 
+def test_gap5_delta0_warns(tmp):
+    """tx_p1_drop 三分支 (2026-09-09 Kimi A 规格): gap>2 + delta=0 →
+    丢帧在主机侧 RX (固件 TX 零丢), 归因齐 → WARN 不 FAIL"""
+    result = valid_round()
+    result["health"]["seq_gap"] = 5
+    result["health"]["seq_gap_loci"] = [[100, "r0-step"], [200, "r0-ramp"],
+                                        [300, "r0-gate"], [400, "r1-step"],
+                                        [500, "r1-ramp"]]
+    result["health"]["tx_p1_drop_delta"] = 0
+    rc = validate_gain_ladder.validate(write_doc(tmp, make_doc([result]),
+                                                "gap5_delta0.json"))
+    assert rc == 0, "gap5+delta0 应 WARN 不 FAIL (rc=%s)" % rc
+
+
+def test_gap5_delta_pos_fails(tmp):
+    """gap>2 + delta>0 → 固件 TX 真丢帧 → FAIL"""
+    result = valid_round()
+    result["health"]["seq_gap"] = 5
+    result["health"]["seq_gap_loci"] = [[100, "r0-step"], [200, "r0-ramp"],
+                                        [300, "r0-gate"], [400, "r1-step"],
+                                        [500, "r1-ramp"]]
+    result["health"]["tx_p1_drop_delta"] = 3
+    assert_fail(tmp, make_doc([result]), "gap5_delta3")
+
+
+def test_gap5_no_delta_fails(tmp):
+    """gap>2 + delta 缺失 → 无归因证据 fail-closed → FAIL"""
+    result = valid_round()
+    result["health"]["seq_gap"] = 5
+    result["health"]["seq_gap_loci"] = [[100, "r0-step"], [200, "r0-ramp"],
+                                        [300, "r0-gate"], [400, "r1-step"],
+                                        [500, "r1-ramp"]]
+    # tx_p1_drop_delta 不写 = 缺失
+    assert_fail(tmp, make_doc([result]), "gap5_no_delta")
+
+
 if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="gain_ladder_validate_")
     tests = [
@@ -223,6 +259,9 @@ if __name__ == "__main__":
         test_gap_loci_mismatch,
         test_gap_loci_matched,
         test_gate_pp_borderline_warns,
+        test_gap5_delta0_warns,
+        test_gap5_delta_pos_fails,
+        test_gap5_no_delta_fails,
     ]
     for test in tests:
         test(tmp)

@@ -1418,6 +1418,16 @@
               <FilePath>.\code\debug_stream.h</FilePath>
             </File>
             <File>
+              <FileName>trig_ring.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\trig_ring.c</FilePath>
+            </File>
+            <File>
+              <FileName>trig_ring.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\trig_ring.h</FilePath>
+            </File>
+            <File>
               <FileName>wheel_input.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\wheel_input.c</FilePath>

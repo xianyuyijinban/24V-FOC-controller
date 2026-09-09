@@ -406,6 +406,8 @@ typedef struct {
     uint16_t pos_aw_esc_run_ticks;  /* 逃逸态计时 (FOC_POS_AW_ESC_MAX_TICKS 强制退出) */
     uint16_t pos_aw_esc_count_diag; /* 逃逸触发累计 (JDIAG esc_n; CMD:POS_AW_ESC,1 时清零) */
 
+    uint8_t  trig_prev_state;       /* TRIG 触发监视: 上次主循环拍的 state (③) */
+
     /* 前馈数据 */
     FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */
     FOC_TorqueObserver_t torque_obs;/* 负载转矩观测器 (P4) */

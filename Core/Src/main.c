@@ -36,6 +36,7 @@
 #include "can_protocol.h"
 #include "current_stream.h"
 #include "debug_stream.h"
+#include "trig_ring.h"
 #include "foc_profiler.h"
 /* USER CODE END Includes */
 
@@ -267,6 +268,7 @@ int main(void)
   DrvUart_Init(&huart1, &drv8350s);
   CurStream_Init();  /* V1.1: binary current stream */
   DebugStream_Init();  /* PDBBIN binary debug stream */
+  TrigRing_Init();  /* ③: fault-trigger ring buffer */
   CanProtocol_Init(CAN_NODE_ID_DEFAULT);  /* Phase 6 */
   Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   

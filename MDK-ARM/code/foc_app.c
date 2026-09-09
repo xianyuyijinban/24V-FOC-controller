@@ -7,6 +7,7 @@
 #include "foc_app.h"
 #include "current_stream.h"
 #include "foc_profiler.h"
+#include "trig_ring.h"
 #include "wheel_input.h"
 #include "tle5012.h"
 #include "uart_upload.h"
@@ -240,6 +241,16 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
         handle->pending_disable = 0U;
         FOC_App_Disable(handle);
     }
+
+    /* TRIG 触发监视 (③): fault 闩锁或 state 掉出 RUNNING → 自动触发验尸。
+     * 主循环拍执行 (非 ISR): TrigRing_Trigger 只写 3 个状态量, 与 20kHz
+     * 采样竞态安全 (Trigger 在 IDLE 态才接受, ISR 侧只读 state 判分支)。 */
+    if ((handle->state == FOC_STATE_FAULT) ||
+        (handle->trig_prev_state == FOC_STATE_RUNNING &&
+         handle->state != FOC_STATE_RUNNING)) {
+        (void)TrigRing_Trigger(TRIG_SRC_FAULT);
+    }
+    handle->trig_prev_state = handle->state;
 
     FOC_App_RefreshTelemetry(handle);
 
@@ -587,6 +598,12 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
 exit_cycle:
     ADC_Sampling_EndControlCycle();
+    /* TRIG ring 采样 (③): 20kHz 原速 O(1) 写, 控制循环末尾全部字段就绪。
+     * Idq/Vdq 在 RUNNING 前 (无控制输出拍) 是旧值/0 — 照实记录, 验尸口径。 */
+    TrigRing_Sample(handle->foc.Idq.d, handle->foc.Idq.q,
+                    handle->foc.Vdq.d, handle->foc.Vdq.q,
+                    handle->foc.theta_elec, handle->Iq_ref,
+                    handle->control_count);
     FOC_App_PushCurrentStream(handle);
 }
 

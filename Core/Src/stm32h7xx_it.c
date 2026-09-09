@@ -25,6 +25,7 @@
 #include "head.h"
 #include "uart_upload.h"
 #include "debug_stream.h"
+#include "trig_ring.h"
 #include "adc_sampling.h"
 #include "can_protocol.h"
 #include "fdcan.h"
@@ -1479,6 +1480,7 @@ static void UART_CommandExecute(const char *cmd)
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
             " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG? CH_CFG,gain,recon CH_CFG?\r\n"
+            " TRIG: TRIG,NOW TRIG,STAT? TRIG,PULL,off,len TRIG,CLR (故障验尸 ring buffer)\r\n"
         );
         return;
     }
@@ -2209,6 +2211,76 @@ static void UART_CommandExecute(const char *cmd)
         } else {
             UART_CommandSendText("PDBBIN,FAIL,range\r\n");
         }
+        return;
+    }
+
+    /* ── TRIG: 故障触发 ring buffer (③, 2026-09-09) ── */
+    if (strcmp(cmd, "CMD:TRIG,NOW") == 0) {
+        /* 手动合成触发: 验尸窗标定与测试用 */
+        if (TrigRing_Trigger(TRIG_SRC_MANUAL) != 0U) {
+            UART_CommandSendText("TRIG,OK,now\r\n");
+        } else {
+            UART_CommandSendText("TRIG,FAIL,busy\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:TRIG,STAT?") == 0) {
+        char resp[112];
+        /* state: 0=IDLE 1=POST 2=FROZEN; src: 0=none 1=fault 2=manual */
+        (void)snprintf(resp, sizeof(resp),
+            "TRIG,OK,state=%u,src=%u,trig_tick=%lu,post=%lu\r\n",
+            (unsigned int)TrigRing_GetState(),
+            (unsigned int)TrigRing_GetSource(),
+            (unsigned long)TrigRing_GetTrigTick(),
+            (unsigned long)TrigRing_GetPostCount());
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strncmp(cmd, "CMD:TRIG,PULL,", 14) == 0) {
+        /* 分块拉取: off/len 按帧 (0..1023, 触发帧=768), ≤256 帧/块。
+         * 响应 = TRIG,BIN,<len>,<binary bytes len×28+CRC16(2)> — 二进制尾缀,
+         * 主机按 len 读字节。拉取期间 PDBBIN 暂停 (帧边界安全), 块完恢复。 */
+        int off_i = -1, len_i = -1;
+        uint8_t pullbuf[TRIG_PULL_MAX_BYTES + 2U];
+        uint16_t out_len;
+        uint8_t pdb_restore = 0U;
+        if (sscanf(cmd, "CMD:TRIG,PULL,%d,%d", &off_i, &len_i) == 2 &&
+            off_i >= 0 && len_i > 0 && len_i <= 256) {
+            if (TrigRing_GetState() != TRIG_STATE_FROZEN) {
+                UART_CommandSendText("TRIG,FAIL,not_frozen\r\n");
+                return;
+            }
+            if (s_pdbbin_stream != 0U) {
+                s_pdbbin_stream = 0U;      /* 拉取期间暂停 PDB 流 (任务卡③) */
+                pdb_restore = 1U;
+            }
+            out_len = TrigRing_Pull((uint16_t)off_i, (uint16_t)len_i, pullbuf);
+            if (out_len == 0U) {
+                if (pdb_restore != 0U) { s_pdbbin_stream = 1U; }
+                UART_CommandSendText("TRIG,FAIL,pull\r\n");
+                return;
+            }
+            {
+                char hdr[32];
+                int hdr_len = snprintf(hdr, sizeof(hdr), "TRIG,BIN,%u,",
+                                       (unsigned int)out_len);
+                /* 头 + 二进制块一次入队 (P0 原子准入): 借用 SendTextP0 后跟
+                 * SendBytesP0 — 两段间 P1 可插队, 但主机按头 len 读字节不受
+                 * 影响; 块本身 28×len+CRC 单次 memcpy 原子。 */
+                UART_CommandSendText(hdr);
+                DrvUart_SendBytesP0(pullbuf, out_len);
+            }
+            if (pdb_restore != 0U) {
+                s_pdbbin_stream = 1U;      /* 拉完恢复 */
+            }
+        } else {
+            UART_CommandSendText("TRIG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:TRIG,CLR") == 0) {
+        TrigRing_Clear();
+        UART_CommandSendText("TRIG,OK,clr\r\n");
         return;
     }
 

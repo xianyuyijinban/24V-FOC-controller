@@ -131,6 +131,77 @@ static volatile uint32_t s_posdbg_last_tick = 0U;  /* 200Hz 时间门控基准 (
 static volatile uint32_t s_foc_tick_2khz = 0U;  /* 速度环节拍计数 (2kHz, TIM1 ISR) — PDB 行硬件时基 */
 static uint8_t  s_pdbbin_stream = 0U;           /* PDBBIN: 文本 PDB 的二进制孪生 (CMD:PDBBIN,1|0) */
 
+/* ── EVT 事件帧 (2026-09-09 ②): 采样对比式事件源 ──
+ * 铁律 1 (不碰锁定区/不穿透 foc_app.c 分层): 所有事件源都是 g_foc_app
+ * 已有字段, 2kHz 拍尾部采样与上拍对比, 变化即发帧 — 不在 foc_app.c
+ * 内插任何 UART 调用。tick 同源 s_foc_tick_2khz (PDBBIN 同基准)。
+ * 0x04 AW 模式切换例外: 命令驱动 (it.c POS_AW_MODE 处直接发), 非采样。 */
+static uint8_t  s_evt_prev_state = 0xFFU;       /* 上拍 state (0xFF=首拍强制发基线) */
+static uint8_t  s_evt_prev_fault = 0xFFU;       /* 上拍 fault_code 低 8 位 */
+static uint8_t  s_evt_prev_esc = 0xFFU;         /* 上拍 pos_aw_esc_active */
+static uint32_t s_evt_prev_p1drop = 0U;         /* 上次 tx_p1_drop 快照 */
+static uint32_t s_evt_p1drop_last_poll = 0U;    /* 0x05 低频轮询基准拍 (1Hz) */
+
+static void EVT_Emit(uint8_t code, const uint8_t *p, uint8_t plen)
+{
+    EvtPayload_t ev;
+    (void)memset(&ev, 0, sizeof(ev));
+    ev.tick_2khz = s_foc_tick_2khz;
+    ev.code = code;
+    if (p != NULL && plen > 0U) {
+        (void)memcpy(ev.payload, p, (plen > 8U) ? 8U : plen);
+    }
+    DebugStream_PushEvent(&ev);
+}
+
+/* ESC 触发时的 pos_err: 采样式拿不到触发瞬间值 (状态位晚一拍),
+ * 发帧时读 g_foc_app.position_loop_error_diag (最近一次位置环更新) —
+ * 滞后 ≤1 位置环拍 (5ms), 卡滞场景 err 常驻 >3°, 值仍归因可信。 */
+static void EVT_SampleControlState(void)
+{
+    const FOC_AppHandle_t *h = &g_foc_app;
+    uint8_t state_now = (uint8_t)h->state;
+    uint8_t fault_now = (uint8_t)(h->fault_code & 0xFFU);
+    uint8_t esc_now = (h->pos_aw_esc_active != 0U) ? 1U : 0U;
+
+    if (state_now != s_evt_prev_state) {
+        uint8_t p[2];
+        p[0] = s_evt_prev_state;    /* 首拍 0xFF = 上电基线帧 (语义: 采样起点) */
+        p[1] = state_now;
+        EVT_Emit(EVT_CODE_STATE, p, 2U);
+        s_evt_prev_state = state_now;
+    }
+    if (fault_now != s_evt_prev_fault) {
+        uint8_t p[5];
+        (void)memset(p, 0, sizeof(p));
+        (void)memcpy(p, &h->fault_code, 4U);   /* fault_mask LE32 */
+        p[4] = (fault_now != 0U) ? 1U : 0U;    /* 1=set 0=clear */
+        EVT_Emit(EVT_CODE_FAULT, p, 5U);
+        s_evt_prev_fault = fault_now;
+    }
+    if (esc_now != s_evt_prev_esc) {
+        uint8_t p[5];
+        float pos_err = h->position_loop_error_diag;
+        (void)memset(p, 0, sizeof(p));
+        (void)memcpy(p, &pos_err, 4U);
+        p[4] = esc_now;                        /* 1=trigger 0=exit */
+        EVT_Emit(EVT_CODE_ESC, p, 5U);
+        s_evt_prev_esc = esc_now;
+    }
+    /* 0x05 tx_p1_drop: 低频 1Hz 轮询 (变化才发, 限速兜底) */
+    if ((uint32_t)(s_foc_tick_2khz - s_evt_p1drop_last_poll) >= 2000U) {
+        uint32_t p0d, p1d, p2d;
+        s_evt_p1drop_last_poll = s_foc_tick_2khz;
+        DrvUart_GetTxDropCounts(&p0d, &p1d, &p2d);
+        if (p1d != s_evt_prev_p1drop) {
+            uint8_t p[4];
+            (void)memcpy(p, &p1d, 4U);
+            EVT_Emit(EVT_CODE_TX_P1_DROP, p, 4U);
+            s_evt_prev_p1drop = p1d;
+        }
+    }
+}
+
 static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
 {
     FOC_FaultCode_t voltageFault = FOC_FAULT_NONE;
@@ -2031,8 +2102,15 @@ static void UART_CommandExecute(const char *cmd)
         /* 积分抗饱和律: mode 0=条件冻结 1=超阈值回拉 2=Clegg过零复位 3=非对称泄放
          * rate 为回拉/泄放比例 (0~1/拍), 默认 0.05 */
         if (uint_arg <= 3U && f1 >= 0.0f && f1 <= 1.0f) {
+            uint8_t aw_old = g_foc_app.pos_aw_mode;
             g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
             g_foc_app.pos_aw_rate = f1;
+            if (aw_old != g_foc_app.pos_aw_mode) {   /* ② EVT 0x04 AW 模式切换 */
+                uint8_t p[2];
+                p[0] = aw_old;
+                p[1] = g_foc_app.pos_aw_mode;
+                EVT_Emit(EVT_CODE_AW_MODE, p, 2U);
+            }
             UART_CommandSendText("POS_AW_MODE,OK\r\n");
         } else {
             UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
@@ -2041,7 +2119,14 @@ static void UART_CommandExecute(const char *cmd)
     }
     if (sscanf(cmd, "CMD:POS_AW_MODE,%u", &uint_arg) == 1) {
         if (uint_arg <= 3U) {
+            uint8_t aw_old = g_foc_app.pos_aw_mode;
             g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
+            if (aw_old != g_foc_app.pos_aw_mode) {   /* ② EVT 0x04 AW 模式切换 */
+                uint8_t p[2];
+                p[0] = aw_old;
+                p[1] = g_foc_app.pos_aw_mode;
+                EVT_Emit(EVT_CODE_AW_MODE, p, 2U);
+            }
             UART_CommandSendText("POS_AW_MODE,OK\r\n");
         } else {
             UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
@@ -3452,6 +3537,7 @@ void TIM1_UP_IRQHandler(void)
         speed_loop_start = FOC_Profiler_Begin();
         FOC_App_SpeedLoop(&g_foc_app);
         FOC_Profiler_End(FOC_PROBE_SPEED_LOOP, speed_loop_start);
+        EVT_SampleControlState();   /* ②: 拍尾部采样 state/fault/ESC/tx_p1_drop */
     }
 
     /* Position loop: target ~200Hz (ISR base 40kHz, ÷200). */

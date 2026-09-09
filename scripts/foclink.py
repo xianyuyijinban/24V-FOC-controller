@@ -9,6 +9,7 @@
   - 'W'  (0x57): 轮事件 WheelEvent   (payload 16B)
   - 0x20 (TYPE_PDB2): PDBBIN v1 调试流 (payload 37B)
   - 0x21 (TYPE_PDB2V2): PDBBIN v2 调试流 (payload 49B, 2026-09-09 ①)
+  - 0x22 (TYPE_EVT): 事件帧 EvtEvent (payload 14B, 2026-09-09 ②)
 
 per-channel 计数: rx_count / crc_err / seq_gap (seq 按 mod 256 判 gap)。
 
@@ -23,6 +24,52 @@ TYPE_CURRENT = 0x43   # 'C'
 TYPE_WHEEL   = 0x57   # 'W'
 TYPE_PDB2    = 0x20   # DBG_TYPE_PDB2 — debug_stream.h (v1, 37B)
 TYPE_PDB2V2  = 0x21   # DBG_TYPE_PDB2V2 — PDBBIN v2 (2026-09-09 ①, 49B)
+TYPE_EVT     = 0x22   # DBG_TYPE_EVT — 事件帧 (2026-09-09 ②, 13B)
+
+EVT_CODE_STATE      = 0x01   # [0]=old_state [1]=new_state
+EVT_CODE_FAULT      = 0x02   # [0:4]=fault_mask LE32 [4]=1 set/0 clear
+EVT_CODE_ESC        = 0x03   # [0:4]=pos_err f32 [4]=1 trig/0 exit
+EVT_CODE_AW_MODE    = 0x04   # [0]=old_mode [1]=new_mode
+EVT_CODE_TX_P1_DROP = 0x05   # [0:4]=drop 累计 LE32
+
+
+@dataclass
+class EvtEvent:
+    """EVT 13B payload 事件 (tick 同 PDBBIN 2kHz 基准; 帧总长 18B)."""
+    tick_2khz: int = 0
+    code: int = 0
+    payload: bytes = b""        # 原始 8B
+    overflow: int = 0           # 同类限速溢出计数 (事件 payload[7], 发射点回填)
+    host_rx_time: float = 0.0
+
+    @property
+    def t(self) -> float:
+        return self.tick_2khz / 2000.0
+
+    @property
+    def name(self) -> str:
+        return {
+            EVT_CODE_STATE: "STATE", EVT_CODE_FAULT: "FAULT",
+            EVT_CODE_ESC: "ESC", EVT_CODE_AW_MODE: "AW_MODE",
+            EVT_CODE_TX_P1_DROP: "TX_P1_DROP",
+        }.get(self.code, "CODE_0x%02X" % self.code)
+
+    def decoded(self) -> dict:
+        """按 code 解码 payload → 语义字段 dict (原始 payload 始终保留)."""
+        p = self.payload
+        if self.code == EVT_CODE_STATE:
+            return {"old_state": p[0], "new_state": p[1]}
+        if self.code == EVT_CODE_FAULT:
+            mask, kind = struct.unpack_from("<I", p, 0)[0], p[4]
+            return {"fault_mask": mask, "set": bool(kind)}
+        if self.code == EVT_CODE_ESC:
+            err, kind = struct.unpack_from("<f", p, 0)[0], p[4]
+            return {"pos_err_rad": err, "trigger": bool(kind)}
+        if self.code == EVT_CODE_AW_MODE:
+            return {"old_mode": p[0], "new_mode": p[1]}
+        if self.code == EVT_CODE_TX_P1_DROP:
+            return {"tx_p1_drop": struct.unpack_from("<I", p, 0)[0]}
+        return {}
 
 
 @dataclass
@@ -114,9 +161,11 @@ class MixedStreamParser:
         TYPE_WHEEL:   16,
         TYPE_PDB2:    37,
         TYPE_PDB2V2:  49,
+        TYPE_EVT:     13,
     }
 
-    def __init__(self, line_cb=None, pdb2_cb=None, current_cb=None, wheel_cb=None):
+    def __init__(self, line_cb=None, pdb2_cb=None, current_cb=None, wheel_cb=None,
+                 evt_cb=None):
         self._buf = bytearray()
         self._linebuf = b""
         self.stats = {t: ChannelStats() for t in self.PAYLOAD_LEN}
@@ -126,6 +175,7 @@ class MixedStreamParser:
         self.pdb2_cb = pdb2_cb          # fn(PdbBinSample)
         self.current_cb = current_cb    # fn(CurrentSample-like)
         self.wheel_cb = wheel_cb        # fn(WheelEvent-like)
+        self.evt_cb = evt_cb            # fn(EvtEvent)
 
     # ── 对外: 喂原始字节 ──
     def feed(self, data: bytes) -> None:
@@ -221,8 +271,20 @@ class MixedStreamParser:
             self._track_seq(type_byte, s[0])
             if self.wheel_cb:
                 self.wheel_cb(s)
+        elif type_byte == TYPE_EVT:
+            s = self._decode_evt(payload)
+            s.host_rx_time = __import__("time").time()
+            if self.evt_cb:
+                self.evt_cb(s)
 
     # ── 解码 ──
+    @staticmethod
+    def _decode_evt(p: bytes) -> EvtEvent:
+        tick, code = struct.unpack_from("<IB", p, 0)
+        payload8 = p[5:13]
+        overflow = p[12]
+        return EvtEvent(tick_2khz=tick, code=code, payload=bytes(payload8),
+                        overflow=overflow)
     @staticmethod
     def _decode_pdb2(p: bytes) -> PdbBinSample:
         if len(p) >= 49:

@@ -90,3 +90,46 @@ void DebugStream_PushPdbV2(uint32_t tick_2khz, const PdbBinV2Payload_t *p)
     extra[2] = p->pos_integral;
     DebugStream_Pack(DBG_TYPE_PDB2V2, tick_2khz, &p->v1, extra, 3U);
 }
+
+/* ── EVT 事件帧 (2026-09-09 ②) ─────────────────────────────────── */
+
+#define EVT_RATE_LIMIT_TICKS 200U   /* 100ms @2kHz 同类事件限速 */
+
+static uint32_t s_evt_last_tick[8] = {0};  /* 同类 code 上次发射拍 (index=code&7) */
+static uint8_t  s_evt_overflow[8] = {0};   /* 被限速丢弃计数 (饱和 255, 下帧回填 payload[7]) */
+static uint8_t  s_evt_frame[DBG_EVT_FRAME_LEN];
+
+void DebugStream_PushEvent(const EvtPayload_t *ev)
+{
+    uint8_t payload[DBG_EVT_PAYLOAD_LEN];
+    uint8_t idx;
+    uint8_t overflow_out = 0U;
+    uint8_t frame_len;
+
+    if (ev == NULL || ev->code == 0U) {
+        return;
+    }
+    idx = (uint8_t)(ev->code & 7U);
+
+    /* 同类限速: 距上次发射 < 200 拍 (100ms) → 丢弃, 溢出计数饱和 */
+    if ((uint32_t)(ev->tick_2khz - s_evt_last_tick[idx]) < EVT_RATE_LIMIT_TICKS) {
+        if (s_evt_overflow[idx] < 255U) {
+            s_evt_overflow[idx]++;
+        }
+        return;
+    }
+    s_evt_last_tick[idx] = ev->tick_2khz;
+    overflow_out = s_evt_overflow[idx];   /* 本帧带上"上次被丢了多少" */
+    s_evt_overflow[idx] = 0U;
+
+    /* 13B: tick4 (LE) + code1 + payload8; 未用字节一律 0 */
+    (void)memset(payload, 0, sizeof(payload));
+    (void)memcpy(&payload[0], &ev->tick_2khz, 4U);
+    payload[4] = ev->code;
+    (void)memcpy(&payload[5], ev->payload, 8U);
+    payload[12] = overflow_out;   /* = 事件 payload[7] (帧内偏移 5+7) */
+
+    frame_len = CurStream_BuildFrame(DBG_TYPE_EVT, payload,
+                                     DBG_EVT_PAYLOAD_LEN, s_evt_frame);
+    (void)DrvUart_SendBytesP0(s_evt_frame, frame_len);
+}

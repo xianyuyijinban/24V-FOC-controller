@@ -1,0 +1,31 @@
+{
+  "test": "pdbbin_v2_pure_stream_60s",
+  "frames": 12005,
+  "rate_hz": 200.1,
+  "crc_err": 0,
+  "seq_gap": 0,
+  "tx_p1_drop_delta": 0,
+  "tick_bad": 0,
+  "ff_coulomb": {
+    "min": 0.0,
+    "max": 0.0
+  },
+  "ff_cogging": {
+    "min": 0.0,
+    "max": 0.0
+  },
+  "pos_integral": {
+    "min": 0.0,
+    "max": 0.0
+  },
+  "ff_total": {
+    "min": 0.0,
+    "max": 0.0
+  },
+  "v1_regression_5s": {
+    "frames": 1000,
+    "crc_err": 0,
+    "seq_gap": 0,
+    "tx_p1_drop_delta": 0
+  }
+}

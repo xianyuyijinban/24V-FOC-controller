@@ -1,5 +1,42 @@
 # PROGRESS
 
+## [2026-09-09] AI 链路协议增量 ②: EVT 事件帧 — 完成闭环（含 ①纯流脚本补账）
+
+- 落码 08126aa: 固件 type 0x22 (DBG_TYPE_EVT) payload 13B = tick4(2kHz 同 PDBBIN
+  基准) + code1 + payload8; 帧 18B。事件表: 0x01 state 迁移 / 0x02 fault set/clear /
+  0x03 ESC 触发退出 / 0x04 AW 模式切换 / 0x05 tx_p1_drop 变化。同类 100ms 限速
+  (200 拍), 被丢次数饱和 255 回填下一同类帧 payload[7]。P0 优先级, 帧边界原子准入。
+- 接线架构 (铁律 1): 0x01/02/03/05 走 2kHz 拍尾部采样对比 (EVT_SampleControlState,
+  it.c), 事件源全是 g_foc_app 已有字段, 不穿透 foc_app.c 分层; 0x04 命令驱动
+  (POS_AW_MODE 处); ESC 触发帧带最近位置环 err (滞后 ≤5ms)。
+- 解析端: foclink TYPE_EVT=0x22 分流, EvtEvent.decoded() 语义解码; 单测
+  test_foclink_evt 4/4 (5 类解码/溢出槽/PDB 共存 seq 连续/CRC+len 防护)。
+- 台架验收 (板=08126aa→ee6cacd, evt_bench_20260909_194441.json 原文数值):
+  - 0x04 风暴 (12 连发 @20ms): 发出 3 帧 (storm_sent=3), 溢出丢 8
+    (storm_overflow_sum=8), 生效切换 11 ≤ 上限 11 — 限速守恒;
+    storm_events overflow = [0, 4, 4]。
+  - 0x01: state_events=[{tick=1315046, old=3(READY), new=4(RUNNING)}] —
+    ENABLE→RUNNING 迁移帧到。
+  - 0x03: esc_events 2 帧 — trigger tick=1334881 err_rad=-0.06921 (-3.97°,
+    过 3° 线), exit tick=1337481 err_rad=-0.02281 (-1.31°, 落 1.5° 回差内);
+    卡滞点在 126.43° 起点 6° 阶跃 (角度依赖, 与 ②⑦ 同源)。
+  - C/E: 事件 tick 单调 (evt_monotonic=true) 且落在 PDB tick 范围
+    (1330251..1354885) 内 — 同基准可对齐; PDB rx=1264 crc_err=0 seq_gap=1
+    (≤2 容忍带), EVT rx=7 crc_err=0; 全窗 tx_p1_drop_delta=0 (gap 归因齐)。
+- ①收尾补账 (用户指令): 纯流脚本升级 pdbv2_pure_stream.py (scripts/low_speed/)
+  加 tx_p1_drop_delta (scope 头尾差, 无符号回绕安全; 尾查询关流后测 —
+  220Hz 流下单发 P0 查询会丢, 实证 3 连丢); 重跑 60s 全绿
+  (pdbv2_pure_stream_20260909_193507.json 原文数值): frames=12005 rate_hz=200.1
+  crc_err=0 seq_gap=0 tx_p1_drop_delta=0 tick_bad=0; v1 段 frames=1000
+  crc_err=0 seq_gap=0 tx_p1_drop_delta=0。
+- ①镜像缺陷修复 ee6cacd (②验收时暴露): 静止帧 ff_coulomb 残留 -0.022
+  (上次锁存值) 而 ff_total≈0 — coulomb_dir=0 拍 Coulomb 分支不执行, 镜像缺
+  归零路径; 修复后纯流重跑 12005 帧全 0 自洽。
+- 执行发现两笔: (a) 大角度起点 (130-132°) 6° 阶跃不卡滞 — ESC 触发验收
+  须回位 126° 卡滞点, 角度依赖再次实证; (b) 风暴 12 连发 228B 贴 RX 环
+  256B 上限, 个别命令可被环覆盖丢失 (UART_RX? err=0 不计环覆盖 — 盲区),
+  守恒口径放宽为 ≤11 上限。
+
 ## [2026-09-09] AI 链路协议增量 ①: PDBBIN v2 帧 — 完成闭环
 
 - 落码 70aeb70: 固件 type 0x21 (DBG_TYPE_PDB2V2) payload 49B = v1 37B 前缀逐比特一致

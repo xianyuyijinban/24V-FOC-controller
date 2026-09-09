@@ -90,10 +90,11 @@ extern "C" {
 #define FOC_FRIC_CMD_DIR_HOLD_CNT 50U       /* 指令方向保持窗口 @200Hz=0.25s(>PC步进间隔0.2s, 保证补偿连续) */
 #define FOC_FRIC_STRIBECK_VS_RADPS 0.01f    /* Stribeck 过渡速度: <0.01rad/s(0.57°/s)接近静摩擦满值, 高于快速衰减 */
 #define FOC_FRIC_STRIBECK_KINEMATIC 0.20f   /* 动摩擦/静摩擦幅值比(匀速时补偿衰减到该比例×静摩擦) */
-#define FOC_FRIC_VDEAD_RADPS 0.06f          /* Stribeck 低速死区(2026-09-05 卡滞案): 静止微振/量化噪声
-                                             * |v|≤0.03 实测高于 fric_vs, smooth 钉 0.20 地板, 静摩擦突破
-                                             * 补偿塌 5 倍。死区内 v_eff=0(满额 comp), 出死区重锚连续。
-                                             * =3.4°/s: P95 0.048×1.25; 0.5°/s 和 2°/s 工况均落死区=满额。 */
+#define FOC_FRIC_VDEAD_RADPS 0.0f           /* 臂C 临时诊断档 (2026-09-10 门控死区三臂): 死区旁路,
+                                             * Stribeck 衰减直通 — 跑完即烧回定版 0.06f。原值:
+                                             * 静止微振/量化噪声 |v|≤0.03 实测高于 fric_vs, smooth 钉
+                                             * 0.20 地板, 静摩擦突破补偿塌 5 倍。死区内 v_eff=0(满额
+                                             * comp), 出死区重锚连续。=3.4°/s: P95 0.048×1.25。 */
 #define FOC_POSITION_PD_KP_SCALE 1.0f   /* 派生增益 */
 #define FOC_POSITION_PD_KP_MIN 4.0f     /* 最小刚度 */
 #define FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S 0.05f /* 误差超过该值才加起动偏置 */

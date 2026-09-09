@@ -5,13 +5,14 @@
 用法: python trig_pull.py [port] [--out out.json]
 流程:
   1. CMD:TRIG,STAT? 确认 FROZEN (state=2), 读 trig_tick/post
-  2. 分块 CMD:TRIG,PULL,off,len (≤32 帧/块) 全量拉取 1024 帧
+  2. 分块 CMD:TRIG,PULL,off,len (≤32 帧/块) 全量拉取 1025 帧
+     (pre 768 + 触发帧 1 + post 256; 32 帧整块 ×32 + 尾块 1 帧)
      每块响应 = TRIG,BIN,<n>,<binary n×28B+CRC16(2)> — 头走行解析,
      二进制尾缀按 n 精确读; CRC16-CCITT-FALSE 逐块验
-  3. 重组 1024×28B → 7 字段解码 (id/iq/vd/vq/theta_elec/iq_ref/tick_20k)
+  3. 重组 1025×28B → 7 字段解码 (id/iq/vd/vq/theta_elec/iq_ref/tick_20k)
   4. 存 JSON (帧列 + meta: trig_tick/state/src/块CRC统计)
 
-帧序: 帧 0 = 触发前 768 帧 (pre 段头), 帧 768 = 触发帧, 帧 1023 = post 末帧。
+帧序: 帧 0 = 触发前 768 帧 (pre 段头), 帧 768 = 触发帧, 帧 1024 = post 末帧。
 """
 import argparse
 import json
@@ -24,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import serial
 
 TRIG_RING_SIZE = 1024
+TRIG_WINDOW = 1025          # pre 768 + 触发帧 1 + post 256 = 1025 帧 (trig_ring.h)
 TRIG_FRAME_SIZE = 28
 TRIG_PRE = 768
 BLOCK_FRAMES = 32           # 32×28=896B 数据+CRC — TX ring 1024B 上限 (固件 4e6773c 后)
@@ -110,10 +112,16 @@ class TrigPuller:
         return None
 
     def pull_all(self):
-        for off in range(0, TRIG_RING_SIZE, BLOCK_FRAMES):
+        """全量拉取 1025 帧 (pre768+触发1+post256): 32 帧/块整块 + 尾块余帧。
+        曾按 TRIG_RING_SIZE=1024 拉满 32 块 — post 末帧 (第 1025 帧) 永远
+        拉不下来, blocks_ok=32 全绿是自洽假象 (2026-09-10 打回)。"""
+        self.frames = []
+        off = 0
+        while off < TRIG_WINDOW:
+            nframes = min(BLOCK_FRAMES, TRIG_WINDOW - off)
             payload = None
             for retry in range(2):
-                payload = self.pull_block(off, BLOCK_FRAMES)
+                payload = self.pull_block(off, nframes)
                 if payload is not None:
                     break
                 time.sleep(0.2)
@@ -126,10 +134,11 @@ class TrigPuller:
                 raise RuntimeError("块 off=%d CRC 不符: rx=0x%04X calc=0x%04X"
                                    % (off, crc_rx, crc_calc))
             self.blocks_ok += 1
-            for i in range(BLOCK_FRAMES):
+            for i in range(nframes):
                 self.frames.append(struct.unpack_from("<ffffffi", data,
                                                       i * TRIG_FRAME_SIZE))
-        assert len(self.frames) == TRIG_RING_SIZE
+            off += nframes
+        assert len(self.frames) == TRIG_WINDOW
 
     def close(self):
         if self._own:
@@ -170,7 +179,7 @@ def main():
     dt = time.time() - t0
     print("拉取完成: %d 块全过 CRC, %.2fs" % (p.blocks_ok, dt))
 
-    # tick 连续性: 20kHz 帧序 tick_20k 递增 1 (帧 0..1023)
+    # tick 连续性: 20kHz 帧序 tick_20k 递增 1 (帧 0..1024)
     ticks = [f[6] for f in p.frames]
     tick_discont = sum(1 for a, b in zip(ticks, ticks[1:])
                        if ((b - a) & 0xFFFFFFFF) != 1)
@@ -188,10 +197,11 @@ def main():
             "pull_seconds": round(dt, 2),
             "tick_discontinuity": tick_discont,
             "frame_size": TRIG_FRAME_SIZE,
+            "window_frames": TRIG_WINDOW,
             "pre_frames": TRIG_PRE,
             "trig_frame_index": TRIG_PRE,
         },
-        "frames": [p.frame_dict(i) for i in range(TRIG_RING_SIZE)],
+        "frames": [p.frame_dict(i) for i in range(TRIG_WINDOW)],
     }
     with open(out, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False)

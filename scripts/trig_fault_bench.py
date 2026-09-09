@@ -129,7 +129,7 @@ report["checks"]["pull"] = {
     "iq_absmax_A": round(max(abs(x) for x in iqs), 4),
     "iq_at_trig_A": round(iqs[768], 4),
     "iq_pre_avg_A": round(sum(abs(x) for x in iqs[:768]) / 768.0, 4),
-    "iq_post_avg_A": round(sum(abs(x) for x in iqs[769:]) / 255.0, 4)}
+    "iq_post_avg_A": round(sum(abs(x) for x in iqs[769:]) / 256.0, 4)}   # post 256 帧 (含末帧)
 
 # 恢复
 expect("CMD:VOLT_OFF", "VOLT_OFF,OK")

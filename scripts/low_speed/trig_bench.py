@@ -10,10 +10,11 @@
   D. tick 对齐: TRIG tick_20k 与 PDBBIN tick_2khz 换算同源可对齐
 """
 import sys, os, time, json, struct
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import serial
 import foclink
-from trig_pull import TrigPuller, crc16_ccitt, TRIG_RING_SIZE, TRIG_PRE, TRIG_FRAME_SIZE
+from trig_pull import TrigPuller, crc16_ccitt, TRIG_WINDOW, TRIG_PRE, TRIG_FRAME_SIZE
 
 PORT = "COM10"
 
@@ -107,19 +108,26 @@ ticks = [fr[6] for fr in tp.frames]
 disc = sum(1 for a, b in zip(ticks, ticks[1:]) if ((b - a) & 0xFFFFFFFF) != 1)
 print("拉取: %d 块 CRC 全过, %.2fs; tick 断点 %d/%d" %
       (tp.blocks_ok, pull_s, disc, len(ticks) - 1))
-assert tp.blocks_ok == 32 and not tp.blocks_crc_fail, "块 CRC 失败"
+# 1025 帧 (pre768+触发1+post256) = 32 帧整块 ×32 + 尾块 1 帧 = 33 块
+assert len(ticks) == 1025, "帧数 %d != 1025 (少拉 post 末帧?)" % len(ticks)
+assert tp.blocks_ok == 33 and not tp.blocks_crc_fail, \
+    "块数 %d != 33 或 CRC 失败 %r" % (tp.blocks_ok, tp.blocks_crc_fail)
 # 768/256 比例: 帧 768 = 触发帧 (tick=trig_tick)
 assert ticks[TRIG_PRE] == trig_tick, \
     "帧768 tick=%d != 触发帧 tick=%d" % (ticks[TRIG_PRE], trig_tick)
+# post 段 256 帧 (含触发帧): 帧 769..1024, 末帧 tick = trig_tick+256
+assert ticks[1024] == (trig_tick + 256) & 0xFFFFFFFF, \
+    "post 末帧 tick=%d != trig_tick+256 (post 段不足 256 帧)" % ticks[1024]
 print("pre/post 边界: 帧768 tick=%d == trig_tick ✓ (pre 768 帧 tick %d..%d, "
-      "post 帧 769..1023 tick %d..%d)" %
-      (ticks[TRIG_PRE], ticks[0], ticks[767], ticks[769], ticks[1023]))
+      "post 帧 769..1024 tick %d..%d, post 全 256 帧 ✓)" %
+      (ticks[TRIG_PRE], ticks[0], ticks[767], ticks[769], ticks[1024]))
 report["checks"]["pull"] = {
     "blocks_ok": tp.blocks_ok, "crc_fail": tp.blocks_crc_fail,
     "seconds": round(pull_s, 2), "tick_discontinuity": disc,
+    "frames": len(ticks),
     "frame768_tick": ticks[TRIG_PRE], "trig_tick": trig_tick,
     "pre_first_tick": ticks[0], "pre_last_tick": ticks[767],
-    "post_first_tick": ticks[769], "post_last_tick": ticks[1023]}
+    "post_first_tick": ticks[769], "post_last_tick": ticks[1024]}
 
 # D: tick 同源 — trig_tick/20000 (s) 与 s_foc_tick_2khz/2000 (s) 应同源
 # (control_count 20kHz vs foc_tick 2kHz: 同一 TIM1 ISR 域, 比值 10)
@@ -151,7 +159,7 @@ expect("CMD:TRIG,CLR", "TRIG,OK,clr")
 ser.close()
 
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                   "low_speed", "trig_bench_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
+                   "trig_bench_%s.json" % time.strftime("%Y%m%d_%H%M%S"))
 with open(out, "w", encoding="utf-8") as fjson:
     json.dump(report, fjson, indent=2, ensure_ascii=False)
 print("\n报告:", out)

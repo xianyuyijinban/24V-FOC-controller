@@ -1,0 +1,44 @@
+{
+  "checks": {
+    "stat_frozen": "TRIG,OK,state=2,src=2,trig_tick=251724984,post=256",
+    "trig_tick": 251724984,
+    "pull": {
+      "blocks_ok": 33,
+      "crc_fail": [],
+      "seconds": 0.52,
+      "tick_discontinuity": 0,
+      "frames": 1025,
+      "frame768_tick": 251724984,
+      "trig_tick": 251724984,
+      "pre_first_tick": 251724216,
+      "pre_last_tick": 251724983,
+      "post_first_tick": 251724985,
+      "post_last_tick": 251725240
+    },
+    "tick_domain": {
+      "trig_tick": 251724984,
+      "t_s": 12586.2492
+    },
+    "loop_prof": {
+      "idle": {
+        "n": "160152",
+        "min_cyc": "1162",
+        "avg_cyc": "1212",
+        "max_cyc": "1298",
+        "min_us": "2.421",
+        "avg_us": "2.527",
+        "max_us": "2.704"
+      },
+      "frozen": {
+        "n": "160167",
+        "min_cyc": "998",
+        "avg_cyc": "1046",
+        "max_cyc": "1096",
+        "min_us": "2.079",
+        "avg_us": "2.181",
+        "max_us": "2.283"
+      }
+    },
+    "retrigger_after_clr": true
+  }
+}

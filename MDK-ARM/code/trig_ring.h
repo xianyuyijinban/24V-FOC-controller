@@ -24,7 +24,9 @@ extern "C" {
 
 #include <stdint.h>
 
-/* 2048 槽: pre 768 + 触发帧 1 + post 256 = 1025 < 1024 会溢出覆写 pre 首帧 (212303 实证) — 取 2 的幂 2048 */
+/* 2048 槽: 验尸窗 pre 768 + 触发帧 1 + post 256 = 1025 > 1024 — 原 1024 槽
+ * 时 post 末帧恰好覆写 pre 首帧 (trig_idx+256 ≡ trig_idx-768 mod 1024,
+ * 212303 台架实证), 取下一 2 的幂 2048 */
 #define TRIG_RING_SIZE      2048U   /* 帧数 (2 的幂, 索引 &2047) */
 #define TRIG_PRE_FRAMES     768U    /* 触发点前保留帧 (75%) */
 #define TRIG_POST_FRAMES    256U    /* 触发点后采集帧 (25%), 计满冻结 */

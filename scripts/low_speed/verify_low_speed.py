@@ -602,6 +602,54 @@ def main():
     finally:
         stop[0] = True
         time.sleep(0.3)
+        # abort 路径 TRIG 拉取 (2026-09-10 Kimi 规格): fault/掉态自动触发后,
+        # 验尸窗是 abort 根因的第一手证据 — reader 已停, 直读串口查询+拉取。
+        # 拉取前必须先停 PDBBIN/N 帧流 (任务卡"拉取期间 PDBBIN 暂停"的主机侧
+        # 配合): P1 流插入 P0 块间隙会让主机按字节切片错位 (015418 实证 5 处
+        # 断点全在块边界)。
+        trig_verdict = None
+        try:
+            ser.write(b"CMD:PDBBIN,0\n")
+            ser.write(b"CMD:OFF\n")
+            time.sleep(0.4)
+            ser.reset_input_buffer()
+
+            def _direct_query(cmd, prefix, timeout=2.0):
+                ser.reset_input_buffer()
+                ser.write((cmd + "\n").encode())
+                dl = time.time() + timeout
+                buf = b""
+                while time.time() < dl:
+                    n = ser.in_waiting
+                    if n:
+                        buf += ser.read(n)
+                        for l in buf.decode(errors="replace").split("\n"):
+                            if l.strip().startswith(prefix):
+                                return l.strip()
+                    time.sleep(0.01)
+                return None
+            lstat = _direct_query("CMD:TRIG,STAT?", "TRIG,OK,")
+            if lstat and "state=2" in lstat:
+                from trig_pull import TrigPuller
+                tp = TrigPuller(ser=ser)
+                tp.pull_all()
+                frames = [tp.frame_dict(i) for i in range(len(tp.frames))]
+                trig_verdict = {
+                    "stat": lstat,
+                    "blocks_ok": tp.blocks_ok,
+                    "crc_fail": tp.blocks_crc_fail,
+                    "frames": len(frames),
+                    "tick_first": frames[0]["tick_20k"] if frames else None,
+                    "tick_last": frames[-1]["tick_20k"] if frames else None,
+                    "iq_absmax": round(max(abs(f["iq"]) for f in frames), 5) if frames else None,
+                    "frame_dump": frames,
+                }
+                print("TRIG verdict: %d 帧拉取" % len(frames), flush=True)
+            else:
+                trig_verdict = {"stat": lstat, "note": "not frozen"}
+        except Exception as exc:   # 拉取失败不得掩盖原 abort 原因
+            trig_verdict = {"error": "%s: %s" % (type(exc).__name__, exc)}
+            print("TRIG pull failed: %s" % trig_verdict["error"], flush=True)
         ser.write(b"CMD:POS_AW_ESC,0\n")   # 兜底: 掉链即关 ESC (Kimi 兜底规格)
         ser.write(b"CMD:PDBBIN,0\n")   # 缺 \n 命令不进解析器 → 电机保持使能 (Kimi 2026-09-05)
         ser.write(b"CMD:STOP\n")
@@ -628,6 +676,8 @@ def main():
            "run_status": {"valid": bool(pre != 1 and run_error is None),
                           "abort_reason": run_error},
            "args": vars(args), "meta": meta, "results": results}
+    if trig_verdict is not None:
+        doc["trig_verdict"] = trig_verdict
     with open(out, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
     print("\n报告: %s" % out)

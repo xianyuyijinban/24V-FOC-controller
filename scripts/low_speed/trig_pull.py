@@ -5,7 +5,7 @@
 用法: python trig_pull.py [port] [--out out.json]
 流程:
   1. CMD:TRIG,STAT? 确认 FROZEN (state=2), 读 trig_tick/post
-  2. 分块 CMD:TRIG,PULL,off,len (≤128 帧/块) 全量拉取 1024 帧
+  2. 分块 CMD:TRIG,PULL,off,len (≤32 帧/块) 全量拉取 1024 帧
      每块响应 = TRIG,BIN,<n>,<binary n×28B+CRC16(2)> — 头走行解析,
      二进制尾缀按 n 精确读; CRC16-CCITT-FALSE 逐块验
   3. 重组 1024×28B → 7 字段解码 (id/iq/vd/vq/theta_elec/iq_ref/tick_20k)
@@ -26,7 +26,7 @@ import serial
 TRIG_RING_SIZE = 1024
 TRIG_FRAME_SIZE = 28
 TRIG_PRE = 768
-BLOCK_FRAMES = 128          # 128×28=3584B 数据+CRC < RX 缓冲安全
+BLOCK_FRAMES = 32           # 32×28=896B 数据+CRC — TX ring 1024B 上限 (固件 4e6773c 后)
 
 
 def crc16_ccitt(data):

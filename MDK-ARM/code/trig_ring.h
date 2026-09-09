@@ -27,7 +27,9 @@ extern "C" {
 #define TRIG_PRE_FRAMES     768U    /* 触发点前保留帧 (75%) */
 #define TRIG_POST_FRAMES    256U    /* 触发点后采集帧 (25%), 计满冻结 */
 #define TRIG_FRAME_SIZE     28U     /* 7×float32 */
-#define TRIG_PULL_MAX_BYTES 256U    /* 单块上限 (PULL len 参数与内部一致) */
+#define TRIG_PULL_MAX_BYTES  896U   /* 单块数据上限 32 帧 × 28B (TX ring 1024B 预算:
+                                     * 头 ~17B + 896B + CRC 2B < 1024B) */
+#define TRIG_PULL_MAX_FRAMES 32U    /* 单块帧数上限 (与上式同步) */
 
 /* CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF, 无反射无异或输出) */
 uint16_t TrigRing_CRC16(const uint8_t *data, uint32_t len);

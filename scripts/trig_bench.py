@@ -107,7 +107,7 @@ ticks = [fr[6] for fr in tp.frames]
 disc = sum(1 for a, b in zip(ticks, ticks[1:]) if ((b - a) & 0xFFFFFFFF) != 1)
 print("拉取: %d 块 CRC 全过, %.2fs; tick 断点 %d/%d" %
       (tp.blocks_ok, pull_s, disc, len(ticks) - 1))
-assert tp.blocks_ok == 8 and not tp.blocks_crc_fail, "块 CRC 失败"
+assert tp.blocks_ok == 32 and not tp.blocks_crc_fail, "块 CRC 失败"
 # 768/256 比例: 帧 768 = 触发帧 (tick=trig_tick)
 assert ticks[TRIG_PRE] == trig_tick, \
     "帧768 tick=%d != 触发帧 tick=%d" % (ticks[TRIG_PRE], trig_tick)

@@ -2237,15 +2237,17 @@ static void UART_CommandExecute(const char *cmd)
         return;
     }
     if (strncmp(cmd, "CMD:TRIG,PULL,", 14) == 0) {
-        /* 分块拉取: off/len 按帧 (0..1023, 触发帧=768), ≤256 帧/块。
-         * 响应 = TRIG,BIN,<len>,<binary bytes len×28+CRC16(2)> — 二进制尾缀,
-         * 主机按 len 读字节。拉取期间 PDBBIN 暂停 (帧边界安全), 块完恢复。 */
+        /* 分块拉取: off/len 按帧 (0..1023, 触发帧=768), ≤32 帧/块 (896B+头
+         * +CRC16 < TX ring 1024B; 单块必须整帧入 ring 原子发送)。堆栈缓冲
+         * 898B (曾按 256 帧 7170B 溢栈 hard fault — 4e6773c 教训)。
+         * 响应 = TRIG,BIN,<len>,<binary len×28B+CRC16(2)>; 拉取期间 PDBBIN
+         * 暂停 (帧边界安全), 块完恢复。 */
         int off_i = -1, len_i = -1;
         uint8_t pullbuf[TRIG_PULL_MAX_BYTES + 2U];
         uint16_t out_len;
         uint8_t pdb_restore = 0U;
         if (sscanf(cmd, "CMD:TRIG,PULL,%d,%d", &off_i, &len_i) == 2 &&
-            off_i >= 0 && len_i > 0 && len_i <= 256) {
+            off_i >= 0 && len_i > 0 && len_i <= (int)TRIG_PULL_MAX_FRAMES) {
             if (TrigRing_GetState() != TRIG_STATE_FROZEN) {
                 UART_CommandSendText("TRIG,FAIL,not_frozen\r\n");
                 return;

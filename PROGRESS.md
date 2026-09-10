@@ -16,10 +16,10 @@
   ff_coulomb_absmax 精确减半 0.011, 斜坡段 -0.00220 同步减半。track 仅
   回收 ~15 点, 且 **定版复跑自身跨度 18.9 点** (013856: 143.1/124.2) —
   臂差淹没在重复性内, comp 非过冲主控。
-- **臂C 死区旁路** (FOC_FRIC_VDEAD_RADPS=0.0f 临时档 9aac9bf, 断言式烧录):
+- **臂C 死区旁路** (FOC_FRIC_VDEAD_RADPS=0.0f 临时档 ed300fd, 断言式烧录):
   rep1 完整 (013643: track 139.7%, ff_coulomb_absmax=0.0143 落中间档,
   不再钉满额); **rep2 两次同点位 abort — fault=7 FOC_FAULT_ADC_SAMPLING**
-  (sampleMiss≥3 连续失配)。定版回烧 (30dccc0, build inputs 与 b7e9f1d
+  (sampleMiss≥3 连续失配)。定版回烧 (718be13, build inputs 与 00f536a
   二进制等价) 同序列判别: validator OK, bad_fault=0 — 定版不复现。
   **死区贡献不可定量** (rep2 缺失), 但 rep1 + 臂A 斜坡段直读已指向
   死区非斜坡段主因 (斜坡段本就在衰减档)。
@@ -54,30 +54,30 @@
   013401/013643 为臂C abort 数据, 013856 为定版判别轮)
 - 工具: deadzone_ledger.py (三臂过程量表) + ramp_harm_ledger.py (危害
   量化 + 数据边界声明)
-- 脚本改进: verify/ladder abort 路径 TRIG 拉取 (a0c13cd, 停流后拉
+- 脚本改进: verify/ladder abort 路径 TRIG 拉取 (c6ebdf0, 停流后拉
   tick disc=0) — 本案 ADC fault abort 直接催生的仪器能力
 
 ## [2026-09-09] AI 链路协议增量 ③: TRIG 故障触发 ring buffer — 完成闭环
 
-- 落码 09e2379 + 4e6773c + 777d636 + b7e9f1d (四笔, 台架三轮实证驱动):
+- 落码 cd9d705 + 2904170 + e21e0d3 + 00f536a (四笔, 台架三轮实证驱动):
   trig_ring.c/h 2048 槽 × 28B = 56KB ZI; 20kHz 电流环 ISR 原速 O(1) 单写者
   (任务卡"2kHz"为笔误 — FOC_CONTROL_FREQ=20000); 验尸窗 pre 768 + 触发帧 1
   + post 256 = 1025 帧 (51.25ms)。触发源: fault 闩锁/state 掉 RUNNING
   (MainLoop 监视) + CMD:TRIG,NOW。命令族 TRIG,NOW/STAT?/PULL,off,len/CLR,
   拉取 32 帧/块 CRC16-CCITT-FALSE 逐块验, PDBBIN 拉取期间暂停。
 - 台架实证驱动三修:
-  (a) 4e6773c 时基 — trig_tick=0 实证 control_count 在 IDLE 态被 exit_cycle
+  (a) 2904170 时基 — trig_tick=0 实证 control_count 在 IDLE 态被 exit_cycle
       提前 goto 跳过 (恒 0), 加独立 s_tick_20k 全态递增;
-  (b) 777d636 溢栈 — PULL 单块 128 帧处理中板死 hard fault (栈上 pullbuf
+  (b) e21e0d3 溢栈 — PULL 单块 128 帧处理中板死 hard fault (栈上 pullbuf
       258B vs TrigRing_Pull 写 3586B), 板须重烧恢复; 单块上限 32 帧
       (896B+头+CRC < TX ring 1024B);
-  (c) b7e9f1d 环形几何 — 1024 槽时 post 末帧恰好覆写 pre 首帧
+  (c) 00f536a 环形几何 — 1024 槽时 post 末帧恰好覆写 pre 首帧
       (trig_idx+256 ≡ trig_idx-768 mod 1024), 帧 0 tick=1426511=post 末帧
       实证; 扩 2048 槽后 pre 段完整。
 - 解析端: trig_pull.py (32 帧/块 ×32, CRC 逐块验, tick 连续性, JSON 入库);
   单测 test_trig_pull 5/5 (CRC 标准向量 0x29B1/帧打包/重组/坏块/pre-post
   环形映射)。
-- 合成验尸 (trig_bench_20260909_213057.json, 板=b7e9f1d, 原文数值):
+- 合成验尸 (trig_bench_20260909_213057.json, 板=00f536a, 原文数值):
   TRIG,NOW → FROZEN state=2,src=2,trig_tick=1097191,post=256; 32 块 CRC
   全过 0.51s; tick 断点 0/1023; 帧 768 tick=1097191=trig_tick (768/256
   精确); pre tick 1096423..1097190 / post 1097192..1097446;
@@ -96,7 +96,7 @@
 
 ## [2026-09-09] AI 链路协议增量 ②: EVT 事件帧 — 完成闭环（含 ①纯流脚本补账）
 
-- 落码 08126aa: 固件 type 0x22 (DBG_TYPE_EVT) payload 13B = tick4(2kHz 同 PDBBIN
+- 落码 97e0c55: 固件 type 0x22 (DBG_TYPE_EVT) payload 13B = tick4(2kHz 同 PDBBIN
   基准) + code1 + payload8; 帧 18B。事件表: 0x01 state 迁移 / 0x02 fault set/clear /
   0x03 ESC 触发退出 / 0x04 AW 模式切换 / 0x05 tx_p1_drop 变化。同类 100ms 限速
   (200 拍), 被丢次数饱和 255 回填下一同类帧 payload[7]。P0 优先级, 帧边界原子准入。
@@ -105,7 +105,7 @@
   (POS_AW_MODE 处); ESC 触发帧带最近位置环 err (滞后 ≤5ms)。
 - 解析端: foclink TYPE_EVT=0x22 分流, EvtEvent.decoded() 语义解码; 单测
   test_foclink_evt 4/4 (5 类解码/溢出槽/PDB 共存 seq 连续/CRC+len 防护)。
-- 台架验收 (板=08126aa→ee6cacd, evt_bench_20260909_194441.json 原文数值):
+- 台架验收 (板=97e0c55→99396db, evt_bench_20260909_194441.json 原文数值):
   - 0x04 风暴 (12 连发 @20ms): 发出 3 帧 (storm_sent=3), 溢出丢 8
     (storm_overflow_sum=8), 生效切换 11 ≤ 上限 11 — 限速守恒;
     storm_events overflow = [0, 4, 4]。
@@ -123,7 +123,7 @@
   (pdbv2_pure_stream_20260909_193507.json 原文数值): frames=12005 rate_hz=200.1
   crc_err=0 seq_gap=0 tx_p1_drop_delta=0 tick_bad=0; v1 段 frames=1000
   crc_err=0 seq_gap=0 tx_p1_drop_delta=0。
-- ①镜像缺陷修复 ee6cacd (②验收时暴露): 静止帧 ff_coulomb 残留 -0.022
+- ①镜像缺陷修复 99396db (②验收时暴露): 静止帧 ff_coulomb 残留 -0.022
   (上次锁存值) 而 ff_total≈0 — coulomb_dir=0 拍 Coulomb 分支不执行, 镜像缺
   归零路径; 修复后纯流重跑 12005 帧全 0 自洽。
 - 执行发现两笔: (a) 大角度起点 (130-132°) 6° 阶跃不卡滞 — ESC 触发验收
@@ -133,7 +133,7 @@
 
 ## [2026-09-09] AI 链路协议增量 ①: PDBBIN v2 帧 — 完成闭环
 
-- 落码 70aeb70: 固件 type 0x21 (DBG_TYPE_PDB2V2) payload 49B = v1 37B 前缀逐比特一致
+- 落码 06142ac: 固件 type 0x21 (DBG_TYPE_PDB2V2) payload 49B = v1 37B 前缀逐比特一致
   + 尾部 3×float (ff_coulomb/ff_cogging/pos_integral); `CMD:PDBBIN,2` 开 v2, `,1` v1
   逐比特不变, `,?` 报版本。解析端 foclink TYPE_PDB2V2 分流, ladder/verify 增
   `--pdbver` (默认 1), meta 增 `pdbbin_ver`, validator 容忍新旧。
@@ -142,7 +142,7 @@
   pos_integral = pos_ki_out_prev 饱和后 ki_out (已有, 任务卡"static 局部变量"担忧不成立)。
 - 单测: test_foclink_pdbv2 5/5 (v2 解析/边界值/负值 + v1 回归 + 混合流 + CRC/len 防护);
   validator 19/19 (增 pdbbin_ver=2 过/ver=3 FAIL/缺省过 3 例)。
-- 台架验收 (板=70aeb70, 断言式烧录, FW_INFO 1.5.0 alive):
+- 台架验收 (板=06142ac, 断言式烧录, FW_INFO 1.5.0 alive):
   - 纯流 60s (scripts/low_speed/pdbv2_pure_stream_20260909_170414.json): 12004 帧 200.1Hz,
     CRC=0, seq gap=0, tick 间隔 9/10/11 全在 drain 抖动带内; v1 5s 回归流照常。
   - v2 运动轮 (verify_lowspeed_20260909_170937.json, --pdbver 2, validator OK):

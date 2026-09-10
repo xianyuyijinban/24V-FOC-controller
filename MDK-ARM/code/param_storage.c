@@ -386,7 +386,10 @@ void Param_SetDefault(MotorParam_t *param)
     memset(param, 0, sizeof(MotorParam_t));
     
     /* 24N22P 76KV 关节电机默认值 */
-    param->Rs = 8.8f;           /* 8.8Ω (76KV电机实测) */
+    param->Rs = 8.8f;           /* 8.8Ω (76KV电机实测) — 线线口径! 电压模式相口径=Rs/2≈4.4 */
+    /* 2026-09-03 口径铁律: 本字段/Rs 变量=线线 (万用表8.8/识别8.30-8.37 同口径),
+     * 供电流环 PI 整定 + foc_app.c:894 voltage_limit 折算。S2 电压模式控制律(iq_est/R补偿)
+     * 必须用相口径 Rs/2, 禁改此值。 */
     param->Ld = 0.0005f;        /* 0.5mH */
     param->Lq = 0.0005f;        /* 0.5mH */
     param->Ke = 0.129f;         /* 0.129 V/(rad/s) = 60/(2pi*74KV) */
@@ -472,7 +475,7 @@ ParamStatus_t Param_EraseSector(void)
 ParamStatus_t Param_WriteFlash(uint32_t addr, const uint32_t *data, uint32_t size)
 {
     uint32_t offset = 0U;
-    __attribute__((aligned(32))) uint8_t flashword_buf[32];
+    static uint8_t flashword_buf[32] __attribute__((aligned(32)));
     const uint8_t *src;
 
     if ((data == NULL) || (size == 0U)) {

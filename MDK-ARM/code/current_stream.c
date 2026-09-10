@@ -19,7 +19,7 @@
 #include <stdio.h>
 
 /* ── ISR decimation base ────────────────────────────────────────── */
-#define CUR_STREAM_ISR_HZ  20000U  /* TIM1 center-aligned: update IRQ fires on both overflow & underflow */
+#define CUR_STREAM_ISR_HZ  40000U  /* TIM1 center-aligned @20kHz PWM: update IRQ fires on both overflow & underflow */
 
 /* ── CRC-8 lookup table (poly 0x07, init 0x00, no reflect) ──────── */
 static const uint8_t s_crc8_table[256] = {

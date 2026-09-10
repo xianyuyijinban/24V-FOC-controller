@@ -6,8 +6,12 @@
 
 #include "foc_app.h"
 #include "current_stream.h"
+#include "foc_profiler.h"
+#include "trig_ring.h"
 #include "wheel_input.h"
 #include "tle5012.h"
+#include "uart_upload.h"
+#include "cogging_lut_cal.h"
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
@@ -156,16 +160,62 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
                         FOC_POSITION_PD_KD_DEFAULT,
                         handle->position_speed_limit_radps,
                         -handle->position_speed_limit_radps);
-    
+
+    /* 初始化位置环直连PD控制器 - 输出力矩给定 A（判别实验，默认关闭） */
+    FOC_PositionPD_Init(&handle->pos_pd_direct,
+                        FOC_POS_DIRECT_KP_DEFAULT,
+                        FOC_POS_DIRECT_KD_DEFAULT,
+                        FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A,
+                        -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A);
+    handle->pos_direct = 0U;
+    handle->pos_direct_iq_cmd = 0.0f;
+    handle->pos_direct_ki = FOC_POS_DIRECT_KI_DEFAULT;
+    handle->pos_integral = 0.0f;
+    handle->pos_integral_err_rad = FOC_POS_INTEGRAL_ERR_RAD;
+    handle->pos_cmd_dir = 0.0f;
+    handle->pos_cmd_dir_hold = 0U;
+    handle->pos_loop_skip_integral = 0U;
+    handle->pos_aw_mode = 1U;      /* 积分抗饱和律定版: 1=超阈值回拉 (2026-08-20 台架) */
+    handle->pos_aw_rate = 0.03f;   /* 回拉速率定版 (0.5°/s 98.8%, 阶跃剩 3.5%) */
+    handle->pos_aw_decay_diag = 0.0f;
+    handle->pos_aw_esc_en = 0U;          /* 僵持逃逸默认关 (锁定区改动 2026-09-06 岳翔宇批准) */
+    handle->pos_aw_esc_active = 0U;
+    handle->pos_aw_esc_sign = 0;
+    handle->pos_aw_esc_timer = 0U;
+    handle->pos_aw_esc_run_ticks = 0U;
+    handle->pos_aw_esc_count_diag = 0U;
+    handle->pos_ref_prev = handle->pos_ref;
+
+    /* 电压开环模式 (FOC_MODE_VOLTAGE) 初始化 */
+    handle->voltage_vq_ref = 0.0f;
+    handle->voltage_vq_ramped = 0.0f;
+    handle->voltage_bemf_ff = 0.0f;
+    handle->iq_est = 0.0f;
+    FOC_DtComp_Init(&handle->dt_comp);
+    {
+        const float wc_iq_est = 2.0f * FOC_PI * FOC_VOLTAGE_IQ_EST_LPF_HZ;
+        const float Ts_loop = 1.0f / (float)FOC_SPEED_LOOP_FREQ;
+        handle->iq_est_lpf_alpha = (wc_iq_est * Ts_loop) / (1.0f + wc_iq_est * Ts_loop);
+    }
+
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
 
     /* P0 cogging runtime defaults (overridable via CMD:COG_CFG) */
-    handle->cogging_lut.gain = 0.25f;
+    handle->cogging_lut.gain = 0.0f;
     handle->cogging_lut.phase_offset_rad = FOC_PI / 3.0f;  /* +60 deg */
+
+    /* 静摩擦补偿运行时幅值默认 (overridable via CMD:FRIC_COMP) */
+    handle->fric_comp_pos = FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A;
+    handle->fric_comp_neg = FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A;
 
     /* 尝试加载参数 */
     FOC_App_LoadParam(handle);
+    /* 标定齿槽 LUT 覆盖(替代识别/Flash 低质 LUT; 2026-08-14 台架标定, encoder_dir=-1 已对齐) */
+    memcpy(handle->cogging_lut.table, COGGING_LUT_CAL, sizeof(float) * FOC_COGGING_LUT_SIZE);
+    handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
+    handle->cogging_lut.valid = 1U;
+    handle->cogging_lut.gain = 0.0f;  /* 定版 OFF (错相 LUT 0.5°/s 反噬; 精确标定后可运行时 COG_CFG 开) */
     FOC_App_UpdateIdentifyState(handle);
     
     /* 如果参数有效，更新控制环参数 */
@@ -191,6 +241,16 @@ void FOC_App_MainLoop(FOC_AppHandle_t *handle)
         handle->pending_disable = 0U;
         FOC_App_Disable(handle);
     }
+
+    /* TRIG 触发监视 (③): fault 闩锁或 state 掉出 RUNNING → 自动触发验尸。
+     * 主循环拍执行 (非 ISR): TrigRing_Trigger 只写 3 个状态量, 与 20kHz
+     * 采样竞态安全 (Trigger 在 IDLE 态才接受, ISR 侧只读 state 判分支)。 */
+    if ((handle->state == FOC_STATE_FAULT) ||
+        (handle->trig_prev_state == FOC_STATE_RUNNING &&
+         handle->state != FOC_STATE_RUNNING)) {
+        (void)TrigRing_Trigger(TRIG_SRC_FAULT);
+    }
+    handle->trig_prev_state = handle->state;
 
     FOC_App_RefreshTelemetry(handle);
 
@@ -479,6 +539,26 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
     if (identify_direct_svpwm) {
         /* Direct-SVPWM identify stages already produced the voltage vector. */
+    } else if ((handle->state == FOC_STATE_RUNNING) &&
+               (handle->control_mode == FOC_MODE_VOLTAGE)) {
+        /* 电压开环模式：Vdq 由速度环(2kHz)直写，此处仅反Park+SVPWM。
+         * 电流反馈仍走 Clarke/Park 供遥测真值，但不用作闭环。 */
+        FOC_Clarke_Transform(&handle->foc.Iabc, &handle->foc.IalphaBeta);
+        FOC_Park_Transform(&handle->foc.IalphaBeta,
+                          handle->foc.sin_theta, handle->foc.cos_theta,
+                          &handle->foc.Idq);
+        FOC_Inverse_Park_Transform(&handle->foc.Vdq, handle->foc.sin_theta,
+                                  handle->foc.cos_theta, &handle->foc.ValphaBeta);
+        if (handle->dt_comp.enabled) {
+            /* 死区补偿：相电压域逐相叠加（E7 A/B），再走 ABC 域 SVPWM */
+            float vabc[3];
+            FOC_AlphaBeta_t vab = handle->foc.ValphaBeta;
+            FOC_Inverse_Clarke_Transform(&vab, (FOC_ABC_t *)vabc);
+            FOC_DtComp_Apply(&handle->dt_comp, handle->Ia, handle->Ib, handle->Ic, vabc);
+            FOC_SVPWM_GenerateFromABC((FOC_ABC_t *)vabc, handle->foc.Vbus, &handle->foc.svpwm);
+        } else {
+            FOC_SVPWM_Generate(&handle->foc.ValphaBeta, handle->foc.Vbus, &handle->foc.svpwm);
+        }
     } else if (!current_feedback_valid) {
         if (handle->state == FOC_STATE_PARAM_IDENTIFY && !identify_direct_svpwm) {
             /* During identify closed-loop stages, don't regenerate old voltage on invalid windows */
@@ -492,7 +572,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         }
     } else {
         /* 执行FOC计算 */
+        uint32_t foc_run_start = FOC_Profiler_Begin();
         FOC_Run(&handle->foc);
+        FOC_Profiler_End(FOC_PROBE_FOC_RUN, foc_run_start);
     }
     
     /* 更新PWM */
@@ -505,9 +587,9 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, pwm_c);
     }
     
-    /* Rs在线估计（每20个周期执行一次，即1kHz） */
+    /* Rs在线估计（每40个周期执行一次，即1kHz，ISR基频40kHz） */
     handle->control_count++;
-    if ((handle->control_count % 20) == 0) {
+    if ((handle->control_count % 40) == 0) {
         MI_RsOnlineEstimator_Update(&handle->rs_est, 
             handle->foc.Vdq.d, handle->foc.Vdq.q,
             handle->foc.Idq.d, handle->foc.Idq.q,
@@ -516,6 +598,29 @@ void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle)
 
 exit_cycle:
     ADC_Sampling_EndControlCycle();
+    /* TRIG ring 采样 (③): 20kHz 原速 O(1) 写, 控制循环末尾全部字段就绪。
+     * Idq/Vdq 在 RUNNING 前 (无控制输出拍) 是旧值/0 — 照实记录, 验尸口径。
+     * 独立 20kHz 时基: control_count 在 IDLE 态被提前 goto 跳过 (恒 0),
+     * 验尸帧 tick 需全态递增计数 — TrigRing 内部 tick, 不动 control_count
+     * 语义 (Rs 在线估计 %40 相位依赖它)。 */
+    TrigRing_TickTick();
+    TrigRing_Sample(handle->foc.Idq.d, handle->foc.Idq.q,
+                    handle->foc.Vdq.d, handle->foc.Vdq.q,
+                    handle->foc.theta_elec, handle->Iq_ref,
+                    TrigRing_GetTick());
+    FOC_App_PushCurrentStream(handle);
+}
+
+/**
+ * @brief Push a current-stream sample (called from TIM1_UP ISR, both edges).
+ * @note  V1.1: standalone from control cycle so the upper-edge ISR (no frame)
+ *        can still push at the 40kHz base rate without double-executing FOC.
+ */
+void FOC_App_PushCurrentStream(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
 
     /* ── V1.1: Current stream sample push (all FOC states) ── */
     {
@@ -828,6 +933,78 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
         return;
     }
 
+    if ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct == 0U)) {
+        /* ── 电压开环模式 (pos_direct=0, E系列实验路径)：Vq* = vq_ramped + Bemf前馈(ωe·Ke_elec)，旁路电流PI ──
+         * 电流估计 Îq = (Vq* − ωe·Ke_elec) / Rs 仅诊断+软限幅，不参与闭环；
+         * 超限回拉斜坡电压保证软限幅先于硬件 OCP。
+         * 极性定案（4 次 A/B 实测）：不映射。正 vq → 用户帧正转矩（速度环同向）。
+         * S2 闭环 (pos_direct=1) 跳过本分支, 落 FF 层末级换算 (1488)。 */
+        float pn_f = (handle->motor_param.Pn > 0U) ? (float)handle->motor_param.Pn : 1.0f;
+        float ke_elec = handle->motor_param.Ke / pn_f;
+        float bemf = handle->speed_elec * ke_elec;  /* speed_elec=ωe 电角速度 */
+        /* 内置斜坡：vq_ramped 以 FOC_VOLTAGE_VQ_RAMP_V_PER_S 逼近目标（空载平衡窗 <±20mV） */
+        {
+            float ramp_step = FOC_VOLTAGE_VQ_RAMP_V_PER_S / (float)FOC_SPEED_LOOP_FREQ;
+            float delta = handle->voltage_vq_ref - handle->voltage_vq_ramped;
+            handle->voltage_vq_ramped += FOC_Saturate(delta, ramp_step, -ramp_step);
+        }
+        float vq_cmd = handle->voltage_vq_ramped + bemf;
+        float rs = handle->motor_param.Rs;
+
+        handle->voltage_bemf_ff = bemf;
+
+        /* 电流估计（一阶低通，2kHz更新）。Vq*-Bemf ≈ Rs·Iq（低速 Rd 忽略）。 */
+        if ((rs > 0.01f) && handle->motor_identified) {
+            float iq_raw = (vq_cmd - bemf) / rs;  /* = vq_ramped / rs */
+            handle->iq_est += handle->iq_est_lpf_alpha * (iq_raw - handle->iq_est);
+        } else {
+            handle->iq_est = 0.0f;
+        }
+
+        /* 软限幅：估计电流超限 → 回拉斜坡电压（防堵转飞车） */
+        if (handle->iq_est > FOC_VOLTAGE_IQ_EST_LIMIT_A) {
+            float excess_v = (handle->iq_est - FOC_VOLTAGE_IQ_EST_LIMIT_A) * rs;
+            handle->voltage_vq_ramped -= excess_v;
+            if ((handle->voltage_vq_ramped > 0.0f) && (handle->voltage_vq_ramped > excess_v * 10.0f)) {
+                handle->voltage_vq_ramped = 0.0f;  /* 极端情况直接切零 */
+            }
+        } else if (handle->iq_est < -FOC_VOLTAGE_IQ_EST_LIMIT_A) {
+            float excess_v = (-handle->iq_est - FOC_VOLTAGE_IQ_EST_LIMIT_A) * rs;
+            handle->voltage_vq_ramped += excess_v;
+            if ((handle->voltage_vq_ramped < 0.0f) && (-handle->voltage_vq_ramped > excess_v * 10.0f)) {
+                handle->voltage_vq_ramped = 0.0f;
+            }
+        }
+        vq_cmd = handle->voltage_vq_ramped + bemf;
+
+        /* 总电压限幅：|Vq*| ≤ Vbus/√3 */
+        {
+            float vmax = (handle->Vbus > 1.0f) ? (handle->Vbus / FOC_SQRT3) : (24.0f / FOC_SQRT3);
+            vq_cmd = FOC_Saturate(vq_cmd, vmax, -vmax);
+        }
+
+        /* 直写 Vdq（ISR 中 FOC_Run 被旁路，反Park/SVPWM 由 Regenerate 执行） */
+        handle->foc.Vdq.d = 0.0f;
+        handle->foc.Vdq.q = vq_cmd;
+        handle->Id_ref = 0.0f;
+        handle->Iq_ref = 0.0f;
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);
+        handle->speed_loop_count++;
+        return;
+    }
+
+    /* 速度环初始化（仅一次，任何模式先跑） */
+    if (!handle->speed_loop_ready) {
+        handle->speed_theta_prev = handle->theta_mech;
+        handle->speed_mech = 0.0f;
+        handle->speed_elec = 0.0f;
+        handle->speed_loop_ready = 1U;
+        handle->speed_ref_ramped = 0.0f;
+        FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 初始化：尚无有效速度误差 */
+        handle->speed_loop_count++;
+        return;
+    }
+
     /* 计算转速（简化：微分法） */
     float delta_theta = handle->theta_mech - handle->speed_theta_prev;
     float speed_raw;
@@ -896,7 +1073,13 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
 
     /* Speed and position commands are user-frame mechanical values. Keep the
        outer loops in that frame, then map the torque command to the q-axis once. */
-    speed_feedback = speed_mech_user;
+    if ((handle->obs_use_speed != 0U) && (handle->speed_obs.valid != 0U)) {
+        /* 速度环反馈用观测器速度(平滑, 低速 0.1°/s 不被差分量化噪声淹没)。
+         * 低速专测; 高速观测器低带宽(w0~12)滞后, 需 obs_use_speed=0 切回差分。 */
+        speed_feedback = handle->speed_obs_user;
+    } else {
+        speed_feedback = speed_mech_user;
+    }
     speed_error = speed_ref_temp - speed_feedback;
     /* 将速度误差传给 FOC 核心，用于自适应 Rs 前馈置信度计算 */
     FOC_SetRsFFSpeedError(&handle->foc, speed_error);
@@ -921,6 +1104,19 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             iq_ref_mech = 0.0f;
             goto haptic_torque_injection;
         }
+        /* ── 位置环直连电流环 (判别实验): 跳过速度PI，位置环力矩指令
+         *    直接进FF层(齿槽LUT/摩擦/惯量)与静摩擦补偿 ── */
+        if (((handle->control_mode == FOC_MODE_POSITION) ||
+             ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
+            (handle->pos_direct != 0U)) {
+            handle->pi_speed.integral = 0.0f;
+            FOC_SetRsFFSpeedError(&handle->foc, 0.0f);  /* 直连：速度误差不参与控制 */
+            iq_ref_mech = FOC_Saturate(handle->pos_direct_iq_cmd, iq_limit_pos, iq_limit_neg);
+            handle->speed_loop_p_iq = iq_ref_mech;
+            handle->speed_loop_i_iq = 0.0f;
+            handle->speed_i_state = 5U;  /* 5 = pos_direct bypass */
+            goto ff_layers;
+        }
         /* ── Speed PI with conditional integration ── */
         {
             float p_iq = handle->pi_speed.Kp * speed_error;
@@ -930,11 +1126,13 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             if (handle->control_mode == FOC_MODE_SPEED && handle->enable_pwm != 0U) {
                 float abs_sref = fabsf(speed_ref_temp);
 
-                if (abs_sref < 0.02f) {
-                    /* SREF too small: clear integrator to prevent residual creep */
+                if (abs_sref < 0.0005f) {
+                    /* SREF ~0 (静止): clear integrator to prevent residual creep.
+                     * 原阈值0.02rad/s把0.1°/s(=0.0017)也清了积分→速度环P-only→低速无法
+                     * 克服静摩擦不动(实测速度模式0.1°/s仅15%)。下调后极低速可积分。 */
                     handle->pi_speed.integral = 0.0f;
                     i_state = 3U;  /* cleared */
-                } else if (abs_sref >= 0.05f && fabsf(speed_error) >= 0.02f) {
+                } else if (abs_sref >= 0.0005f && fabsf(speed_error) >= 0.0005f) {
                     /* Active zone: allow integration */
                     handle->pi_speed.integral += speed_error;
                     i_state = 1U;  /* active */
@@ -985,6 +1183,7 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             handle->speed_i_state = i_state;
         }
 
+ff_layers:
         /* P2: Acceleration / Inertia Feedforward
          * alpha = d(speed_ref_ramped)/dt, Iq_ff = J * alpha / Kt (Kt ≈ Ke in SI)
          * 门禁: J必须在[FOC_FF_INERTIA_J_MIN, FOC_FF_INERTIA_J_MAX], B<=FOC_FF_INERTIA_B_MAX
@@ -1032,12 +1231,71 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
                                         (handle->ff_blocked_by_enc_dir == 0U)) ? 1U : 0U;
             handle->ff_diag.friction_enabled = friction_allowed;
             if (friction_allowed) {
-                float omega = speed_mech_user;  /* 使用用户坐标速度，不用裸speed_mech */
+                float omega = speed_mech_user;  /* 高速库仑方向用差分速度 */
+                float omega_smooth = omega;     /* Stribeck 平滑速度(优先观测器平滑) */
+                if ((handle->speed_obs.valid != 0U)) {
+                    omega_smooth = handle->speed_obs_user;
+                }
                 float friction_total = 0.0f;
-                /* Coulomb: constant magnitude with sign direction, deadband near zero */
-                if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
-                    friction_total += (omega > 0.0f) ?
-                        (handle->motor_param.Tc / Kt) : (-handle->motor_param.Tc / Kt);
+                /* Coulomb: 高速用速度方向, 低速用指令方向兜底
+                 * - POSITION: pos_cmd_dir (方向锁存, 连续斜坡) — 直连模式下
+                 *   完全不用速度方向: 低速抖动时差分速度噪声主导, 速度方向
+                 *   导致前馈随噪声高频翻转放大抖动 (0.5°/s 实测 ±24°/s 跳变)。
+                 * - SPEED: SREF 指令符号 (差分速度噪声淹没 0.1°/s 信号, 速度方向不可靠) */
+                float coulomb_dir;
+                if (((handle->control_mode == FOC_MODE_POSITION) ||
+                     ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
+                    (handle->pos_direct != 0U)) {
+                    /* 直连位置模式: 方向只锁指令方向, 速度方向永不参与。
+                     * pos_cmd_dir 是传感器帧方向, FF 输出需转 control 帧力矩
+                     * (×enc_dir), 否则 enc_dir=-1 时补偿反向(反噬实测 +0.03A
+                     * 抵消 P 项, 阶跃/0.5°/s 全被吃)。 */
+                    float enc_dir_ff = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                    coulomb_dir = handle->pos_cmd_dir * enc_dir_ff;
+                } else if (fabsf(omega) > FOC_FF_COULOMB_DEADBAND_RADPS) {
+                    coulomb_dir = (omega > 0.0f) ? 1.0f : -1.0f;
+                } else if (((handle->control_mode == FOC_MODE_POSITION) ||
+                            ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U))) &&
+                           (handle->pos_cmd_dir != 0.0f)) {
+                    /* 级联低速兜底: pos_cmd_dir 是传感器帧方向, 转 control 帧 (同直连修正) */
+                    float enc_dir_ff = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+                    coulomb_dir = handle->pos_cmd_dir * enc_dir_ff;
+                } else if ((handle->control_mode == FOC_MODE_SPEED) &&
+                           (fabsf(speed_ref_temp) > 1e-5f)) {
+                    coulomb_dir = (speed_ref_temp > 0.0f) ? 1.0f : -1.0f;
+                } else {
+                    coulomb_dir = 0.0f;
+                }
+                if (coulomb_dir != 0.0f) {
+                    /* 幅值: 先验摩擦 fric_comp (FRIC_COMP 运行时设, 匹配启动电流)。
+                     * 速度模式原本用 Tc/Kt, 但 Tc 未识别=0 → 库仑前馈恒 0, 低速全靠
+                     * 速度环积分硬扛。统一用 fric_comp 先验。 */
+                    float fric = (coulomb_dir > 0.0f) ?
+                                 handle->fric_comp_pos : handle->fric_comp_neg;
+                    float coulomb = coulomb_dir * fric;
+                    /* Stribeck 平滑: 极低速(起动)给满静摩擦, 随速度指数衰减到动摩擦。
+                     * 用观测器平滑速度(omega_lpf)而非差分: 差分噪声使 smooth 波动 → 前馈抖动。
+                     * 直连位置模式保持 omega_smooth (实测 2°/s 用指令速率衰减后 105→82%,
+                     * 2°/s 需要满额 comp; 0.5°/s 的 comp 反噬由 COG OFF 解决)。 */
+                    float v_abs = fabsf(omega_smooth);
+                    /* 低速死区+重锚 (2026-09-05 卡滞案): 静止微振/量化噪声(实测|v|≤0.03)
+                     * 高于 fric_vs=0.01, smooth 被钉在 fric_kin 地板(0.20), 静摩擦突破
+                     * 补偿塌 5 倍(0.022→0.0044)。死区内视为静止(满额), 出死区从 0
+                     * 重锚保持曲线连续(避免 0.05 rad/s 边界 smooth 1.0→0.216 跳变)。
+                     * 死区 0.06 rad/s=3.4°/s: P95 0.048×1.25 裕量; 0.5°/s 和 2°/s 工况
+                     * 都落在死区内=满额 comp (与定版"2°/s 需要满额"实测一致)。 */
+                    float v_eff = (v_abs <= FOC_FRIC_VDEAD_RADPS) ? 0.0f
+                                                                    : (v_abs - FOC_FRIC_VDEAD_RADPS);
+                    float stick = expf(-v_eff / handle->fric_vs);
+                    float smooth = handle->fric_kin
+                                   + (1.0f - handle->fric_kin) * stick;
+                    friction_total += coulomb * smooth;
+                    handle->ff_diag.coulomb_iq = coulomb * smooth;  /* 只读镜像: PDBBIN v2 ff_coulomb */
+                } else {
+                    /* coulomb_dir=0 (静止无指令): 本拍无库仑项, 镜像随归零 —
+                     * 否则残留上一次锁存值, 与 friction_iq/ff_total 口径脱钩
+                     * (2026-09-09 ②台架实证: 静止帧 coulomb=-0.022 vs total≈0) */
+                    handle->ff_diag.coulomb_iq = 0.0f;
                 }
                 /* Viscous: proportional to speed */
                 friction_total += handle->motor_param.B * omega / Kt;
@@ -1049,12 +1307,30 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
                 iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
             } else {
                 handle->ff_diag.friction_iq = 0.0f;
+                handle->ff_diag.coulomb_iq = 0.0f;   /* 镜像随归零 (v2 ff_coulomb) */
             }
         }
 #else
         handle->ff_diag.friction_iq = 0.0f;
+        handle->ff_diag.coulomb_iq = 0.0f;
         handle->ff_diag.friction_enabled = 0U;
 #endif
+
+        /* 观测器 T_hat 前馈: 速度模式 + obs_use_speed 时, 扰动(摩擦)估计直接补偿,
+         * 速度环不需积分硬扛摩擦(低速起动/稳定, Tc 未识别=0 时尤其关键)。
+         * 用上一拍 T_hat(观测器在 FF 层尾更新)。 */
+        if ((handle->control_mode == FOC_MODE_SPEED) &&
+            (handle->obs_use_speed != 0U) &&
+            (handle->speed_obs.valid != 0U)) {
+            float Kt_obs = handle->motor_param.Ke;
+            if (fabsf(Kt_obs) > 1e-10f) {
+                float t_ff = handle->speed_obs.T_hat_lpf / Kt_obs;
+                t_ff = FOC_Saturate(t_ff, FOC_FF_FRICTION_MAX_A, -FOC_FF_FRICTION_MAX_A);
+                handle->ff_diag.friction_iq += t_ff;
+                iq_ref_mech += t_ff;
+                iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
+            }
+        }
 
         /* P0: Cogging Torque LUT Feedforward
          * Linear interpolation on 264-bin table indexed by mechanical angle
@@ -1152,31 +1428,35 @@ void FOC_App_SpeedLoop(FOC_AppHandle_t *handle)
             (fabsf(speed_feedback) < FOC_SPEED_STATIC_FRICTION_ACTIVE_RAD_PER_S) &&
             ((speed_ref_temp * speed_error) > 0.0f)) {
             friction_dir = speed_ref_temp;
-        } else if (handle->control_mode == FOC_MODE_POSITION) {
-            float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
-            float theta_mech_control = theta_mech_zeroed * encoder_dir;
-            float pos_error_for_friction = FOC_AngleNormalize(handle->pos_ref - theta_mech_control);
-            if (fabsf(pos_error_for_friction) > FOC_POSITION_STATIC_FRICTION_ENTER_RAD) {
-                handle->position_friction_active = 1U;
-            } else if (fabsf(pos_error_for_friction) < FOC_POSITION_STATIC_FRICTION_EXIT_RAD) {
-                handle->position_friction_active = 0U;
-            }
-            if (handle->position_friction_active != 0U) {
-                friction_dir = pos_error_for_friction;
-            }
+        } else if (((handle->control_mode == FOC_MODE_POSITION) ||
+                    ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
+            /* 低速静摩擦前馈统一由 FF 层库仑处理(fric_comp + pos_cmd_dir方向兜底 + Stribeck),
+             * 此处禁用避免双重补偿(实测双份过冲: 匀速从1.8→1.25°/s恶化)。 */
+            friction_dir = 0.0f;
         }
 
         if (friction_dir != 0.0f) {
-            if (handle->control_mode == FOC_MODE_POSITION) {
+            if (((handle->control_mode == FOC_MODE_POSITION) ||
+                 ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
                 friction_comp = (friction_dir > 0.0f) ?
-                                FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A :
-                                FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A;
+                                handle->fric_comp_pos :
+                                handle->fric_comp_neg;
             } else {
                 friction_comp = (friction_dir > 0.0f) ?
                                 FOC_SPEED_STATIC_FRICTION_POS_COMP_A :
                                 FOC_SPEED_STATIC_FRICTION_NEG_COMP_A;
             }
             friction_delta = (friction_dir > 0.0f) ? friction_comp : -friction_comp;
+            /* Stribeck 平滑: 起动(低速)给满静摩擦, 随速度指数衰减到动摩擦。
+             * 恒定 bang-bang 补偿在匀速时持续给满力, 电机冲过头→位置环拉回→
+             * 极限环粘滑。平滑后高速衰减, 仅低速补静摩擦, 消除振荡。 */
+            {
+                float v_mag = fabsf(speed_mech_user);
+                float stick = expf(-v_mag / FOC_FRIC_STRIBECK_VS_RADPS);
+                float smooth = FOC_FRIC_STRIBECK_KINEMATIC
+                               + (1.0f - FOC_FRIC_STRIBECK_KINEMATIC) * stick;
+                friction_delta *= smooth;
+            }
             iq_ref_mech += friction_delta;
             iq_ref_mech = FOC_Saturate(iq_ref_mech, iq_limit_pos, iq_limit_neg);
         }
@@ -1263,6 +1543,44 @@ haptic_torque_injection:
 
         float iq_cmd = iq_ref_mech;
 
+        /* ── 电压闭环末级换算 (FOC_MODE_VOLTAGE && pos_direct): ──
+         * 所有电流口径项 (PD+积分+摩擦+COG+惯量 FF) 统一 ×Rs_phase 换算为电压。
+         * Rs 口径铁律: motor_param.Rs = 线线 (8.3-8.8), 电压模式用相口径 = Rs/2 ≈ 4.4。
+         * 高阻电机 L/R=0.42ms << 位置环拍 5ms, 电气动态透明, 增益映射 200Hz 频段成立。 */
+        if ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)) {
+            float rs_phase = (handle->motor_param.Rs > 0.01f) ?
+                             (handle->motor_param.Rs * 0.5f) : 4.4f;   /* 线线→相口径 */
+            float vq_cmd = iq_cmd * rs_phase;
+            handle->voltage_vq_cmd_diag = iq_cmd;
+            /* Vq 限幅 ±2V (堵转 2V/4.4Ω = 455mA 安全; C8) */
+            vq_cmd = FOC_Saturate(vq_cmd, FOC_VOLTAGE_S2_VQ_MAX_V, -FOC_VOLTAGE_S2_VQ_MAX_V);
+            /* iq_act 软限幅: 实测电流超限 → 降 vq (用实测不用 iq_est; C8) */
+            {
+                float iq_act = handle->foc.Idq.q;
+                float iq_act_lim = FOC_VOLTAGE_S2_IQ_SOFT_LIMIT_A;
+                if (iq_act > iq_act_lim) {
+                    vq_cmd -= (iq_act - iq_act_lim) * rs_phase;
+                } else if (iq_act < -iq_act_lim) {
+                    vq_cmd -= (iq_act + iq_act_lim) * rs_phase;
+                }
+            }
+            /* 直写 Vdq (电压模式 ISR 分支消费) */
+            handle->foc.Vdq.d = 0.0f;
+            handle->foc.Vdq.q = vq_cmd;
+            handle->Id_ref = 0.0f;
+            handle->Iq_ref = 0.0f;
+            handle->position_loop_pd_out_diag = handle->voltage_vq_cmd_diag;
+            handle->ff_diag.ff_total_iq = 0.0f;
+            handle->ff_diag.bemf_vd = 0.0f;
+            handle->ff_diag.bemf_vq = 0.0f;
+            handle->ff_diag.bemf_enabled = 0U;
+            handle->speed_loop_iq_cmd_diag = iq_cmd;
+            handle->speed_loop_iq_mech_diag = iq_ref_mech;
+        } else {
+            /* 更新电流参考值 */
+            FOC_App_SetCurrentRef(handle, 0.0f, iq_cmd);  /* Id=0控制 */
+        }
+
         /* FFDiag 汇总 */
         handle->ff_diag.ff_total_iq = handle->ff_diag.inertia_iq
                                     + handle->ff_diag.friction_iq
@@ -1293,6 +1611,20 @@ haptic_torque_injection:
 
         /* 更新电流参考值 */
         FOC_App_SetCurrentRef(handle, 0.0f, iq_cmd);  /* Id=0控制 */
+
+        /* 低速速度观测器 (线性ESO) 更新: 机械帧模型。
+         * iq_ref_mech/Iq_ref/Idq.q 均为用户帧电流, 须乘 encoder_dir 转机械帧,
+         * 否则 enc_dir=-1 时观测器转矩方向反 (与 Gopinath DOB 门禁同源问题)。
+         * 驱动用实测 Idq.q (非指令), 避免"指令自洽"陷阱。 */
+        {
+            float enc_dir_f_obs = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+            float iq_mech = handle->foc.Idq.q * enc_dir_f_obs;
+            FOC_SpeedObserver_Update(&handle->speed_obs,
+                                     handle->theta_mech, iq_mech,
+                                     1.0f / (float)FOC_SPEED_LOOP_FREQ);
+            handle->speed_obs_mech = handle->speed_obs.omega_lpf;
+            handle->speed_obs_user = handle->speed_obs.omega_lpf * enc_dir_f_obs;
+        }
     }
 
     handle->speed_loop_count++;
@@ -1333,22 +1665,180 @@ void FOC_App_PositionLoop(FOC_AppHandle_t *handle)
         return;
     }
 
-    /* 位置环（仅在位置模式且运行状态执行） */
-    if (handle->state == FOC_STATE_RUNNING && 
-        handle->control_mode == FOC_MODE_POSITION) {
+    /* 非位置模式/非运行时清零低速静摩擦状态（积分+指令方向）。
+     * 电压闭环 (VOLTAGE && pos_direct) 复用同一位置环, 不清零。 */
+    if ((handle->state != FOC_STATE_RUNNING) ||
+        ((handle->control_mode != FOC_MODE_POSITION) &&
+         !((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
+        handle->pos_integral = 0.0f;
+        handle->pos_cmd_dir = 0.0f;
+        handle->pos_cmd_dir_hold = 0U;
+        handle->pos_aw_esc_active = 0U;  /* 逃逸态随积分复位 (count_diag 保留供 JDIAG 归因) */
+        handle->pos_aw_esc_timer = 0U;
+    }
+
+    /* 位置环（位置模式 或 电压闭环模式 且运行状态执行） */
+    if (handle->state == FOC_STATE_RUNNING &&
+        ((handle->control_mode == FOC_MODE_POSITION) ||
+         ((handle->control_mode == FOC_MODE_VOLTAGE) && (handle->pos_direct != 0U)))) {
         
         /* 位置误差：pos_ref(用户坐标) - theta_mech_user(用户坐标) */
         float encoder_dir_f = (handle->motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
         float theta_mech_zeroed = FOC_AngleNormalize(handle->theta_mech - handle->motor_param.mech_zero_offset);
         float theta_mech_user_pos = theta_mech_zeroed * encoder_dir_f;
-        float speed_mech_user_pos = handle->speed_mech * encoder_dir_f;
+        /* D项速度源: obs_use_d 时用观测器速度(平滑, 允许更高kd阻尼),
+         * 否则差分速度(噪声大, kd受限于0.03)。 */
+        float speed_mech_user_pos;
+        if ((handle->obs_use_d != 0U) && (handle->speed_obs.valid != 0U)) {
+            speed_mech_user_pos = handle->speed_obs.omega_lpf * encoder_dir_f;
+        } else {
+            speed_mech_user_pos = handle->speed_mech * encoder_dir_f;
+        }
         float pos_error = handle->pos_ref - theta_mech_user_pos;
         
         /* 处理角度环绕（最短路径） */
         pos_error = FOC_AngleNormalize(pos_error);
 
+        /* 指令方向锁存(慢摇连续静摩擦补偿方向源, 级联与直连共用):
+         * ref 有增量→方向=sign(增量)并重置保持窗口; hold窗口内(ref刚动过,
+         * 含PC步进间歇期)方向保持——否则PC每0.2s步进时 ref_delta 间歇为0
+         * 会误清方向导致补偿5Hz间歇、长斜坡爬行。
+         * 优先级 (2026-09-04 Kimi 定案): ①ref步进刷新 ②误差反号→立即释放+
+         * hold清零(斜坡中 hold 被步进反复重置, 原④排最后永不触发→粘滑脱扣后
+         * comp 仍按老方向推满 hold 窗, 喂过冲=142-169% 超前根因) ③hold递减
+         * ④到位清0。
+         * 注意: pos_ref 为 control frame(=用户角×encoder_dir), 方向/误差须转回
+         * 用户坐标再判, 否则 encoder_dir=-1 时补偿方向反(正向运动 dir=-1 帮倒忙)。 */
+        float enc_dir_f = encoder_dir_f;
+        float ref_delta = (handle->pos_ref - handle->pos_ref_prev) * enc_dir_f;
+        float pos_err_user = pos_error * enc_dir_f;
+        handle->pos_ref_prev = handle->pos_ref;
+        if (fabsf(ref_delta) > FOC_FRIC_CMD_DIR_UPDATE_RAD) {
+            handle->pos_cmd_dir = (ref_delta > 0.0f) ? 1.0f : -1.0f;
+            handle->pos_cmd_dir_hold = FOC_FRIC_CMD_DIR_HOLD_CNT;
+        } else if ((pos_err_user * handle->pos_cmd_dir) < 0.0f) {
+            handle->pos_cmd_dir = 0.0f;          /* 反号立即释放, 不等 hold 窗 (2026-09-04) */
+            handle->pos_cmd_dir_hold = 0U;
+        } else if (handle->pos_cmd_dir_hold > 0U) {
+            handle->pos_cmd_dir_hold--;
+        } else if (fabsf(pos_err_user) < FOC_FRIC_CMD_DIR_CLEAR_RAD) {
+            handle->pos_cmd_dir = 0.0f;
+        }
+
         /* 位置环PD：位置误差给速度指令，速度反馈提供阻尼 */
         float pos_pd_out = FOC_PositionPD_Update(&handle->pos_pd, pos_error, speed_mech_user_pos);
+
+        /* 位置环直连电流环 (判别实验)：
+         * 直连PD输出直接作为力矩指令(A)，跳过速度环PI，速度环只保留
+         * FF层(齿槽/摩擦/惯量)与静摩擦补偿。speed_ref 清零避免
+         * speed_ref_ramped 斜坡把惯量FF带起来。
+         * 叠加低速条件积分(消除静摩擦稳态误差): 仅 |err|<2° 积分, PD饱和
+         * 冻结(抗windup), 积分输出限幅±0.10A。 */
+        if (handle->pos_direct != 0U) {
+            float pd_out = FOC_PositionPD_Update(
+                &handle->pos_pd_direct, pos_error, speed_mech_user_pos);
+            uint8_t pd_sat = ((pd_out >= handle->pos_pd_direct.output_max) ||
+                              (pd_out <= handle->pos_pd_direct.output_min)) ? 1U : 0U;
+            /* 僵持积分逃逸状态机 (CMD:POS_AW_ESC, 默认关; 2026-09-06 卡滞案,
+             * 岳翔宇批准锁定区改动): 静摩擦 > P+comp 满额交付时 err 同号僵持,
+             * AW1 以 3%/tick 把积分抽在 0 附近 → 永不积分 → 死锁。
+             * 触发: |err|>FOC_POS_AW_ESC_TRIG_RAD 同号持续 FOC_POS_AW_ESC_TICKS;
+             * 动作(见下): 暂停 AW 回拉 + 放开积分门 (pd_sat 冻结保留,
+             * ki_out ±FOC_POS_INTEGRAL_LIMIT_A 限幅不动);
+             * 退出(任一): |err|<EXIT 回差 / err 翻号(立即退, 错号积分交 AW1 回拉) /
+             * 10s 强制 (真机械卡死不绕限幅常驻, 退出后僵持重新计时)。 */
+            if (handle->pos_aw_esc_en != 0U) {
+                if (handle->pos_aw_esc_active == 0U) {
+                    if (fabsf(pos_error) > FOC_POS_AW_ESC_TRIG_RAD) {
+                        int8_t esc_s = (pos_error > 0.0f) ? 1 : -1;
+                        if ((handle->pos_aw_esc_timer == 0U) ||
+                            (esc_s != handle->pos_aw_esc_sign)) {
+                            handle->pos_aw_esc_sign = esc_s;   /* 起始/翻号重锚符号 */
+                            handle->pos_aw_esc_timer = 1U;
+                        } else if (handle->pos_aw_esc_timer < 0xFFFFU) {
+                            handle->pos_aw_esc_timer++;
+                        }
+                        if (handle->pos_aw_esc_timer >= FOC_POS_AW_ESC_TICKS) {
+                            handle->pos_aw_esc_active = 1U;
+                            handle->pos_aw_esc_timer = 0U;
+                            handle->pos_aw_esc_run_ticks = 0U;
+                            handle->pos_aw_esc_count_diag++;
+                        }
+                    } else {
+                        handle->pos_aw_esc_timer = 0U;      /* 低于触发线清零 */
+                    }
+                } else {
+                    int8_t esc_s = (pos_error > 0.0f) ? 1 : -1;
+                    if ((fabsf(pos_error) < FOC_POS_AW_ESC_EXIT_RAD) ||
+                        (esc_s != handle->pos_aw_esc_sign) ||
+                        (handle->pos_aw_esc_run_ticks >= FOC_POS_AW_ESC_MAX_TICKS)) {
+                        handle->pos_aw_esc_active = 0U;
+                        handle->pos_aw_esc_timer = 0U;
+                    } else if (handle->pos_aw_esc_run_ticks < 0xFFFFU) {
+                        handle->pos_aw_esc_run_ticks++;
+                    }
+                }
+            } else {
+                /* 开关关闭时强制复位 (防运行中关 ESC 后 AW 永久旁路) */
+                handle->pos_aw_esc_active = 0U;
+                handle->pos_aw_esc_timer = 0U;
+            }
+            /* 积分律 (CMD:POS_AW_MODE):
+             * 0=条件冻结 (旧): |err|<阈值 才积分, 超阈值冻结 → 死锁(实测 err 9.9°
+             *   积分反向 -0.06A 顶住, 净力矩被抵消, 掉队锁定)
+             * 1=超阈值回拉: 超阈值时积分以 pos_aw_rate 比例泄放(按误差方向回拉)
+             * 2=Clegg 过零复位: err 过零时积分清零 (描述函数相位 -90°→-38°)
+             * 3=非对称泄放: 积分与误差反向时 4× 速率泄放, 同向正常充电 */
+            float aw_decay = 0.0f;
+            if ((handle->pos_aw_mode != 0U) && (handle->pos_aw_esc_active == 0U)) {
+                if (handle->pos_aw_mode == 2U) {
+                    /* Clegg: 误差过零复位 (用上一拍 err 符号检测过零) */
+                    if ((handle->pos_integral != 0.0f) &&
+                        ((pos_error * handle->pos_integral) < 0.0f)) {
+                        handle->pos_integral = 0.0f;
+                    }
+                } else if (fabsf(pos_error) >= handle->pos_integral_err_rad) {
+                    /* 超阈值: 1=回拉 3=非对称泄放 */
+                    float rate = (handle->pos_aw_mode == 3U) ?
+                                 (4.0f * handle->pos_aw_rate) : handle->pos_aw_rate;
+                    aw_decay = handle->pos_integral * rate;
+                    handle->pos_integral -= aw_decay;
+                } else if ((handle->pos_aw_mode == 3U) &&
+                           (handle->pos_integral != 0.0f) &&
+                           ((pos_error * handle->pos_integral) < 0.0f)) {
+                    /* mode3: 阈值内但符号反向 → 快速泄放 */
+                    handle->pos_integral -= handle->pos_integral * (4.0f * handle->pos_aw_rate);
+                }
+            }
+            if ((handle->pos_loop_skip_integral == 0U) &&
+                (pd_sat == 0U) && ((fabsf(pos_error) < handle->pos_integral_err_rad) ||
+                                   (handle->pos_aw_esc_active != 0U))) {
+                handle->pos_integral += pos_error * FOC_POS_LOOP_TS;
+            }
+            float ki_out = handle->pos_direct_ki * handle->pos_integral;
+            float ki_raw  = ki_out;
+            if (ki_out > FOC_POS_INTEGRAL_LIMIT_A) {
+                ki_out = FOC_POS_INTEGRAL_LIMIT_A;
+            } else if (ki_out < -FOC_POS_INTEGRAL_LIMIT_A) {
+                ki_out = -FOC_POS_INTEGRAL_LIMIT_A;
+            }
+            handle->pos_aw_decay_diag = aw_decay;
+            handle->pos_direct_iq_cmd = FOC_Saturate(
+                pd_out + ki_out,
+                handle->pos_pd_direct.output_max,
+                handle->pos_pd_direct.output_min);
+            handle->pos_ki_out_prev = ki_out;          /* POSDBG: 饱和后的积分输出 */
+            handle->pos_ki_raw_diag = ki_raw;          /* POSDBG: 饱和前原始积分输出(量化饱和深度) */
+            handle->pos_cmd_dir_diag = handle->pos_cmd_dir;  /* POSDBG: 指令方向锁存 */
+            handle->speed_ref = 0.0f;
+            handle->speed_ref_ramped = 0.0f;
+            handle->position_loop_error_diag = pos_error;
+            handle->position_loop_pd_out_diag = handle->pos_direct_iq_cmd;
+            handle->position_loop_pd_sat_diag = pd_sat;
+            handle->traj_active_diag = 0U;
+            handle->traj_cmd_diag = handle->pos_direct_iq_cmd;
+            return;
+        }
 
         /* V5 巡航速度下限：大误差时维持最低巡航速度，避免末端渐近慢尾
          * 使用运行时配置，若 cruise > speed_limit 则自动夹紧 */
@@ -1693,6 +2183,9 @@ void FOC_App_ResetMotionState(FOC_AppHandle_t *handle)
     handle->speed_mech = 0.0f;
     handle->speed_elec = 0.0f;
     handle->speed_theta_prev = handle->theta_mech;
+    handle->speed_obs_mech = 0.0f;
+    handle->speed_obs_user = 0.0f;
+    FOC_SpeedObserver_Reset(&handle->speed_obs, handle->theta_mech);
     handle->position_ref_user_set = 0U;
     handle->speed_loop_ready = 0U;
     handle->position_friction_active = 0U;
@@ -1820,6 +2313,32 @@ void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref)
     handle->pi_speed.integral = 0.0f;
 }
 
+void FOC_App_SetVoltageRef(FOC_AppHandle_t *handle, float vq_ref)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    handle->voltage_vq_ref = FOC_Saturate(vq_ref,
+                                          FOC_VOLTAGE_VQ_REF_MAX_V,
+                                          -FOC_VOLTAGE_VQ_REF_MAX_V);
+}
+
+void FOC_App_VoltageOff(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    /* 清零所有电压模式状态——VOLT_OFF 命令与离开电压模式共用（收拢一处） */
+    handle->voltage_vq_ref = 0.0f;
+    handle->voltage_vq_ramped = 0.0f;
+    handle->voltage_bemf_ff = 0.0f;
+    handle->iq_est = 0.0f;
+    handle->foc.Vdq.d = 0.0f;
+    handle->foc.Vdq.q = 0.0f;
+}
+
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
 {
     if (handle == NULL) {
@@ -1831,6 +2350,21 @@ void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd)
                         kd,
                         handle->position_speed_limit_radps,
                         -handle->position_speed_limit_radps);
+}
+
+void FOC_App_SetPosDirectPDGains(FOC_AppHandle_t *handle, float kp, float kd)
+{
+    if (handle == NULL) {
+        return;
+    }
+
+    /* 直连PD输出限幅固定为位置模式Iq限幅（力矩域） */
+    FOC_PositionPD_Init(&handle->pos_pd_direct,
+                        kp,
+                        kd,
+                        FOC_POSITION_USER_POSITIVE_IQ_LIMIT_A,
+                        -FOC_POSITION_USER_NEGATIVE_IQ_LIMIT_A);
+    handle->pos_direct_iq_cmd = 0.0f;
 }
 
 /**
@@ -1882,6 +2416,17 @@ void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode)
 
     if (handle->stall_open_loop_active && (mode == FOC_MODE_POSITION)) {
         mode = FOC_MODE_SPEED;
+    }
+
+    /* 离开电压模式：清电压状态防止下次进入残留 */
+    if ((handle->control_mode == FOC_MODE_VOLTAGE) && (mode != FOC_MODE_VOLTAGE)) {
+        FOC_App_VoltageOff(handle);
+    }
+    /* 进入电压模式：初始化电压状态 */
+    if (mode == FOC_MODE_VOLTAGE) {
+        handle->voltage_vq_ref = 0.0f;
+        handle->voltage_vq_ramped = 0.0f;
+        handle->iq_est = 0.0f;
     }
 
     handle->control_mode = mode;
@@ -2278,6 +2823,25 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
     }
 #endif
 
+    /* 低速速度观测器 (线性ESO): 机械帧模型, J/B/Kt 用辨识值 */
+    {
+        handle->obs_w0 = FOC_OBSERVER_W0_DEFAULT;
+        handle->obs_t_gain = FOC_OBSERVER_T_GAIN_DEFAULT;
+        handle->obs_use_d = 0U;
+        handle->obs_use_speed = 0U;
+        handle->fric_vs = FOC_FRIC_STRIBECK_VS_RADPS;
+        handle->fric_kin = FOC_FRIC_STRIBECK_KINEMATIC;
+        handle->speed_obs_mech = 0.0f;
+        handle->speed_obs_user = 0.0f;
+        FOC_SpeedObserver_Init(&handle->speed_obs,
+                               handle->motor_param.J,
+                               handle->motor_param.B,
+                               handle->motor_param.Ke,
+                               handle->obs_w0,
+                               1.0f / (float)FOC_SPEED_LOOP_FREQ);
+        handle->speed_obs.t_gain = handle->obs_t_gain;
+    }
+
 #if FOC_FF_ENABLE_COGGING
     /* Load cogging LUT from Flash */
     {
@@ -2287,10 +2851,9 @@ static void FOC_App_UpdateLoopParams(FOC_AppHandle_t *handle)
         if (cogging_status == PARAM_OK && cogging_size > 0U) {
             handle->cogging_lut.valid_size = cogging_size;
             handle->cogging_lut.valid = 1U;
-        } else {
-            handle->cogging_lut.valid_size = 0U;
-            handle->cogging_lut.valid = 0U;
         }
+        /* 加载失败保留 Init 的编译版 LUT (2026-08-21: 旧逻辑 else 置 valid=0
+         * 会把编译版一并废掉 — Flash 为空时 COG 永久关闭, 属静默陷阱) */
     }
 #endif
 
@@ -2388,6 +2951,25 @@ void FOC_App_LoadParam(FOC_AppHandle_t *handle)
     }
     FOC_App_ApplyKnownMotorConstants(handle);
     FOC_App_UpdateIdentifyState(handle);
+}
+
+/**
+ * @brief 恢复编译版齿槽 LUT 到运行时表 (覆盖 Flash/辨识 LUT)
+ * @param handle FOC应用层句柄指针
+ * @note  2026-08-21: Flash 旧 LUT (内部电压拖拽辨识, 幅值标尺任意) 在启动时
+ *        遮蔽编译版 — 台架实测注入 22 阶 ~0.068A vs 编译版 0.0089A (~7x 过驱动)。
+ *        本函数把脚本标定+谐波重构的编译版 LUT 换回运行时表 (仅 RAM)。
+ */
+void FOC_App_CoggingUseCompiled(FOC_AppHandle_t *handle)
+{
+    if (handle == NULL) {
+        return;
+    }
+    memcpy(handle->cogging_lut.table, COGGING_LUT_CAL,
+           sizeof(float) * FOC_COGGING_LUT_SIZE);
+    handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
+    handle->cogging_lut.valid = 1U;
+    handle->cogging_lut.pending = 0U;
 }
 
 /**

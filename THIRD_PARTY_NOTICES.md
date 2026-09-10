@@ -67,6 +67,18 @@ source repository does not vendor PySide6 or Qt.
 - License: GPL-2.0-or-later with the PyInstaller bootloader exception
 - Project: <https://pyinstaller.org/>
 
+## Other bundled binary
+
+### libusb
+
+- File: `libusb-1.0.dll`
+- License: LGPL-2.1-or-later
+- Project: <https://libusb.info/>
+
+Before redistributing this DLL in a release package, verify its exact build
+provenance and include the corresponding license and source-availability
+information required by that build.
+
 ## Referenced projects
 
 `Ctrl-FOC-Lite` was consulted as a design reference. No source code from that

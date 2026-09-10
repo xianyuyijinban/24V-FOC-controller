@@ -25,6 +25,10 @@
 - DRV8350S 栅极驱动器配置、状态读取和故障保护。
 - 位置轨迹速度/加速度限制、速度给定斜坡和低速门控积分。
 - DQ 域 Rs 电阻压降前馈、齿槽补偿，以及可选 BEMF 解耦诊断。
+- 位置环直连电流环模式（`POS_DIRECT`）：低速稳态抖动比级联改善 69%，适合云台/关节电机低速定位（详见下方"低速平滑优化"）。
+- 低速静摩擦连续补偿：指令方向锁存 + FF 库仑前馈（低速指令方向兜底）+ Stribeck 平滑，消除低速爬行与阶跃过冲。
+- 僵持积分逃逸（`CMD:POS_AW_ESC`，默认 OFF）：静摩擦 > 满额交付时积分被抗饱和回拉钉死导致的卡滞逃逸——触发后暂停回拉并放开积分门，以微幅棘轮慢爬 + 振动助破退出僵持。
+- **电压模式（`MODE 3`）**：`Vq*` 直给旁路电流环 PI 的力矩代理控制；`pos_direct=1` 时进入 **S2 电压闭环位置伺服**——位置环直通 PD 输出经 FF 层后按相口径 Rs/2≈4.4 换算为 Vq（±2V/0.8A 软限幅），稳态可行性已由增益阶梯 9 轮实测确认（详见下方"电压闭环"）。
 
 ### 产品模式
 
@@ -49,6 +53,7 @@
 - 100 帧、50Hz 故障黑匣子；发生 fault 后自动冻结，可通过 UART 导出 CSV。
 - `FAULT_DETAIL`、`PWM_DIAG`、`UART_RX_STAT`、ADC 噪声等诊断命令。
 - 自动标定向导具备 precheck、busy 保护、STOP 中断和进度回报。
+- TX 丢帧直接测量（`CMD:UART_RX?` 的 `tx_p1_drop` 计数）——序列 gap 归因不靠推断。
 
 ### 高速通信与遥测
 
@@ -65,6 +70,21 @@
   - CRC-8 多项式：`0x07`。
   - `BIN 1000`：当前推荐档位，约 1000 fps。
   - `BIN 2000`：实验档，受 1Mbaud 和 TX ring 反压限制，无法稳定达到完整 2000 fps。
+- **PDBBIN 二进制调试流**（v1.4.0 新增，v1.5.0 增 v2 帧）：v1 `A5 5A | 20 | 37B payload | CRC-8`
+  逐比特不变，200Hz 固定采样，`CMD:PDBBIN,1|0` 开关，含 seq/tick/pos_err/iq_cmd/ff_total/theta/v_mech/iq_act/pos_ref；
+  v2（`CMD:PDBBIN,2`，type `21`，49B）在 v1 尾部追加 `ff_coulomb` / `ff_cogging` / `pos_integral`
+  三个 float——前馈分账与积分通道直读，不再靠 N 帧倒推（`CMD:PDBBIN,?` 查当前版本）。
+  `flags` 字段携带状态字：高 8 位=FOC state（0-5），低 8 位=fault_code——环死/掉态不再静默（2026-09-04）。
+  时间门控（5ms 硬基准）与主循环频率解耦（详见 docs/20khz_lowspeed_diag_report_20260830.md §7）。
+- **EVT 事件帧**（v1.5.0 新增）：`A5 5A | 22 | 13B payload | CRC-8`，P0 优先级异步上行——
+  state 迁移 / fault set-clear / ESC 触发退出 / AW 模式切换 / tx_p1_drop 变化五类事件，
+  同类 100ms 限速（溢出计数回填），tick 与 PDBBIN 同 2kHz 基准可对齐。
+- **TRIG 故障触发 ring buffer**（v1.5.0 新增）：20kHz 电流环原速采样 1025 帧验尸窗
+  （pre 768 + 触发帧 1 + post 256 ≈ 51.25ms），fault 闩锁 / state 掉出 RUNNING 自动触发，
+  `CMD:TRIG,NOW` 手动合成，`CMD:TRIG,PULL` 分块拉取（CRC16 逐块校验）。
+  RAM 56KB（DTCM 内），电流环路径实测 max 2.7µs（20kHz 拍预算 50µs 的 5.4%）。
+- **LOOP_PROF 主循环探针**（v1.4.0 新增）：`CMD:LOOP_PROF?` / `CMD:LOOP_PROF,CLEAR`，
+  主循环五段 DWT 探针（SEG_CMD/PREF/PDB/NFRAME/OTHER）+ ISR 税校正，`LOOP_PROF_EN` 编译开关（默认 1，置 0 零成本）。
 
 ## 控制实现
 
@@ -84,15 +104,20 @@ flowchart LR
     MOTOR --> ADC
 ```
 
-当前定时基线：
+当前定时基线（v1.4.0，20kHz 升频后）：
 
 | 项目 | 配置 |
 | --- | --- |
-| PWM | 20kHz，中心对齐，`ARR=11999` |
-| 有效电流环 | 10kHz |
+| PWM | 20kHz，中心对齐，`ARR=5999` |
+| 有效电流环 | 20kHz（控制环与 ADC 帧锁相，下溢执行 + 上溢推流，兼得 2× 过采样） |
 | 速度环 | 2kHz |
 | 位置环 | 200Hz |
 | 速度估算 LPF | 20Hz |
+| 固件版本 | v1.5.0 |
+
+> **20kHz 升频（v1.4.0）**：控制 ISR（40kHz）与 ADC 帧（40kHz）同频但相位差仅 0.52µs 导致 fault=7
+> （ADC_SAMPLING），改下溢执行控制环 + 上溢推电流流后锁相解决。20kHz 下死区占比 2%（0.5µs/25µs）。
+> 升频后静态电流噪声从 10kHz 基线的 5-11mA 降到 ~4.4mA（IA std），低速段跟踪误差下降一个数量级。
 
 提高 `TIM1 ARR` 是当前电流环能够输出毫伏级电压指令的关键。旧的 `ARR=49` 会把小 PI 输出量化掉，使电流环在低电流参考下看起来“没有响应”。
 
@@ -107,7 +132,7 @@ RS_FF_MODE     = DQ
 RS_FF_SCALE    = 0.20
 RS_FF_ADAPTIVE = OFF
 BEMF           = OFF
-COG            = 0.25 / +60 deg
+COG            = 0.0（OFF，LUT 编译平滑版定版） / +60 deg
 
 MOTION_CFG     = speed 1.0 rad/s
                  accel 2.0 rad/s^2
@@ -117,6 +142,83 @@ VBUS warning   = 10V / 18V
 ```
 
 其中速度环积分只在有效速度参考和误差区间内累积；小参考回零时清空，输出饱和时执行 anti-windup，避免停车后的积分残留。
+
+## 低速平滑优化（2026-08 台架实测，12V 云台/关节应用）
+
+面向云台慢摇与关节电机低速应用的平滑性优化，实验主记录见 `docs/LOW_SPEED_SMOOTHNESS_EXPERIMENT.md`。
+
+核心改动：
+
+- **位置环直连电流环（POS_DIRECT）**：位置环 PD 输出直接作力矩指令，跳过速度环 PI（低速速度信号不可靠）。低速稳态位置纹波比级联改善 69%。
+- **指令方向锁存连续静摩擦补偿**：以位置指令方向（非误差阈值）决定补偿方向，`encoder_dir` 坐标系修正；替代旧 bang-bang 误差死区（慢速斜坡下误差恒小导致补偿从不触发而爬行）。
+- **FF 库仑低速前馈**：低速（<0.05 rad/s）库仑前馈用指令方向兜底（原死区使 2°/s 前馈从不触发），叠加 Stribeck 平滑（极低速给满静摩擦、随速度衰减到动摩擦）。
+- **直连位置环条件积分**：仅 `|err|<2°` 时积分，消除静摩擦稳态误差而不加剧阶跃过冲。
+
+```text
+POS_DIRECT       = ON（运行时 CMD:POS_DIRECT,1）
+POS_DIRECT_GAIN  = kp 0.5 / kd 0.03（默认；匀速跟踪测试用 kp 2.0，见实验文档权衡）
+POS_DIRECT_KI    = 1.5
+FRIC_COMP        = 0（pos_cmd_dir 独立补偿禁用，FF 库仑统一处理）
+FF 库仑          = Tc/Kt + 指令方向低速兜底 + Stribeck（VS 0.01, KIN 0.2）
+COG LUT          = 264 点标定（主导 22 次/圈磁阻力矩，`cogging_lut_cal.h`）
+```
+
+实测（2°/s 匀速扫 40°）：速度均值 0.82 → **1.73°/s（86% 目标）**，角度残差 18.6° → **3.9°**；0.5°/s 慢摇 **92% 跟踪**、残差 std 0.9°（当前架构实际可用下限）。
+
+已知限制：**0.1°/s 极慢摇**受静摩擦非线性 + 低速速度估计噪声限制，位置补偿 / 速度模式 / 极低速固定补偿三种方案均未达标，需要速度观测器（规划中）。
+
+## 电压闭环（S2，2026-09 台架）
+
+`FOC_MODE_VOLTAGE` + `pos_direct=1` 时，位置环直通控制律（PD+积分+FF 层）输出电流口径
+指令，末级按**相口径 Rs/2≈4.4** 换算为 Vq*（FOC_VOLTAGE_S2_* 宏，±2V/0.8A 软限幅）。
+
+- **增益阶梯 9 轮实测（2026-09-04，数据 s2_gain_ladder_20260904_132438.json）**：
+  G1(1.016V/rad) 3/3 僵持死区 5.2-5.8°；G2(2.033)/G3(3.050) 全到位 resid 0.19-0.26°、
+  极限环 0.02-0.45°（∝ kp）；斜坡跟踪超前 142-169%（comp 方向锁存喂过冲，HOLD 窗被
+  0.2s 步进反复重置使反号释放永不触发）。
+- **修复（8e796ea）**：补偿方向锁存优先级重排——误差反号立即释放 + hold 清零，
+  置于 hold 递减之前；粘住段 err 同号行为逐比特不变。待回归（台架 A+B）。
+- **僵持积分逃逸（65bb4f1，2026-09-06 卡滞案）**：G2@126° 静摩擦 > 满额交付时
+  err 同号僵持，抗饱和回拉把积分抽在 0 附近 → 永不积分 → 死锁。逃逸态暂停回拉 +
+  放开积分门，破壁以**积分驱动微幅棘轮慢爬 + 振动助破**（破壁 iq 峰 0.044-0.048A
+  低于摩擦线 0.070A，非力矩硬碾）。G2@126°×3 验收 t95 4.43-4.53s（历史全 N/A），
+  破壁后无 lurch；**默认 OFF**（电流模式 10 reps esc_count=0 惰性证明，S2 实验态按需开）。
+- **已评估**：电压伺服可行（无环死、无 PWM 量化副产物），低速率品质与电流模式定版
+  **同量级**（2026-09-10 门控死区案终审：同 B 序列 track 值域 S2 124.2-146.9% vs
+  电流 128.9-143.7% 重叠，收敛同档；无 2× 超差证据）。改善候选：COG LUT 精确标定启用。
+
+## v1.4.0 调试链路与诊断（2026-08-31 ~ 09-01）
+
+v1.4.0 在 20kHz 升频基础上补齐了调试链路与主循环诊断能力，主记录见 `docs/20khz_lowspeed_diag_report_20260830.md`。
+
+- **主循环黑洞专项**（2026-08-31）：LOOP_PROF 五段探针 + DWT/ISR 税校正，判别树 D1-D4 全闭环，
+  三条"不该贵的活很贵"挂账全部证伪——CPU 无黑洞，PDBBIN 率超载是 TX 链路现象。
+- **TX 泵效率专项**：PDBBIN 门控从 `÷13` 计数器改为 5ms 硬时间基准（200Hz 与主循环解耦），
+  T0 三数判别 + T3.1 时间门控全工况达标。
+- **F1/C7 风险分析**：TIM1 抢占 UART TX ≤15µs 节流空隙，扩容路线 2M 波特率（推荐）/ NVIC 提级（否），
+  等"N 帧 + PDBBIN 双开满速"需求再现再动。
+
+## 2026-09 增量（v1.4.0 → v1.5.0）
+
+- **版本更替 v1.5.0**（仪器与观测链强化版）：身份链（raw/ack 证据）、gap 归因
+  （`tx_p1_drop` 直接测量）、ESC 观测链（flags bit16/count/active）、PDBBIN v2、
+  EVT 事件帧、TRIG 验尸 ring buffer。
+- **AI 链路协议增量三件闭环**（2026-09-09，①PDBBIN v2 / ②EVT / ③TRIG）：
+  详见上方"高速通信与遥测"与 `docs/UART_COMMANDS.md`。
+- **卡滞案②POS_AW_ESC 结案**（默认 OFF）+ **门控死区案关闭**（假设证伪：v2 帧直读
+  斜坡段 ff_coulomb 为 Stribeck 衰减档而非满额 comp；两模式同量级）。
+- **电压闭环 S2**：`FOC_MODE_VOLTAGE` + `pos_direct` 的电压模式位置伺服——位置环直通
+  控制律经 FF 层按相口径 Rs/2≈4.4 换算 Vq*（详见上方"电压闭环"）。
+- **PDBBIN flags**：`(state<<8)|fault_code` 进帧，环死/掉态不再静默（观测链修复，18:43 案）。
+- **观测家族第五条**：积压帧混入测量窗伪影（9/4 定案）——`foclink.MeasureWindow`
+  （排压+时间戳过滤+稳定门），所有稳态判读必须用它。慢速 9/3-9/4 的"双态漂移 6°"系
+  该伪影，非电机问题（12 轮复测全净）。
+- **测量稳定性**：verify_low_speed.py 迁移（PDBBIN 单源 + MeasureWindow + state/fault
+  健康链），s2_gain_ladder.py 增加 `--gains G1,G2` 档位过滤；abort 路径自动拉取 TRIG
+  验尸窗（2026-09-10）。
+- **环死案（独立未决，最高优先）**：18:43 position loop 静默冻结（pos_err bit-exact 0、
+  theta 冻结、iq_cmd 冻结），stall/haptic 已排除，最可能 state 掉 RUNNING；flags 已接，
+  下次捕获记录 state/fault（EVT 0x01 事件帧 + TRIG 验尸窗已就位）。
 
 ## 上位机
 
@@ -234,15 +336,28 @@ CTRL:SREF,0.5
 CTRL:STOP
 ```
 
-所有文本命令必须以 `\n` 或 `\r\n` 结尾。连接设备后可使用 `SYS:CMDS?` 查询固件支持的命令组。
+所有文本命令必须以 `\n` 或 `\r\n` 结尾。完整命令见 [UART 命令参考](docs/UART_COMMANDS.md)。
 
-## 验证状态
+## 测试
 
-当前版本已在本地开发工作区完成以下回归；内部测试脚本、台架记录和过程文档不包含在公开源码快照中。
+HostComputer：
+
+```powershell
+python -m unittest discover -s HostComputer -p "test*.py"
+```
+
+FOC Device Bridge：
+
+```powershell
+python -m unittest discover -s FOC_Device_Bridge -p "test*.py"
+```
+
+当前本地回归结果：
 
 | 测试 | 结果 |
 | --- | --- |
-| HostComputer + FOC Device Bridge | 200 tests passed |
+| HostComputer | 193 tests passed |
+| FOC Device Bridge | 7 tests passed |
 | UART `FW_INFO?` burst | 100/100，RX error 未增加 |
 | BIN1000 + 并发命令 | 命令、STOP 和恢复路径通过 |
 | RAW `SREF=+/-0.5` | 12V 台架双向跟踪通过 |
@@ -266,6 +381,9 @@ CTRL:STOP
 |   `-- wheel_input.c/h         滚轮卡点、会话和 W-frame
 |-- HostComputer/               PySide6 上位机
 |-- FOC_Device_Bridge/          Windows 滚轮 Bridge
+|-- scripts/                    台架与回归脚本
+|-- docs/UART_COMMANDS.md       UART 协议文档
+|-- Project_Architecture.md     详细架构说明
 |-- build.ps1                   固件 GCC 构建
 `-- build_host_gui_app.ps1      HostComputer 打包
 ```
@@ -286,6 +404,13 @@ CTRL:STOP
 - 参数识别和方向验证期间电机会转动。
 - 更换电机或编码器后不要直接复用旧参数。
 - 不要把软件 STOP 当作唯一急停手段。
+
+## 文档
+
+- [UART 命令参考](docs/UART_COMMANDS.md)
+- [项目架构](Project_Architecture.md)
+- [开发进度](PROGRESS.md)
+- [开发过程记录](PROCESS.md)
 
 ## License
 

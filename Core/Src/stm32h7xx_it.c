@@ -24,8 +24,12 @@
 /* USER CODE BEGIN Includes */
 #include "head.h"
 #include "uart_upload.h"
+#include "debug_stream.h"
+#include "trig_ring.h"
 #include "adc_sampling.h"
 #include "can_protocol.h"
+#include "fdcan.h"
+#include "foc_profiler.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -70,8 +74,10 @@ volatile uint8_t urR_data[256];
 volatile uint16_t adc_data[8] = {0};
 extern TIM_HandleTypeDef htim1;
 
-#define UART_CMD_LINE_MAX       96U
+#define UART_CMD_LINE_MAX       256U
 #define UART_CMD_QUEUE_DEPTH    8U
+#define UART_CMD_SOURCE_UART    0U
+#define UART_CMD_SOURCE_CAN     1U
 #define UART_ADC_PHASE_SCAN_MIN_TRIGGER 2U
 #define UART_ADC_PHASE_SCAN_MAX_TRIGGER 46U
 #define UART_ADC_PHASE_SCAN_TRIGGER_STEP 2U
@@ -81,9 +87,12 @@ extern TIM_HandleTypeDef htim1;
 static char s_uartCmdLine[UART_CMD_LINE_MAX];
 static uint16_t s_uartCmdLen = 0U;
 static char s_uartCmdQueue[UART_CMD_QUEUE_DEPTH][UART_CMD_LINE_MAX];
+static uint8_t s_uartCmdQueueSource[UART_CMD_QUEUE_DEPTH];
 static volatile uint8_t s_uartCmdQueueWrite = 0U;
 static volatile uint8_t s_uartCmdQueueRead = 0U;
 static volatile uint8_t s_uartCmdDropUntilEol = 0U;
+static uint8_t s_uartCmdSourceCan = 0U;
+static uint8_t s_uartCmdResponseMuted = 0U;
 static volatile uint32_t s_uartRxRestartFailCount = 0U;
 static volatile uint16_t s_uartRxLastPos = 0U;
 static volatile uint32_t s_uartRxErrorCount = 0U;
@@ -116,6 +125,83 @@ static uint32_t s_adcNoiseStartTick = 0U;
 static uint32_t s_adcNoiseTimeoutMs = 0U;
 static uint32_t s_adcNoiseLastFrameSequence = 0U;
 static UART_AdcNoiseAccum_t s_adcNoiseAccum[ADC_CHANNEL_COUNT];
+
+/* POSDBG: 极限环量化诊断流 (CMD:POSDBG,1|0) — 主循环钩子 200Hz 输出一行 */
+static uint8_t  s_posdbg_stream = 0U;
+static volatile uint32_t s_posdbg_last_tick = 0U;  /* 200Hz 时间门控基准 (2kHz tick) */
+static volatile uint32_t s_foc_tick_2khz = 0U;  /* 速度环节拍计数 (2kHz, TIM1 ISR) — PDB 行硬件时基 */
+static uint8_t  s_pdbbin_stream = 0U;           /* PDBBIN: 文本 PDB 的二进制孪生 (CMD:PDBBIN,1|0) */
+
+/* ── EVT 事件帧 (2026-09-09 ②): 采样对比式事件源 ──
+ * 铁律 1 (不碰锁定区/不穿透 foc_app.c 分层): 所有事件源都是 g_foc_app
+ * 已有字段, 2kHz 拍尾部采样与上拍对比, 变化即发帧 — 不在 foc_app.c
+ * 内插任何 UART 调用。tick 同源 s_foc_tick_2khz (PDBBIN 同基准)。
+ * 0x04 AW 模式切换例外: 命令驱动 (it.c POS_AW_MODE 处直接发), 非采样。 */
+static uint8_t  s_evt_prev_state = 0xFFU;       /* 上拍 state (0xFF=首拍强制发基线) */
+static uint8_t  s_evt_prev_fault = 0xFFU;       /* 上拍 fault_code 低 8 位 */
+static uint8_t  s_evt_prev_esc = 0xFFU;         /* 上拍 pos_aw_esc_active */
+static uint32_t s_evt_prev_p1drop = 0U;         /* 上次 tx_p1_drop 快照 */
+static uint32_t s_evt_p1drop_last_poll = 0U;    /* 0x05 低频轮询基准拍 (1Hz) */
+
+static void EVT_Emit(uint8_t code, const uint8_t *p, uint8_t plen)
+{
+    EvtPayload_t ev;
+    (void)memset(&ev, 0, sizeof(ev));
+    ev.tick_2khz = s_foc_tick_2khz;
+    ev.code = code;
+    if (p != NULL && plen > 0U) {
+        (void)memcpy(ev.payload, p, (plen > 8U) ? 8U : plen);
+    }
+    DebugStream_PushEvent(&ev);
+}
+
+/* ESC 触发时的 pos_err: 采样式拿不到触发瞬间值 (状态位晚一拍),
+ * 发帧时读 g_foc_app.position_loop_error_diag (最近一次位置环更新) —
+ * 滞后 ≤1 位置环拍 (5ms), 卡滞场景 err 常驻 >3°, 值仍归因可信。 */
+static void EVT_SampleControlState(void)
+{
+    const FOC_AppHandle_t *h = &g_foc_app;
+    uint8_t state_now = (uint8_t)h->state;
+    uint8_t fault_now = (uint8_t)(h->fault_code & 0xFFU);
+    uint8_t esc_now = (h->pos_aw_esc_active != 0U) ? 1U : 0U;
+
+    if (state_now != s_evt_prev_state) {
+        uint8_t p[2];
+        p[0] = s_evt_prev_state;    /* 首拍 0xFF = 上电基线帧 (语义: 采样起点) */
+        p[1] = state_now;
+        EVT_Emit(EVT_CODE_STATE, p, 2U);
+        s_evt_prev_state = state_now;
+    }
+    if (fault_now != s_evt_prev_fault) {
+        uint8_t p[5];
+        (void)memset(p, 0, sizeof(p));
+        (void)memcpy(p, &h->fault_code, 4U);   /* fault_mask LE32 */
+        p[4] = (fault_now != 0U) ? 1U : 0U;    /* 1=set 0=clear */
+        EVT_Emit(EVT_CODE_FAULT, p, 5U);
+        s_evt_prev_fault = fault_now;
+    }
+    if (esc_now != s_evt_prev_esc) {
+        uint8_t p[5];
+        float pos_err = h->position_loop_error_diag;
+        (void)memset(p, 0, sizeof(p));
+        (void)memcpy(p, &pos_err, 4U);
+        p[4] = esc_now;                        /* 1=trigger 0=exit */
+        EVT_Emit(EVT_CODE_ESC, p, 5U);
+        s_evt_prev_esc = esc_now;
+    }
+    /* 0x05 tx_p1_drop: 低频 1Hz 轮询 (变化才发, 限速兜底) */
+    if ((uint32_t)(s_foc_tick_2khz - s_evt_p1drop_last_poll) >= 2000U) {
+        uint32_t p0d, p1d, p2d;
+        s_evt_p1drop_last_poll = s_foc_tick_2khz;
+        DrvUart_GetTxDropCounts(&p0d, &p1d, &p2d);
+        if (p1d != s_evt_prev_p1drop) {
+            uint8_t p[4];
+            (void)memcpy(p, &p1d, 4U);
+            EVT_Emit(EVT_CODE_TX_P1_DROP, p, 4U);
+            s_evt_prev_p1drop = p1d;
+        }
+    }
+}
 
 static void UART_ReevaluateVoltageFaultAfterThresholdUpdate(void)
 {
@@ -261,25 +347,9 @@ static void UART_CommandQueueCopy(uint8_t index, const char *line)
     s_uartCmdQueue[index][copyLen] = '\0';
 }
 
-static void UART_CommandQueuePushPriority(const char *line)
-{
-    uint8_t prev;
+static void UART_CommandQueuePushPriority(const char *line);
 
-    if (line == NULL) {
-        return;
-    }
-
-    prev = (uint8_t)((s_uartCmdQueueRead + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
-    if (prev == s_uartCmdQueueWrite) {
-        /* 队列满：为实时位置目标让路，丢弃尾部最新的普通命令 */
-        s_uartCmdQueueWrite = (uint8_t)((s_uartCmdQueueWrite + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
-    }
-
-    UART_CommandQueueCopy(prev, line);
-    s_uartCmdQueueRead = prev;
-}
-
-static void UART_CommandQueuePush(const char *line)
+static void UART_CommandQueuePushSource(const char *line, uint8_t source)
 {
     uint8_t next;
 
@@ -299,7 +369,37 @@ static void UART_CommandQueuePush(const char *line)
     }
 
     UART_CommandQueueCopy(s_uartCmdQueueWrite, line);
+    s_uartCmdQueueSource[s_uartCmdQueueWrite] = source;
     s_uartCmdQueueWrite = next;
+}
+
+static void UART_CommandQueuePushPriority(const char *line)
+{
+    uint8_t prev;
+
+    if (line == NULL) {
+        return;
+    }
+
+    prev = (uint8_t)((s_uartCmdQueueRead + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    if (prev == s_uartCmdQueueWrite) {
+        /* 队列满：为实时位置目标让路，丢弃尾部最新的普通命令 */
+        s_uartCmdQueueWrite = (uint8_t)((s_uartCmdQueueWrite + UART_CMD_QUEUE_DEPTH - 1U) % UART_CMD_QUEUE_DEPTH);
+    }
+
+    UART_CommandQueueCopy(prev, line);
+    s_uartCmdQueueSource[prev] = UART_CMD_SOURCE_UART;
+    s_uartCmdQueueRead = prev;
+}
+
+static void UART_CommandQueuePush(const char *line)
+{
+    UART_CommandQueuePushSource(line, UART_CMD_SOURCE_UART);
+}
+
+void UART_CommandQueuePushFromCan(const char *line)
+{
+    UART_CommandQueuePushSource(line, UART_CMD_SOURCE_CAN);
 }
 
 static void UART_CommandSendText(const char *text)
@@ -308,7 +408,354 @@ static void UART_CommandSendText(const char *text)
     if (text == NULL) {
         return;
     }
+    if (s_uartCmdResponseMuted != 0U) {
+        return;
+    }
+    if (s_uartCmdSourceCan != 0U) {
+        CanProtocol_SendTunnelText(text);
+        return;
+    }
     DrvUart_SendTextP0(text);
+}
+
+static float UART_FocProfilerCyclesToUs(float cycles, uint32_t cpu_hz)
+{
+    if (cpu_hz == 0U) {
+        return 0.0f;
+    }
+    return cycles * 1000000.0f / (float)cpu_hz;
+}
+
+static FOC_ProfilerSnapshot_t s_focProfilerTxSnapshot;
+static uint8_t s_focProfilerTxActive;
+static uint8_t s_focProfilerTxLine;
+
+static uint8_t UART_CommandTrySendFocProfilerStat(const FOC_ProfilerSnapshot_t *snapshot,
+                                                  FOC_ProfilerProbe_t probe)
+{
+    const FOC_ProfilerStat_t *stat;
+    uint32_t min_cycles;
+    uint32_t avg_cycles;
+    float avg_cycles_f;
+    char min_us[20];
+    char avg_us[20];
+    char max_us[20];
+    char budget_us[20];
+    char line[240];
+    int len;
+
+    if ((snapshot == NULL) || ((uint32_t)probe >= (uint32_t)FOC_PROBE_COUNT)) {
+        return 0U;
+    }
+
+    stat = &snapshot->stats[(uint32_t)probe];
+    min_cycles = (stat->count != 0U) ? stat->min_cycles : 0U;
+    avg_cycles = (stat->count != 0U) ? (uint32_t)(stat->sum_cycles / stat->count) : 0U;
+    avg_cycles_f = (stat->count != 0U) ?
+                   ((float)stat->sum_cycles / (float)stat->count) : 0.0f;
+
+    DrvUart_FormatFixed(min_us, sizeof(min_us),
+        UART_FocProfilerCyclesToUs((float)min_cycles, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(avg_us, sizeof(avg_us),
+        UART_FocProfilerCyclesToUs(avg_cycles_f, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(max_us, sizeof(max_us),
+        UART_FocProfilerCyclesToUs((float)stat->max_cycles, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(budget_us, sizeof(budget_us),
+        UART_FocProfilerCyclesToUs((float)snapshot->budget_cycles[(uint32_t)probe],
+                                   snapshot->cpu_hz), 3U);
+
+    len = snprintf(line, sizeof(line),
+        "FOC_TIME,%s,n=%lu,min_cyc=%lu,avg_cyc=%lu,max_cyc=%lu,"
+        "min_us=%s,avg_us=%s,max_us=%s,budget_us=%s,overrun=%lu\r\n",
+        FOC_Profiler_ProbeName(probe),
+        (unsigned long)stat->count,
+        (unsigned long)min_cycles,
+        (unsigned long)avg_cycles,
+        (unsigned long)stat->max_cycles,
+        min_us, avg_us, max_us, budget_us,
+        (unsigned long)stat->overrun_count);
+    if ((len <= 0) || ((size_t)len >= sizeof(line))) {
+        return 0U;
+    }
+    return DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+}
+
+static void UART_CommandStartFocProfilerSnapshot(void)
+{
+    if (s_focProfilerTxActive != 0U) {
+        UART_CommandSendText("FOC_TIME,BUSY\r\n");
+        return;
+    }
+
+    FOC_Profiler_GetSnapshot(&s_focProfilerTxSnapshot);
+    s_focProfilerTxLine = 0U;
+    s_focProfilerTxActive = 1U;
+}
+
+static void UART_CommandServiceFocProfilerSnapshot(void)
+{
+    const FOC_ProfilerStat_t *period_stat;
+    uint32_t jitter_cycles = 0U;
+    char line[240];
+    char jitter_us[20];
+    int len;
+    uint8_t accepted = 0U;
+
+    if (s_focProfilerTxActive == 0U) {
+        return;
+    }
+
+    if (s_focProfilerTxLine == 0U) {
+        len = snprintf(line, sizeof(line),
+            "FOC_TIME,BEGIN,dwt=%u,cpu_hz=%lu,tim1_budget_us=%u,foc_budget_us=%u,probe_ovh_cyc=%lu\r\n",
+            (unsigned)s_focProfilerTxSnapshot.enabled,
+            (unsigned long)s_focProfilerTxSnapshot.cpu_hz,
+            (unsigned)FOC_PROFILER_TIM1_BUDGET_US,
+            (unsigned)FOC_PROFILER_FOC_BUDGET_US,
+            (unsigned long)s_focProfilerTxSnapshot.probe_overhead_cycles);
+        if ((len > 0) && ((size_t)len < sizeof(line))) {
+            accepted = DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+        }
+    } else if (s_focProfilerTxLine <= (uint8_t)FOC_PROBE_COUNT) {
+        accepted = UART_CommandTrySendFocProfilerStat(
+            &s_focProfilerTxSnapshot,
+            (FOC_ProfilerProbe_t)(s_focProfilerTxLine - 1U));
+    } else {
+        period_stat = &s_focProfilerTxSnapshot.stats[FOC_PROBE_IRQ_PERIOD];
+        if ((period_stat->count != 0U) && (period_stat->max_cycles >= period_stat->min_cycles)) {
+            jitter_cycles = period_stat->max_cycles - period_stat->min_cycles;
+        }
+        DrvUart_FormatFixed(jitter_us, sizeof(jitter_us),
+            UART_FocProfilerCyclesToUs((float)jitter_cycles,
+                                       s_focProfilerTxSnapshot.cpu_hz), 3U);
+        len = snprintf(line, sizeof(line),
+            "FOC_TIME,END,jitter_cyc=%lu,jitter_us=%s\r\n",
+            (unsigned long)jitter_cycles, jitter_us);
+        if ((len > 0) && ((size_t)len < sizeof(line))) {
+            accepted = DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+        }
+    }
+
+    if (accepted == 0U) {
+        return;
+    }
+
+    s_focProfilerTxLine++;
+    if (s_focProfilerTxLine > ((uint8_t)FOC_PROBE_COUNT + 1U)) {
+        s_focProfilerTxActive = 0U;
+    }
+}
+
+#if LOOP_PROF_EN
+/* ── LOOP_PROF 事务机 (复刻 FOC_TIME 模式, P0 逐行泵出五段统计) ── */
+static FOC_ProfilerSnapshot_t s_loopProfTxSnapshot;
+static uint8_t s_loopProfTxActive;
+static uint8_t s_loopProfTxLine;
+
+static float UART_LoopProfCyclesToUs(float cycles, uint32_t cpu_hz)
+{
+    if (cpu_hz == 0U) {
+        return 0.0f;
+    }
+    return cycles * 1000000.0f / (float)cpu_hz;
+}
+
+static uint8_t UART_LoopProfTrySendStat(const FOC_ProfilerSnapshot_t *snapshot,
+                                        FOC_ProfilerProbe_t probe)
+{
+    const FOC_ProfilerStat_t *stat;
+    uint32_t min_cycles, max_cycles;
+    float avg_cycles_f;
+    char min_us[20], avg_us[20], max_us[20];
+    char line[200];
+    int len;
+
+    if ((snapshot == NULL) || ((uint32_t)probe >= (uint32_t)FOC_PROBE_COUNT)) {
+        return 0U;
+    }
+    stat = &snapshot->stats[(uint32_t)probe];
+    min_cycles = (stat->count != 0U) ? stat->min_cycles : 0U;
+    max_cycles = stat->max_cycles;
+    avg_cycles_f = (stat->count != 0U) ?
+                   ((float)stat->sum_cycles / (float)stat->count) : 0.0f;
+
+    DrvUart_FormatFixed(min_us, sizeof(min_us),
+        UART_LoopProfCyclesToUs((float)min_cycles, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(avg_us, sizeof(avg_us),
+        UART_LoopProfCyclesToUs(avg_cycles_f, snapshot->cpu_hz), 3U);
+    DrvUart_FormatFixed(max_us, sizeof(max_us),
+        UART_LoopProfCyclesToUs((float)max_cycles, snapshot->cpu_hz), 3U);
+
+    len = snprintf(line, sizeof(line),
+        "LOOP_PROF,%s,n=%lu,min_cyc=%lu,avg_cyc=%lu,max_cyc=%lu,"
+        "min_us=%s,avg_us=%s,max_us=%s\r\n",
+        FOC_Profiler_ProbeName(probe),
+        (unsigned long)stat->count,
+        (unsigned long)min_cycles,
+        (unsigned long)(stat->count != 0U ? (uint32_t)(stat->sum_cycles / stat->count) : 0U),
+        (unsigned long)max_cycles,
+        min_us, avg_us, max_us);
+    if ((len <= 0) || ((size_t)len >= sizeof(line))) {
+        return 0U;
+    }
+    return DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U;
+}
+
+static void UART_CommandStartLoopProfSnapshot(void)
+{
+    if (s_loopProfTxActive != 0U) {
+        UART_CommandSendText("LOOP_PROF,BUSY\r\n");
+        return;
+    }
+    FOC_Profiler_GetSnapshot(&s_loopProfTxSnapshot);
+    s_loopProfTxLine = 0U;
+    s_loopProfTxActive = 1U;
+}
+
+static void UART_CommandServiceLoopProfSnapshot(void)
+{
+    char line[160];
+    int len;
+    uint8_t accepted = 0U;
+
+    if (s_loopProfTxActive == 0U) {
+        return;
+    }
+
+    if (s_loopProfTxLine == 0U) {
+        FOC_LoopProfIter_t li = FOC_Profiler_LoopIterStats();
+        uint32_t iter_us = 0U;
+        if (li.iter_count != 0U) {
+            uint64_t avg_cyc = li.iter_sum_cyc / (uint64_t)li.iter_count;
+            iter_us = UART_LoopProfCyclesToUs((float)avg_cyc, s_loopProfTxSnapshot.cpu_hz);
+        }
+        len = snprintf(line, sizeof(line),
+            "LOOP_PROF,BEGIN,probe_en=%u,cpu_hz=%lu,iter_n=%lu,iter_avg_us=%lu,iter_max_cyc=%lu,isr_avg_cyc=%lu,isr_max_cyc=%lu\r\n",
+            (unsigned)s_loopProfTxSnapshot.enabled,
+            (unsigned long)s_loopProfTxSnapshot.cpu_hz,
+            (unsigned long)li.iter_count,
+            (unsigned long)iter_us,
+            (unsigned long)li.iter_max_cyc,
+            (unsigned long)(li.iter_count != 0U ? (uint32_t)(li.isr_sum_cyc / (uint64_t)li.iter_count) : 0U),
+            (unsigned long)li.isr_max_cyc);
+        accepted = ((len > 0) && ((size_t)len < sizeof(line))) ?
+                   (DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U) : 0U;
+    } else if (s_loopProfTxLine <= ((uint8_t)FOC_PROBE_COUNT - 1U)) {
+        accepted = UART_LoopProfTrySendStat(&s_loopProfTxSnapshot,
+                                            (FOC_ProfilerProbe_t)s_loopProfTxLine);
+    } else {
+        /* END 行: 输出后立即清 active, 下一快照可再触发 (BUG: 原 >COUNT+1 永不满足) */
+        len = snprintf(line, sizeof(line), "LOOP_PROF,END\r\n");
+        accepted = ((len > 0) && ((size_t)len < sizeof(line))) ?
+                   (DrvUart_SendBytesP0((const uint8_t *)line, (uint16_t)len) ? 1U : 0U) : 0U;
+        if (accepted != 0U) {
+            s_loopProfTxActive = 0U;
+            s_loopProfTxLine = 0U;
+            return;
+        }
+    }
+
+    if (accepted == 0U) {
+        return;
+    }
+    s_loopProfTxLine++;
+    if (s_loopProfTxLine > ((uint8_t)FOC_PROBE_COUNT + 1U)) {
+        s_loopProfTxActive = 0U;
+    }
+}
+#else
+static void UART_CommandStartLoopProfSnapshot(void) { }
+static void UART_CommandServiceLoopProfSnapshot(void) { }
+#endif
+
+static void UART_CommandServicePosdbg(void)
+{
+    char line[128];
+    int len;
+    const FOC_AppHandle_t *h = &g_foc_app;
+
+    if ((s_posdbg_stream == 0U) && (s_pdbbin_stream == 0U)) {
+        return;
+    }
+
+    /* 时间门控 200Hz (2026-08-31 TX 泵专项): 原 ÷13 计数器与主循环率耦合 —
+     * 探针固件主循环 9.7kHz 时尝试率漂到 9666Hz 实测 690Hz; 改 s_foc_tick_2khz
+     * 差分 ≥10 拍 (5ms 硬时间基准, tick 在 2kHz 速度环拍递增, 与主循环率无关)。
+     * 主循环率高时仍每拍进 gate, 但 ≤200Hz 发射。 */
+    uint32_t tick_now = s_foc_tick_2khz;
+    if ((uint32_t)(tick_now - s_posdbg_last_tick) < 10U) {
+        return;
+    }
+    s_posdbg_last_tick = tick_now;
+
+    uint32_t posdbg_start = FOC_Profiler_Begin();
+
+    /* 极限环量化: err(位置误差 rad, control帧) ki_out(饱和后积分输出 A) ki_raw(饱和前)
+     * pd_sat(PD饱和) comp_cfg(摩擦补偿配置常数 A, 非瞬时量) fric(FF库仑瞬时 A)
+     * iq_cmd(FF前位置环指令 A) cmd_dir(指令方向锁存)
+     * ff_total(FF层总注入 A: N帧p19 Iq_ref = iq_cmd + ff_total) theta(sensor帧归零角度 rad)
+     * tick2k(速度环 2kHz 节拍计数: 硬件时基, PC 端 t=tick/2000, 消除 PC 收讫时间戳差分伪影) */
+    len = snprintf(line, sizeof(line),
+        "PDB,%.5f,%.5f,%.5f,%u,%.5f,%.5f,%.5f,%.1f,%.5f,%.5f,%lu\r\n",
+        (double)h->position_loop_error_diag,
+        (double)h->pos_ki_out_prev,
+        (double)h->pos_ki_raw_diag,
+        (unsigned int)h->position_loop_pd_sat_diag,
+        (double)h->fric_comp_pos,
+        (double)h->ff_diag.friction_iq,
+        (double)h->pos_direct_iq_cmd,
+        (double)h->pos_cmd_dir_diag,
+        (double)h->ff_diag.ff_total_iq,
+        (double)FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset),
+        (unsigned long)s_foc_tick_2khz);
+    if ((len > 0) && ((size_t)len < sizeof(line))) {
+        DrvUart_SendTextP1(line);
+    }
+
+    /* PDBBIN: 与文本 PDB 同一 gate 同拍发射 (独立开关, seq 丢帧定位)
+     * v2 (2026-09-09 ①): 49B = v1 37B + ff_coulomb/ff_cogging/pos_integral 3×float */
+    if (s_pdbbin_stream != 0U) {
+        if (DebugStream_GetVer() == 2U) {
+            PdbBinV2Payload_t p2;
+            p2.v1.seq = 0U;  /* PushPdb 内自递增 */
+            /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
+            p2.v1.pos_err_rad    = h->position_loop_error_diag;
+            p2.v1.iq_cmd         = h->pos_direct_iq_cmd;
+            p2.v1.ff_total       = h->ff_diag.ff_total_iq;
+            p2.v1.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
+            p2.v1.iq_act         = h->foc.Idq.q;
+            p2.v1.v_mech_rad_s   = h->speed_mech;
+            p2.v1.pos_ref_rad    = h->pos_ref;
+            /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
+             * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
+            p2.v1.flags = ((uint32_t)h->state << 8) |
+                          ((uint32_t)h->fault_code & 0xFFU) |
+                          ((uint32_t)h->pos_aw_esc_active << 16);
+            /* v2 追加: 取数口径见 PdbBinV2Payload_t 注释 (2026-09-09 核实) */
+            p2.ff_coulomb   = h->ff_diag.coulomb_iq;
+            p2.ff_cogging   = h->ff_diag.cogging_iq;
+            p2.pos_integral = h->pos_ki_out_prev;   /* 饱和后 ki_out (AW/ESC 作用后生效值) */
+            DebugStream_PushPdbV2(s_foc_tick_2khz, &p2);
+        } else {
+            PdbBinPayload_t p;
+            p.seq = 0U;  /* PushPdb 内自递增 */
+            /* tick 在发射点赋值: 主循环 drain 时补会比实际晚, 丢帧定位失真 */
+            p.pos_err_rad    = h->position_loop_error_diag;
+            p.iq_cmd         = h->pos_direct_iq_cmd;
+            p.ff_total       = h->ff_diag.ff_total_iq;
+            p.theta_user_rad = FOC_AngleNormalize(h->theta_mech - h->motor_param.mech_zero_offset);
+            p.iq_act         = h->foc.Idq.q;
+            p.v_mech_rad_s   = h->speed_mech;
+            p.pos_ref_rad    = h->pos_ref;
+            /* flags: 低 8 位=fault_code, 次 8 位=state — 环死/掉状态时主机不再瞎 (2026-09-04);
+             * bit16=pos_aw_esc_active 僵持逃逸态逐帧可见 (2026-09-06 卡滞案) */
+            p.flags = ((uint32_t)h->state << 8) |
+                      ((uint32_t)h->fault_code & 0xFFU) |
+                      ((uint32_t)h->pos_aw_esc_active << 16);
+            DebugStream_PushPdb(s_foc_tick_2khz, &p);
+        }
+    }
+    FOC_Profiler_End(FOC_PROBE_POSDBG, posdbg_start);
 }
 
 static void UART_CommandConsumeByte(uint8_t ch)
@@ -954,7 +1401,8 @@ static const char *UART_CommandMapAlias(const char *cmd, char *buf, size_t bufSi
 static void UART_CommandExecute(const char *cmd)
 {
     long int int_arg;
-    float f1, f2;
+    unsigned long uint_arg;
+    float f1, f2, f3, f4;
     char mapped_buf[UART_CMD_LINE_MAX];
     const char *mapped;
 
@@ -968,15 +1416,46 @@ static void UART_CommandExecute(const char *cmd)
         cmd = mapped;
     }
 
-    if (strcmp(cmd, "CMD:UART_RX_STAT?") == 0 || strcmp(cmd, "DIAG:UART_RX?") == 0) {
-        char resp[96];
+    if (strcmp(cmd, "CMD:UART_RX?") == 0 || strcmp(cmd, "CMD:UART_RX_STAT?") == 0) {
+        uint32_t tx_p0_drop;
+        uint32_t tx_p1_drop;
+        uint32_t tx_p2_drop;
+        char resp[176];
+
+        DrvUart_GetTxDropCounts(&tx_p0_drop, &tx_p1_drop, &tx_p2_drop);
         (void)snprintf(resp, sizeof(resp),
-            "UART_RX,OK,err=%lu,restart_fail=%lu,last_pos=%u,buf=%u\r\n",
+            "UART_RX,OK,err=%lu,restart_fail=%lu,last_pos=%u,buf=%u,"
+            "tx_p0_drop=%lu,tx_p1_drop=%lu,tx_p2_drop=%lu\r\n",
             (unsigned long)s_uartRxErrorCount,
             (unsigned long)s_uartRxRestartFailCount,
             (unsigned)s_uartRxLastPos,
-            (unsigned)sizeof(urR_data));
+            (unsigned)sizeof(urR_data),
+            (unsigned long)tx_p0_drop,
+            (unsigned long)tx_p1_drop,
+            (unsigned long)tx_p2_drop);
         UART_CommandSendText(resp);
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:FOC_TIME?") == 0) {
+        UART_CommandStartFocProfilerSnapshot();
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:FOC_TIME,CLEAR") == 0) {
+        FOC_Profiler_Clear();
+        UART_CommandSendText("FOC_TIME,CLEAR,OK\r\n");
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:LOOP_PROF?") == 0) {
+        UART_CommandStartLoopProfSnapshot();
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:LOOP_PROF,CLEAR") == 0) {
+        FOC_Profiler_Clear();
+        UART_CommandSendText("LOOP_PROF,CLEAR,OK\r\n");
         return;
     }
 
@@ -992,12 +1471,16 @@ static void UART_CommandExecute(const char *cmd)
             "  WHEEL:SESSION,<id>,<to_ms>  WHEEL:KEEPALIVE,<id>  WHEEL:STATUS?\r\n"
             " GAIN: PI_CURRENT,Kp,Ki PI_SPEED,Kp,Ki PD_POS,Kp,Kd\r\n"
             " MOTION: MOTION_CFG? MOTION_CFG,s,a,c MOTION_CFG,RESET\r\n"
-            " FF: COG? COG,gain,deg BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
+            " POS_DIRECT: POS_DIRECT? POS_DIRECT,0|1 POS_DIRECT_GAIN,Kp,Kd POS_DIRECT_KI,Ki\r\n"
+            " FRIC_COMP: FRIC_COMP? FRIC_COMP,pos,neg DIR? (诊断方向锁存/积分/力矩指令)\r\n"
+            " OBS: OBS? (omega_hat vs 差分) OBS_CFG,w0,use_d (速度观测器调参)\r\n"
+            " FF: COG? COG,gain,deg COG_LUT,USE_COMPILED COG_LUT,SAVE BEMF? BEMF,0|1 KE_TEMP,Ke RS_MODE? RS_MODE,0|1|2 RS_SCALE,v RS_ADAPTIVE? RS_ADAPTIVE,0|1\r\n"
             " JOINT: LIMIT? LIMIT,min_deg,max_deg LIMIT,OFF\r\n"
             " GIMBAL: RAMP? RAMP,accel\r\n"
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
-            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG TLE_RAW TLE_GPIO,0|1\r\n"
+            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG? CH_CFG,gain,recon CH_CFG?\r\n"
+            " TRIG: TRIG,NOW TRIG,STAT? TRIG,PULL,off,len TRIG,CLR (故障验尸 ring buffer)\r\n"
         );
         return;
     }
@@ -1369,6 +1852,7 @@ static void UART_CommandExecute(const char *cmd)
         if ((strncmp(cmd, "CMD:SREF,", 9) == 0) ||
             (strncmp(cmd, "CMD:PREF,", 9) == 0) ||
             (strncmp(cmd, "CMD:IREF,", 9) == 0) ||
+            (strncmp(cmd, "CMD:VOLT,", 9) == 0) ||
             (strncmp(cmd, "CMD:MODE,", 9) == 0) ||
             (strncmp(cmd, "CMD:APP_MODE,", 13) == 0) ||
             (strncmp(cmd, "CMD:ENABLE,1", 12) == 0)) {
@@ -1499,6 +1983,422 @@ static void UART_CommandExecute(const char *cmd)
     }
     if (sscanf(cmd, "CMD:COG_PHASE,%f", &f1) == 1) {
         g_foc_app.cogging_lut.phase_offset_rad = f1;
+        return;
+    }
+
+    /* ── COG_LUT: LUT 来源管理 ──
+     * Flash 旧 LUT (内部电压拖拽辨识, 幅值标尺任意) 在启动时遮蔽编译版;
+     * USE_COMPILED 换回编译版 (纯 RAM, 即时); SAVE 把当前运行时表写入 Flash
+     * (擦整扇区, 须停电机; 之后每次上电即编译版内容)。 */
+    if (strcmp(cmd, "CMD:COG_LUT,USE_COMPILED") == 0) {
+        char resp[80];
+        float cmin, cmax;
+        int ci;
+        FOC_App_CoggingUseCompiled(&g_foc_app);
+        cmin = cmax = g_foc_app.cogging_lut.table[0];
+        for (ci = 1; ci < (int)FOC_COGGING_LUT_SIZE; ci++) {
+            float v = g_foc_app.cogging_lut.table[ci];
+            if (v < cmin) cmin = v;
+            if (v > cmax) cmax = v;
+        }
+        (void)snprintf(resp, sizeof(resp),
+                       "COG_LUT,OK,compiled_active,min=%.4f,max=%.4f\r\n",
+                       (double)cmin, (double)cmax);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:COG_LUT,SAVE") == 0) {
+        char resp[64];
+        if (g_foc_app.enable_pwm != 0U) {
+            UART_CommandSendText("COG_LUT,SAVE,FAIL,motor_running\r\n");
+            return;
+        }
+        g_foc_app.cogging_lut.pending = 1U;
+        FOC_App_SaveParam(&g_foc_app);
+        (void)snprintf(resp, sizeof(resp),
+                       "COG_LUT,SAVE,attempted=%u (1=OK,2=fail,3=magic)\r\n",
+                       (unsigned)g_foc_app.cogging_lut.save_attempted);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    /* ── CH_CFG: C 通道运行时补救 (C 缩水 41% 临时措施, 硬件修复后复归) ── */
+    if (strcmp(cmd, "CMD:CH_CFG?") == 0) {
+        char resp[64];
+        float gc = 1.0f;
+        uint8_t rc = 0U;
+        ADC_Sampling_GetChCfg(&gc, &rc);
+        (void)snprintf(resp, sizeof(resp), "CH_CFG,OK,gain_c=%.3f,recon=%u\r\n",
+                       (double)gc, (unsigned int)rc);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:CH_CFG,%f,%u", &f1, &uint_arg) == 2) {
+        if (f1 >= 0.2f && f1 <= 3.0f && uint_arg <= 1U) {
+            ADC_Sampling_SetChCfg(f1, (uint8_t)uint_arg);
+            UART_CommandSendText("CH_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("CH_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+
+    /* ── POS_DIRECT: 位置环直连电流环判别实验开关 ── */
+    if (strcmp(cmd, "CMD:POS_DIRECT?") == 0) {
+        char resp[160];
+        char kp_str[20], kd_str[20], ki_str[20];
+        DrvUart_FormatFixed(kp_str, sizeof(kp_str), g_foc_app.pos_pd_direct.kp, 3U);
+        DrvUart_FormatFixed(kd_str, sizeof(kd_str), g_foc_app.pos_pd_direct.kd, 3U);
+        DrvUart_FormatFixed(ki_str, sizeof(ki_str), g_foc_app.pos_direct_ki, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "POS_DIRECT,OK,direct=%u,kp=%s,kd=%s,ki=%s\r\n",
+                 (unsigned int)g_foc_app.pos_direct, kp_str, kd_str, ki_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT,%f", &f1) == 1) {
+        uint8_t direct = (f1 > 0.0f) ? 1U : 0U;
+        char resp[32];
+        if (direct != g_foc_app.pos_direct) {
+            g_foc_app.pos_direct = direct;
+            /* 切换时清零速度积分与直连力矩指令，避免结构切换瞬间力矩跳变 */
+            g_foc_app.pi_speed.integral = 0.0f;
+            g_foc_app.pos_direct_iq_cmd = 0.0f;
+        }
+        (void)snprintf(resp, sizeof(resp),
+                 "POS_DIRECT,OK,%u\r\n", (unsigned int)g_foc_app.pos_direct);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT_GAIN,%f,%f", &f1, &f2) == 2) {
+        /* 运行时调直连PD增益（A/rad, A/(rad/s)），判别实验台架扫参用 */
+        if (f1 >= 0.0f && f1 <= 50.0f && f2 >= 0.0f && f2 <= 1.0f) {
+            FOC_App_SetPosDirectPDGains(&g_foc_app, f1, f2);
+            UART_CommandSendText("POS_DIRECT_GAIN,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_DIRECT_GAIN,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_DIRECT_KI,%f", &f1) == 1) {
+        /* 直连位置环积分增益 A/(rad·s)，低速静摩擦消除（条件积分仅小误差） */
+        if (f1 >= 0.0f && f1 <= 20.0f) {
+            g_foc_app.pos_direct_ki = f1;
+            UART_CommandSendText("POS_DIRECT_KI,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_DIRECT_KI,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_INTEGR_ERR,%f", &f1) == 1) {
+        /* 条件积分误差阈值 rad (默认0.035=2°)。0.5°/s 误差~3.5°冻结积分 → 提高阈值让积分工作 */
+        if (f1 >= 0.0f && f1 <= 0.5f) {
+            g_foc_app.pos_integral_err_rad = f1;
+            UART_CommandSendText("POS_INTEGR_ERR,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_INTEGR_ERR,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_AW_MODE,%u,%f", &uint_arg, &f1) == 2) {
+        /* 积分抗饱和律: mode 0=条件冻结 1=超阈值回拉 2=Clegg过零复位 3=非对称泄放
+         * rate 为回拉/泄放比例 (0~1/拍), 默认 0.05 */
+        if (uint_arg <= 3U && f1 >= 0.0f && f1 <= 1.0f) {
+            uint8_t aw_old = g_foc_app.pos_aw_mode;
+            g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
+            g_foc_app.pos_aw_rate = f1;
+            if (aw_old != g_foc_app.pos_aw_mode) {   /* ② EVT 0x04 AW 模式切换 */
+                uint8_t p[2];
+                p[0] = aw_old;
+                p[1] = g_foc_app.pos_aw_mode;
+                EVT_Emit(EVT_CODE_AW_MODE, p, 2U);
+            }
+            UART_CommandSendText("POS_AW_MODE,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_AW_MODE,%u", &uint_arg) == 1) {
+        if (uint_arg <= 3U) {
+            uint8_t aw_old = g_foc_app.pos_aw_mode;
+            g_foc_app.pos_aw_mode = (uint8_t)uint_arg;
+            if (aw_old != g_foc_app.pos_aw_mode) {   /* ② EVT 0x04 AW 模式切换 */
+                uint8_t p[2];
+                p[0] = aw_old;
+                p[1] = g_foc_app.pos_aw_mode;
+                EVT_Emit(EVT_CODE_AW_MODE, p, 2U);
+            }
+            UART_CommandSendText("POS_AW_MODE,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_MODE,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:POS_AW_MODE?") == 0) {
+        char resp[80];
+        (void)snprintf(resp, sizeof(resp), "POS_AW_MODE,OK,mode=%u,rate=%.3f\r\n",
+                       (unsigned int)g_foc_app.pos_aw_mode, (double)g_foc_app.pos_aw_rate);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POS_AW_ESC,%u", &uint_arg) == 1) {
+        /* 僵持积分逃逸开关 (2026-09-06 卡滞案, 默认关): 1=开(清零计数) 0=关(逃逸态强制复位) */
+        if (uint_arg <= 1U) {
+            g_foc_app.pos_aw_esc_en = (uint8_t)uint_arg;
+            if (uint_arg != 0U) {
+                g_foc_app.pos_aw_esc_count_diag = 0U;   /* 开 = 新一轮实验, 计数清零 */
+            } else {
+                g_foc_app.pos_aw_esc_active = 0U;       /* 关 = 立即退出逃逸, AW 恢复 */
+                g_foc_app.pos_aw_esc_timer = 0U;
+            }
+            UART_CommandSendText("POS_AW_ESC,OK\r\n");
+        } else {
+            UART_CommandSendText("POS_AW_ESC,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:POS_AW_ESC?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp), "POS_AW_ESC,OK,en=%u,active=%u,count=%u\r\n",
+                       (unsigned int)g_foc_app.pos_aw_esc_en,
+                       (unsigned int)g_foc_app.pos_aw_esc_active,
+                       (unsigned int)g_foc_app.pos_aw_esc_count_diag);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    if (strcmp(cmd, "CMD:POSDBG?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp), "POSDBG,OK,stream=%u\r\n",
+                       (unsigned int)s_posdbg_stream);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:POSDBG,%u", &uint_arg) == 1) {
+        /* 极限环量化诊断流: 1=开 0=关。主循环服务钩子按 200Hz 输出一行文本 */
+        if (uint_arg <= 1U) {
+            s_posdbg_stream = (uint8_t)uint_arg;
+            if (s_posdbg_stream == 0U) {
+                s_posdbg_last_tick = s_foc_tick_2khz;
+            }
+            UART_CommandSendText("POSDBG,OK\r\n");
+        } else {
+            UART_CommandSendText("POSDBG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:PDBBIN,?") == 0) {
+        /* PDBBIN 版本查询: 0=关 1=v1(37B) 2=v2(49B) (2026-09-09 ①) */
+        char resp[24];
+        (void)snprintf(resp, sizeof(resp), "PDBBIN,OK,ver=%u\r\n",
+                       (unsigned int)((s_pdbbin_stream == 0U) ? 0U : DebugStream_GetVer()));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:PDBBIN,%u", &uint_arg) == 1) {
+        /* PDBBIN 二进制调试流: 0=关 1=v1(37B) 2=v2(49B, 尾部追加
+         * ff_coulomb/ff_cogging/pos_integral) (2026-09-09 ①);
+         * v1 逐比特不变 (铁律 2). */
+        if (uint_arg <= 2U) {
+            s_pdbbin_stream = (uint8_t)((uint_arg == 0U) ? 0U : 1U);
+            if (uint_arg == 0U) {
+                s_posdbg_last_tick = s_foc_tick_2khz;
+            } else {
+                DebugStream_SetVer((uint8_t)uint_arg);
+            }
+            UART_CommandSendText("PDBBIN,OK\r\n");
+        } else {
+            UART_CommandSendText("PDBBIN,FAIL,range\r\n");
+        }
+        return;
+    }
+
+    /* ── TRIG: 故障触发 ring buffer (③, 2026-09-09) ── */
+    if (strcmp(cmd, "CMD:TRIG,NOW") == 0) {
+        /* 手动合成触发: 验尸窗标定与测试用 */
+        if (TrigRing_Trigger(TRIG_SRC_MANUAL) != 0U) {
+            UART_CommandSendText("TRIG,OK,now\r\n");
+        } else {
+            UART_CommandSendText("TRIG,FAIL,busy\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:TRIG,STAT?") == 0) {
+        char resp[112];
+        /* state: 0=IDLE 1=POST 2=FROZEN; src: 0=none 1=fault 2=manual */
+        (void)snprintf(resp, sizeof(resp),
+            "TRIG,OK,state=%u,src=%u,trig_tick=%lu,post=%lu\r\n",
+            (unsigned int)TrigRing_GetState(),
+            (unsigned int)TrigRing_GetSource(),
+            (unsigned long)TrigRing_GetTrigTick(),
+            (unsigned long)TrigRing_GetPostCount());
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strncmp(cmd, "CMD:TRIG,PULL,", 14) == 0) {
+        /* 分块拉取: off/len 按帧 (0..1023, 触发帧=768), ≤32 帧/块 (896B+头
+         * +CRC16 < TX ring 1024B; 单块必须整帧入 ring 原子发送)。堆栈缓冲
+         * 898B (曾按 256 帧 7170B 溢栈 hard fault — 4e6773c 教训)。
+         * 响应 = TRIG,BIN,<len>,<binary len×28B+CRC16(2)>; 拉取期间 PDBBIN
+         * 暂停 (帧边界安全), 块完恢复。 */
+        int off_i = -1, len_i = -1;
+        uint8_t pullbuf[TRIG_PULL_MAX_BYTES + 2U];
+        uint16_t out_len;
+        uint8_t pdb_restore = 0U;
+        if (sscanf(cmd, "CMD:TRIG,PULL,%d,%d", &off_i, &len_i) == 2 &&
+            off_i >= 0 && len_i > 0 && len_i <= (int)TRIG_PULL_MAX_FRAMES) {
+            if (TrigRing_GetState() != TRIG_STATE_FROZEN) {
+                UART_CommandSendText("TRIG,FAIL,not_frozen\r\n");
+                return;
+            }
+            if (s_pdbbin_stream != 0U) {
+                s_pdbbin_stream = 0U;      /* 拉取期间暂停 PDB 流 (任务卡③) */
+                pdb_restore = 1U;
+            }
+            out_len = TrigRing_Pull((uint16_t)off_i, (uint16_t)len_i, pullbuf);
+            if (out_len == 0U) {
+                if (pdb_restore != 0U) { s_pdbbin_stream = 1U; }
+                UART_CommandSendText("TRIG,FAIL,pull\r\n");
+                return;
+            }
+            {
+                char hdr[32];
+                int hdr_len = snprintf(hdr, sizeof(hdr), "TRIG,BIN,%u,",
+                                       (unsigned int)out_len);
+                /* 头 + 二进制块一次入队 (P0 原子准入): 借用 SendTextP0 后跟
+                 * SendBytesP0 — 两段间 P1 可插队, 但主机按头 len 读字节不受
+                 * 影响; 块本身 28×len+CRC 单次 memcpy 原子。 */
+                UART_CommandSendText(hdr);
+                DrvUart_SendBytesP0(pullbuf, out_len);
+            }
+            if (pdb_restore != 0U) {
+                s_pdbbin_stream = 1U;      /* 拉完恢复 */
+            }
+        } else {
+            UART_CommandSendText("TRIG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (strcmp(cmd, "CMD:TRIG,CLR") == 0) {
+        TrigRing_Clear();
+        UART_CommandSendText("TRIG,OK,clr\r\n");
+        return;
+    }
+
+    /* ── OBS: 低速速度观测器 (线性ESO) ── */
+    if (strcmp(cmd, "CMD:OBS?") == 0) {
+        char resp[224];
+        char obs_str[20], lpf_str[20], diff_str[20], t_str[20], w0_str[20];
+        float enc_dir_fq = (g_foc_app.motor_param.encoder_dir < 0) ? -1.0f : 1.0f;
+        DrvUart_FormatFixed(obs_str, sizeof(obs_str), g_foc_app.speed_obs.omega_hat * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(lpf_str, sizeof(lpf_str), g_foc_app.speed_obs.omega_lpf * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(diff_str, sizeof(diff_str),
+                            g_foc_app.speed_mech * enc_dir_fq, 5U);
+        DrvUart_FormatFixed(t_str, sizeof(t_str), g_foc_app.speed_obs.T_hat, 6U);
+        DrvUart_FormatFixed(w0_str, sizeof(w0_str), g_foc_app.obs_w0, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "OBS,OK,w0=%s,t_gain=%.1f,use_d=%u,use_speed=%u,valid=%u,omega_hat=%s,omega_lpf=%s,diff=%s,T_hat=%s\r\n",
+                 w0_str, (double)g_foc_app.speed_obs.t_gain,
+                 (unsigned int)g_foc_app.obs_use_d,
+                 (unsigned int)g_foc_app.obs_use_speed,
+                 (unsigned int)g_foc_app.speed_obs.valid,
+                 obs_str, lpf_str, diff_str, t_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f,%f,%f", &f1, &f2, &f3, &f4) == 4) {
+        /* w0 带宽, use_d = D项用观测器, use_speed = 速度环反馈用观测器,
+         * t_gain = T_hat 学习增益(L3放大) */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        uint8_t use_speed = (f3 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f && f4 >= 0.0f && f4 <= 1000.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            g_foc_app.obs_use_speed = use_speed;
+            g_foc_app.obs_t_gain = f4;
+            g_foc_app.speed_obs.t_gain = f4;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f,%f", &f1, &f2, &f3) == 3) {
+        /* 兼容 3 参数 (w0, use_d, use_speed), t_gain 保持不变 */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        uint8_t use_speed = (f3 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            g_foc_app.obs_use_speed = use_speed;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:OBS_CFG,%f,%f", &f1, &f2) == 2) {
+        /* 兼容旧 2 参数 (w0, use_d), use_speed 保持不变 */
+        uint8_t use_d = (f2 > 0.0f) ? 1U : 0U;
+        if (f1 >= 1.0f && f1 <= 50.0f) {
+            g_foc_app.obs_w0 = f1;
+            g_foc_app.speed_obs.w0 = f1;
+            g_foc_app.obs_use_d = use_d;
+            UART_CommandSendText("OBS_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("OBS_CFG,FAIL,range\r\n");
+        }
+        return;
+    }
+
+    /* ── FRIC_COMP: 静摩擦补偿运行时幅值 ── */
+    if (strcmp(cmd, "CMD:DIR?") == 0) {
+        char resp[160];
+        int dir = (g_foc_app.pos_cmd_dir > 0.0f) ? 1 :
+                  (g_foc_app.pos_cmd_dir < 0.0f) ? -1 : 0;
+        (void)snprintf(resp, sizeof(resp),
+                 "DIR,OK,dir=%d,hold=%u,integral=%.4f,iq_cmd=%.4f,fric_pos=%.3f,fric_neg=%.3f\r\n",
+                 dir,
+                 (unsigned int)g_foc_app.pos_cmd_dir_hold,
+                 (double)g_foc_app.pos_integral,
+                 (double)g_foc_app.pos_direct_iq_cmd,
+                 (double)g_foc_app.fric_comp_pos,
+                 (double)g_foc_app.fric_comp_neg);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:FRIC_COMP?") == 0) {
+        char resp[96];
+        char pos_str[20], neg_str[20];
+        DrvUart_FormatFixed(pos_str, sizeof(pos_str), g_foc_app.fric_comp_pos, 3U);
+        DrvUart_FormatFixed(neg_str, sizeof(neg_str), g_foc_app.fric_comp_neg, 3U);
+        (void)snprintf(resp, sizeof(resp),
+                 "FRIC_COMP,OK,pos=%s,neg=%s\r\n", pos_str, neg_str);
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:FRIC_COMP,%f,%f", &f1, &f2) == 2) {
+        if (f1 >= 0.0f && f1 <= 0.50f && f2 >= 0.0f && f2 <= 0.50f) {
+            g_foc_app.fric_comp_pos = f1;
+            g_foc_app.fric_comp_neg = f2;
+            UART_CommandSendText("FRIC_COMP,OK\r\n");
+        } else {
+            UART_CommandSendText("FRIC_COMP,FAIL,range\r\n");
+        }
+        return;
+    }
+    if (sscanf(cmd, "CMD:FRIC_CFG,%f,%f", &f1, &f2) == 2) {
+        /* Stribeck 运行时调参: vs 特征速度(0.1°/s 需小 VS 让运动衰减到动摩擦), kin 动摩擦比例 */
+        if (f1 >= 0.0001f && f1 <= 1.0f && f2 >= 0.0f && f2 <= 1.0f) {
+            g_foc_app.fric_vs = f1;
+            g_foc_app.fric_kin = f2;
+            UART_CommandSendText("FRIC_CFG,OK\r\n");
+        } else {
+            UART_CommandSendText("FRIC_CFG,FAIL,range\r\n");
+        }
         return;
     }
 
@@ -1761,7 +2661,7 @@ static void UART_CommandExecute(const char *cmd)
     }
 
     if (sscanf(cmd, "CMD:MODE,%ld", &int_arg) == 1) {
-        if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_POSITION) {
+        if (int_arg >= (long int)FOC_MODE_TORQUE && int_arg <= (long int)FOC_MODE_VOLTAGE) {
             char resp[32];
             __disable_irq();
             FOC_App_SetRawControlMode(&g_foc_app, (FOC_ControlMode_t)int_arg);
@@ -1771,6 +2671,83 @@ static void UART_CommandExecute(const char *cmd)
         } else {
             UART_CommandSendText("MODE,FAIL,range\r\n");
         }
+        return;
+    }
+
+    /* ── CMD:VOLT — 电压开环模式 (FOC_MODE_VOLTAGE) 电压指令 ── */
+    if (strcmp(cmd, "CMD:VOLT?") == 0) {
+        char resp[96];
+        float vbus = g_foc_app.Vbus;
+        (void)snprintf(resp, sizeof(resp),
+                 "VOLT,OK,vq_ref_mV=%ld,bemf_mV=%ld,iq_est_mA=%ld,mode=%u,vbus_mV=%ld\r\n",
+                 (long)(g_foc_app.voltage_vq_ref * 1000.0f),
+                 (long)(g_foc_app.voltage_bemf_ff * 1000.0f),
+                 (long)(g_foc_app.iq_est * 1000.0f),
+                 (unsigned)g_foc_app.control_mode,
+                 (long)(vbus * 1000.0f));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (strcmp(cmd, "CMD:VOLT_OFF") == 0) {
+        __disable_irq();
+        FOC_App_VoltageOff(&g_foc_app);   /* 收拢: 清 iq_est/vq_ramped/bemf/Vdq 全部 */
+        __enable_irq();
+        UART_CommandSendText("VOLT_OFF,OK\r\n");
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:VOLT,", &f1)) {
+        /* 输入单位 mV → V */
+        char resp[48];
+        if (g_foc_app.control_mode != FOC_MODE_VOLTAGE) {
+            UART_CommandSendText("VOLT,FAIL,not_voltage_mode (use CMD:MODE,3)\r\n");
+            return;
+        }
+        __disable_irq();
+        FOC_App_SetVoltageRef(&g_foc_app, f1 * 0.001f);
+        __enable_irq();
+        (void)snprintf(resp, sizeof(resp), "VOLT,OK,%ldmV\r\n", (long)f1);
+        UART_CommandSendText(resp);
+        return;
+    }
+
+    /* ── CMD:DT — 逆变器死区补偿 (E7 A/B) ── */
+    if (strcmp(cmd, "CMD:DT?") == 0) {
+        char resp[96];
+        (void)snprintf(resp, sizeof(resp),
+                 "DT,OK,en=%u,amp_mV=%ld,comp=%ld,%ld,%ldmV\r\n",
+                 (unsigned)g_foc_app.dt_comp.enabled,
+                 (long)(g_foc_app.dt_comp.amplitude_v * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_a * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_b * 1000.0f),
+                 (long)(g_foc_app.dt_comp.comp_c * 1000.0f));
+        UART_CommandSendText(resp);
+        return;
+    }
+    if (sscanf(cmd, "CMD:DT,%ld", &int_arg) == 1) {
+        if (int_arg != 0) {
+            __disable_irq();
+            g_foc_app.dt_comp.enabled = 1U;
+            g_foc_app.dt_comp.sign_a = g_foc_app.dt_comp.sign_b = g_foc_app.dt_comp.sign_c = 0U;
+            __enable_irq();
+            UART_CommandSendText("DT,OK,1\r\n");
+        } else {
+            __disable_irq();
+            g_foc_app.dt_comp.enabled = 0U;
+            __enable_irq();
+            UART_CommandSendText("DT,OK,0\r\n");
+        }
+        return;
+    }
+    if (UART_CommandParseFloat1(cmd, "CMD:DT_V,", &f1)) {
+        /* 手动幅值覆盖 mV → V（E7 校正用） */
+        char resp[48];
+        if (f1 < 0.0f || f1 > 1000.0f) {
+            UART_CommandSendText("DT_V,FAIL,range (0-1000mV)\r\n");
+            return;
+        }
+        g_foc_app.dt_comp.amplitude_v = f1 * 0.001f;
+        (void)snprintf(resp, sizeof(resp), "DT_V,OK,%ldmV\r\n", (long)f1);
+        UART_CommandSendText(resp);
         return;
     }
 
@@ -1793,9 +2770,18 @@ static void UART_CommandExecute(const char *cmd)
     if (UART_CommandParseFloat1(cmd, "CMD:PREF,", &f1)) {
         char resp[48];
         float pos_before = g_foc_app.pos_ref;
+        uint32_t pref_start = FOC_Profiler_Begin();
+#if LOOP_PROF_EN
+        FOC_LoopSegHandle_t seg_pref_h;
+        FOC_Profiler_SegBegin(&seg_pref_h);
+#endif
         __disable_irq();
         FOC_App_SetPositionRef(&g_foc_app, f1);
+        /* 手动即时拍：只刷新PD输出让PREF即时生效，但不多积一拍 —
+         * 否则积分节拍 = 200Hz TIM1 + PREF流率，等效ki被PC脚本流率调制 */
+        g_foc_app.pos_loop_skip_integral = 1U;
         FOC_App_PositionLoop(&g_foc_app);
+        g_foc_app.pos_loop_skip_integral = 0U;
         g_foc_app.position_pref_cmd_count_diag++;
         g_foc_app.position_pref_raw_diag = f1;
         g_foc_app.position_pref_mapped_diag = g_foc_app.pos_ref;
@@ -1803,6 +2789,10 @@ static void UART_CommandExecute(const char *cmd)
         g_foc_app.position_pref_after_diag = g_foc_app.pos_ref;
         g_foc_app.position_pref_user_set_diag = g_foc_app.position_ref_user_set;
         __enable_irq();
+#if LOOP_PROF_EN
+        FOC_Profiler_SegEnd(&seg_pref_h, FOC_PROBE_SEG_PREF);
+#endif
+        FOC_Profiler_End(FOC_PROBE_CMD_PREF, pref_start);
         (void)snprintf(resp, sizeof(resp), "PREF,OK,%.3f\r\n", (double)f1);
         UART_CommandSendText(resp);
         return;
@@ -2256,6 +3246,7 @@ static void UART_CommandExecute(const char *cmd)
 void UART_Command_ProcessPending(void)
 {
     char cmd[UART_CMD_LINE_MAX];
+    uint8_t cmdSource;
     size_t copyLen;
 
     (void)g_trigger;  /* prevent --gc-sections */
@@ -2264,14 +3255,41 @@ void UART_Command_ProcessPending(void)
         copyLen = UART_BoundedStrLen(s_uartCmdQueue[s_uartCmdQueueRead], UART_CMD_LINE_MAX - 1U);
         memcpy(cmd, s_uartCmdQueue[s_uartCmdQueueRead], copyLen);
         cmd[copyLen] = '\0';
+        cmdSource = s_uartCmdQueueSource[s_uartCmdQueueRead];
         s_uartCmdQueueRead = (uint8_t)((s_uartCmdQueueRead + 1U) % UART_CMD_QUEUE_DEPTH);
         __enable_irq();
 
+        s_uartCmdSourceCan = (cmdSource == UART_CMD_SOURCE_CAN) ? 1U : 0U;
+        s_uartCmdResponseMuted = 0U;
         UART_CommandExecute(cmd);
     }
 
     UART_CommandServiceAdcNoise();
+    UART_CommandServiceFocProfilerSnapshot();
+    UART_CommandServiceLoopProfSnapshot();
+#if LOOP_PROF_EN
+    {
+        FOC_LoopSegHandle_t seg_pdb_h;
+        FOC_Profiler_SegBegin(&seg_pdb_h);
+        UART_CommandServicePosdbg();
+        FOC_Profiler_SegEnd(&seg_pdb_h, FOC_PROBE_SEG_PDB);
+    }
+#else
+    UART_CommandServicePosdbg();
+#endif
     TLE5012_GpioDiagService();
+    s_uartCmdSourceCan = 0U;
+}
+
+void UART_CommandExecuteMuted(const char *cmd)
+{
+    uint8_t previousSourceCan = s_uartCmdSourceCan;
+
+    s_uartCmdSourceCan = 0U;
+    s_uartCmdResponseMuted = 1U;
+    UART_CommandExecute(cmd);
+    s_uartCmdResponseMuted = 0U;
+    s_uartCmdSourceCan = previousSourceCan;
 }
 /* USER CODE END 0 */
 
@@ -2287,6 +3305,47 @@ extern TIM_HandleTypeDef htim1;
 extern DMA_HandleTypeDef hdma_usart1_tx;
 extern DMA_HandleTypeDef hdma_usart1_rx;
 /* USER CODE BEGIN EV */
+
+void FDCAN1_IT0_IRQHandler(void)
+{
+    HAL_FDCAN_IRQHandler(&hfdcan1);
+}
+
+static uint8_t FDCAN_RxDlcToBytes(uint32_t dlc)
+{
+    if (dlc <= 8U) {
+        return (uint8_t)dlc;
+    }
+    switch (dlc) {
+        case 9U:  return 12U;
+        case 10U: return 16U;
+        case 11U: return 20U;
+        case 12U: return 24U;
+        case 13U: return 32U;
+        case 14U: return 48U;
+        default:  return 64U;
+    }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+    FDCAN_RxHeaderTypeDef rxHeader;
+    uint8_t rxData[8];
+
+    if ((hfdcan != &hfdcan1) ||
+        ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)) {
+        return;
+    }
+
+    while (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
+        uint8_t len = FDCAN_RxDlcToBytes(rxHeader.DataLength);
+
+        if (len > 8U) {
+            len = 8U;
+        }
+        CanProtocol_OnRx(rxHeader.Identifier, rxData, len);
+    }
+}
 
 
 /* USER CODE END EV */
@@ -2514,43 +3573,67 @@ void DMA1_Stream4_IRQHandler(void)
   */
 void TIM1_UP_IRQHandler(void)
 {
+  uint32_t tim1_isr_start = FOC_Profiler_Begin();
+  FOC_Profiler_RecordIrqEntry(tim1_isr_start);
   /* USER CODE BEGIN TIM1_UP_IRQn 0 */
   /* USER CODE END TIM1_UP_IRQn 0 */
   HAL_TIM_IRQHandler(&htim1);
   /* USER CODE BEGIN TIM1_UP_IRQn 1 */
     /* ===== FOC current loop =====
-     * PWM: 10kHz center-aligned (ARR=11999, PSC=0).
-     * Effective FOC rate: ADC-frame-gated, ~10kHz (matches PWM/ADC trigger).
+     * PWM: 20kHz center-aligned (ARR=5999, PSC=0).
+     * ADC frame (OC4REF@CNT=5400) lands on the underflow edge only.
+     * Underflow edge: full control cycle (Begin → consume → FOC_Run → End) + push.
+     * Overflow edge: push only (stream stays 40kHz, control stays 20kHz in lockstep).
      */
-    FOC_App_TIM1_IRQHandler(&g_foc_app);
-    
-    /* TLE5012 encoder read: target ~5kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+    if (__HAL_TIM_IS_TIM_COUNTING_DOWN(&htim1) == RESET) {
+        uint32_t current_path_start = FOC_Profiler_Begin();
+        FOC_App_TIM1_IRQHandler(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_CURRENT_PATH, current_path_start);
+    } else {
+        FOC_App_PushCurrentStream(&g_foc_app);
+    }
+
+    /* TLE5012 encoder read: target ~5kHz (ISR base 40kHz, ÷8). */
     static uint8_t tle5012_div_counter = 0;
-    if (++tle5012_div_counter >= 4)
+    if (++tle5012_div_counter >= 8)
     {
         tle5012_div_counter = 0;
         TLE5012_StartRead();
     }
 
-    /* Speed loop: target ~2kHz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+    /* Speed loop: target ~2kHz (ISR base 40kHz, ÷20). */
     static uint8_t speed_loop_div_counter = 0;
-    if (++speed_loop_div_counter >= 10) 
+    if (++speed_loop_div_counter >= 20)
     {
+        uint32_t speed_loop_start;
         speed_loop_div_counter = 0;
+        s_foc_tick_2khz++;  /* PDB 硬件时基: PC 端 t = tick/2000, 与主循环发送抖动无关 */
+        speed_loop_start = FOC_Profiler_Begin();
         FOC_App_SpeedLoop(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_SPEED_LOOP, speed_loop_start);
+        EVT_SampleControlState();   /* ②: 拍尾部采样 state/fault/ESC/tx_p1_drop */
     }
-    
-    /* Position loop: target ~200Hz. Actual rate depends on TIM1_UP freq (TBD by scope). */
+
+    /* Position loop: target ~200Hz (ISR base 40kHz, ÷200). */
     static uint8_t position_loop_div_counter = 0;
-    if (++position_loop_div_counter >= 100) 
+    if (++position_loop_div_counter >= 200)
     {
+        uint32_t position_loop_start;
         position_loop_div_counter = 0;
+        position_loop_start = FOC_Profiler_Begin();
         FOC_App_PositionLoop(&g_foc_app);
+        FOC_Profiler_End(FOC_PROBE_POSITION_LOOP, position_loop_start);
     }
-    
+
     /* DRV8350S status poll. Rate = TIM1_UP freq (TBD by scope). */
     DRV8350S_TIM1_UpdateCallback(&drv8350s);
   /* USER CODE END TIM1_UP_IRQn 1 */
+  FOC_Profiler_End(FOC_PROBE_TIM1_ISR, tim1_isr_start);
+#if LOOP_PROF_EN
+  /* ISR 税校正账本: 把本次 ISR 墙钟耗时加入 64 位累计 (段结算差分用)。
+   * 用 FOC_PROBE_TIM1_ISR 已记录的原始墙钟 (含探针开销, 与税为同一口径)。 */
+  FOC_Profiler_RecordTim1IsrCycles(DWT->CYCCNT - tim1_isr_start);
+#endif
 }
 
 /**

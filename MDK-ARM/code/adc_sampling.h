@@ -122,6 +122,11 @@ typedef struct {
     /* 【新增】校准状态 */
     ADC_CalibStatus_t calibStatus;      /* 校准状态 */
     uint16_t imbalanceCount;            /* 不平衡计数 */
+
+    /* CH_CFG: C 通道运行时补救 (2026-08-20, 手转真值实验实测 C 缩水 41% 的临时措施;
+     * 硬件修复后必须复归 gain_c=1.0/recon_c=0 —— RAM-only, 重启自动复归) */
+    float gain_c;                       /* C 通道增益垫 (默认 1.0; 线性缩水时 = 1/实测比) */
+    uint8_t recon_c;                    /* 1=丢弃 C 实测, 用 ic=-(ia+ib) 两相重构 (KCL) */
 } ADC_Sampling_t;
 
 typedef struct {
@@ -208,6 +213,13 @@ ADC_CalibStatus_t ADC_Sampling_GetCalibStatus(void);
  * @return 0平衡，1不平衡
  */
 uint8_t ADC_Sampling_CheckImbalance(float threshold);
+
+/**
+ * @brief CH_CFG: 设置/查询 C 通道补救 (增益垫 / 两相重构)
+ * @note 运行时有效, RAM-only 重启复归; 硬件修复后不得长期依赖
+ */
+void ADC_Sampling_SetChCfg(float gain_c, uint8_t recon_c);
+void ADC_Sampling_GetChCfg(float *gain_c, uint8_t *recon_c);
 
 /**
  * @brief 捕获ADC原始码噪声统计（仅用于未驱动状态下台架诊断）

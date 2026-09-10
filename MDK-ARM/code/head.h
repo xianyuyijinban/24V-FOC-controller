@@ -23,4 +23,6 @@
 	extern FOC_AppHandle_t g_foc_app;
 
 	void UART_Command_ProcessPending(void);
+	void UART_CommandQueuePushFromCan(const char *line);
+	void UART_CommandExecuteMuted(const char *cmd);
 #endif

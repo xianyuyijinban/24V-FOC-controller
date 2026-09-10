@@ -18,6 +18,8 @@ extern "C" {
 #include "adc_sampling.h"
 #include "tle5012.h"
 #include "drv8350s.h"
+#include "foc_observer.h"
+#include "foc_dtcomp.h"
 
 /*==================== 配置参数 ====================*/
 
@@ -39,10 +41,14 @@ extern "C" {
 #define FOC_FF_OBSERVER_LPF_HZ   10.0f /* 观测器输出LPF截止频率 Hz */
 #define FOC_FF_OBSERVER_MAX_A    1.0f  /* 观测器前馈最大补偿电流 A */
 
+/* 低速速度观测器 (线性ESO, foc_observer.c/h) */
+#define FOC_OBSERVER_W0_DEFAULT   12.0f /* 观测器带宽默认 rad/s (10~15 建议区间) */
+#define FOC_OBSERVER_T_GAIN_DEFAULT 1.0f /* T_hat 学习增益默认 (L3 放大倍数) */
+
 /* 控制周期 */
 #define FOC_PWM_FREQUENCY       20000       /* PWM频率 20kHz */
-#define FOC_PWM_PERIOD          12000       /* ARR=11999, center-aligned */
-#define FOC_CONTROL_FREQ        10000       /* PWM/ADC/effective current loop freq */
+#define FOC_PWM_PERIOD          6000        /* ARR=5999, center-aligned */
+#define FOC_CONTROL_FREQ        20000       /* PWM/ADC/effective current loop freq */
 #define FOC_SPEED_LOOP_FREQ     2000        /* Target speed loop freq (TBD by scope) */
 #define FOC_POSITION_LOOP_FREQ  200         /* 【新增】位置环频率 200Hz */
 #define FOC_SPEED_LPF_CUTOFF_HZ 20.0f       /* 速度估算低通截止频率：低速台架优先抑制编码器微分噪声 */
@@ -57,10 +63,37 @@ extern "C" {
 #define FOC_SPEED_REF_MAX_RAD_PER_S        8.0f /* RAW SPEED SREF safety clamp */
 #define FOC_CURRENT_LOOP_KP_12V_BENCH       0.50f /* ARR=11999 post-resolution baseline: clean bidirectional tracking. */
 #define FOC_CURRENT_LOOP_KI_12V_BENCH       0.0f  /* P-only baseline; Ki to be reintroduced in small steps later. */
-#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.05f /* 位置末端小误差静摩擦补偿，帮助闭合最后几度 */
-#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.05f /* 正反向对称补偿，避免零位附近方向偏置 */
+#define FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A 0.022f /* 静摩擦幅值 A (2026-08-16 定版: rs=1.0 交付后缩放, 实测摩擦启动0.025A) */
+#define FOC_POSITION_USER_NEGATIVE_STATIC_FRICTION_COMP_A 0.022f /* 正反向对称 */
 #define FOC_POSITION_PD_KP_DEFAULT 4.0f  /* 12V台架位置模式默认刚度 */
 #define FOC_POSITION_PD_KD_DEFAULT 0.12f /* 12V台架位置模式默认速度阻尼 */
+
+/* 位置环直连电流环模式 (判别实验: 低速平滑性 A/B 对比)
+ * 直连时位置环PD输出单位为 A(力矩)，跳过速度环PI直接进FF层+电流环。
+ * 增益起点 = 级联等效: KP_PD(4.0) × Kp_speed(0.25) = 1.0 A/rad,
+ *                KD_PD(0.12) × Kp_speed(0.25) = 0.03 A/(rad/s) */
+#define FOC_POS_DIRECT_KP_DEFAULT 0.49f /* 直连刚度 A/rad (2026-08-16 定版: rs=1.0 交付后缩放) */
+#define FOC_POS_DIRECT_KD_DEFAULT 0.007f /* 直连阻尼 A/(rad/s) (rs=1.0 缩放) */
+#define FOC_POS_DIRECT_KI_DEFAULT 0.37f  /* 直连位置环积分增益 A/(rad·s) (rs=1.0 缩放) */
+#define FOC_POS_INTEGRAL_LIMIT_A 0.10f  /* 直连位置环积分输出限幅 A */
+#define FOC_POS_LOOP_TS 0.005f          /* 位置环周期 200Hz */
+#define FOC_POS_INTEGRAL_ERR_RAD 0.035f /* 条件积分误差上限 rad(~2°)，大误差不积分避免加剧过冲 */
+/* 僵持积分逃逸 (CMD:POS_AW_ESC, 默认关; 2026-09-06 卡滞案, 岳翔宇批准锁定区改动):
+ * 静摩擦 > P+comp 满额交付时 err 同号僵持, AW1 回拉把积分钉在 0 → 永不积分 → 死锁
+ * (G2@126° 实测 err -4.70° 顶死, track 1-4%)。逃逸态暂停 AW 回拉并放开积分门。 */
+#define FOC_POS_AW_ESC_TRIG_RAD 0.0524f  /* 触发: |err|>3° 同号持续 ESC_TICKS */
+#define FOC_POS_AW_ESC_TICKS 400U        /* 触发计时 2.0s @200Hz */
+#define FOC_POS_AW_ESC_EXIT_RAD 0.0262f  /* 退出回差: |err|<1.5° */
+#define FOC_POS_AW_ESC_MAX_TICKS 2000U   /* 逃逸最长 10s 强制退出 (真卡死不绕限幅常驻) */
+#define FOC_FRIC_CMD_DIR_UPDATE_RAD 0.0002f /* 指令方向锁存更新阈值 rad(~0.01°) */
+#define FOC_FRIC_CMD_DIR_CLEAR_RAD 0.002f   /* 指令方向清除阈值 rad(~0.11°) */
+#define FOC_FRIC_CMD_DIR_HOLD_CNT 50U       /* 指令方向保持窗口 @200Hz=0.25s(>PC步进间隔0.2s, 保证补偿连续) */
+#define FOC_FRIC_STRIBECK_VS_RADPS 0.01f    /* Stribeck 过渡速度: <0.01rad/s(0.57°/s)接近静摩擦满值, 高于快速衰减 */
+#define FOC_FRIC_STRIBECK_KINEMATIC 0.20f   /* 动摩擦/静摩擦幅值比(匀速时补偿衰减到该比例×静摩擦) */
+#define FOC_FRIC_VDEAD_RADPS 0.06f          /* Stribeck 低速死区(2026-09-05 卡滞案): 静止微振/量化噪声
+                                             * |v|≤0.03 实测高于 fric_vs, smooth 钉 0.20 地板, 静摩擦突破
+                                             * 补偿塌 5 倍。死区内 v_eff=0(满额 comp), 出死区重锚连续。
+                                             * =3.4°/s: P95 0.048×1.25; 0.5°/s 和 2°/s 工况均落死区=满额。 */
 #define FOC_POSITION_PD_KP_SCALE 1.0f   /* 派生增益 */
 #define FOC_POSITION_PD_KP_MIN 4.0f     /* 最小刚度 */
 #define FOC_SPEED_STATIC_FRICTION_ERROR_RAD_PER_S 0.05f /* 误差超过该值才加起动偏置 */
@@ -129,7 +162,7 @@ extern "C" {
 #define FOC_WHEEL_LIMIT_DEFAULT      0.30f /* 卡点力限幅 A */
 
 /* 固件版本信息 */
-#define FOC_FW_VERSION          "1.0.0"
+#define FOC_FW_VERSION          "1.5.0"
 #define FOC_PARAM_VERSION       "1"
 #define FOC_BASELINE_NAME       "12V_STANDARD"
 #ifndef FOC_GIT_HASH
@@ -169,7 +202,23 @@ typedef enum {
     FOC_MODE_TORQUE = 0,        /* 力矩模式：直接控制Iq */
     FOC_MODE_SPEED,             /* 速度模式：速度环控制 */
     FOC_MODE_POSITION,          /* 位置模式：位置环+速度环 */
+    FOC_MODE_VOLTAGE,           /* 电压开环模式：Vq*直给(旁路电流PI)，力矩代理控制(60A/1mR 线低速蠕动用) */
 } FOC_ControlMode_t;
+
+/* 电压开环模式默认参数 */
+#define FOC_VOLTAGE_VQ_REF_MAX_V        3.0f  /* Vq指令上限 V（评估期安全限幅） */
+#define FOC_VOLTAGE_IQ_EST_LIMIT_A      2.4f  /* 估计电流软限幅 A（80%过流阈值） */
+#define FOC_VOLTAGE_IQ_EST_LPF_HZ       160.0f /* 估计电流低通截止 Hz（τ≈1ms） */
+#define FOC_VOLTAGE_VQ_RAMP_V_PER_S     0.05f /* 内部 Vq 斜坡速率 V/s（空载平衡窗 <±20mV 用） */
+/* Rs 口径铁律 (2026-09-03): motor_param.Rs = 线线口径 (万用表实测 8.8 / 识别 8.30-8.37,
+ * 只作识别存档与电流环整定)。电压模式控制律 (iq_est/R 补偿) 必须用相口径 = Rs/2 ≈ 4.4。
+ * 禁改 param 值 (foc_app.c:894 voltage_limit=Vbus·ratio/Rs 会放宽一倍)。 */
+/* S2 电压闭环参数 (方案 A 定版): 增益 = 电流口径 × Rs_phase × 0.5 保守系数 */
+#define FOC_VOLTAGE_S2_VQ_MAX_V         2.0f   /* Vq 限幅 ±2V (堵转 2V/4.4Ω=455mA 安全, C8) */
+#define FOC_VOLTAGE_S2_IQ_SOFT_LIMIT_A  0.8f   /* iq_act 软限幅 0.8A (超限降 vq, 实测口径, C8) */
+#define FOC_VOLTAGE_S2_KP_V_PER_RAD     1.078f /* vq_kp = 0.49 × 4.4 × 0.5 */
+#define FOC_VOLTAGE_S2_KD_V_PER_RADPS   0.0154f /* vq_kd = 0.007 × 4.4 × 0.5 */
+#define FOC_VOLTAGE_S2_KI_V_PER_RAD_S   0.814f /* vq_ki = 0.37 × 4.4 × 0.5 */
 
 /* 上层应用模式 (Phase 3 — 产品模式外壳) */
 typedef enum {
@@ -225,7 +274,9 @@ typedef struct {
     float bemf_vd;              /* P1 BEMF解耦 Vd补偿量 V */
     float bemf_vq;              /* P1 BEMF解耦 Vq补偿量 V */
     float inertia_iq;           /* P2 惯量前馈 Iq贡献 A */
-    float friction_iq;          /* P3 摩擦前馈 Iq贡献 A */
+    float friction_iq;          /* P3 摩擦前馈 Iq贡献 A (库仑+粘滞+观测器T_hat) */
+    float coulomb_iq;           /* P3 库仑分量只读镜像 (Stribeck×方向生效值, 不含粘滞;
+                                 * PDBBIN v2 ff_coulomb 取数点, 2026-09-09 ①) */
     float cogging_iq;           /* P0 齿槽前馈 Iq贡献 A */
     float observer_iq;          /* P4 观测器前馈 Iq贡献 A */
     float ff_total_iq;          /* 前馈总Iq贡献 A */
@@ -286,6 +337,17 @@ typedef struct {
     float speed_elec;           /* 电转速 rad/s */
     float speed_theta_prev;     /* 速度估算上一拍机械角度 rad */
     uint32_t theta_sample_seq;  /* 机械角度样本序号 */
+
+    /* 低速速度观测器 (线性ESO) */
+    FOC_SpeedObserver_t speed_obs;   /* 增广Luenberger [theta,omega,T] (机械帧) */
+    float obs_w0;                    /* 观测器带宽 rad/s (运行时调参) */
+    float obs_t_gain;                /* T_hat 学习增益 (L3 放大倍数) */
+    uint8_t obs_use_d;               /* 1 = POS_DIRECT D项用观测器速度 */
+    uint8_t obs_use_speed;           /* 1 = 速度环反馈用观测器速度 (低速平滑) */
+    float fric_vs;                   /* Stribeck 特征速度 rad/s (运行时, 低速衰减调参) */
+    float fric_kin;                  /* Stribeck 动摩擦比例 (运行时) */
+    float speed_obs_mech;            /* 观测器速度(机械帧) 诊断 */
+    float speed_obs_user;            /* 观测器速度(用户帧) 诊断 */
     
     /* 参考值 */
     float Id_ref;
@@ -295,6 +357,15 @@ typedef struct {
     float speed_ref_ramped_prev;/* 上一拍速度给定 (惯量前馈加速度计算) */
     float pos_ref;              /* 位置给定 (rad) */
 
+    /* 电压开环模式 (FOC_MODE_VOLTAGE) */
+    float voltage_vq_ref;       /* 用户Vq指令 V（外环2kHz写入，ISR读取） */
+    float voltage_vq_ramped;    /* 内部斜坡 Vq V（0.05V/s 逼近目标） */
+    float voltage_bemf_ff;      /* Bemf前馈项 ωe·Ke_elec V 诊断 */
+    float iq_est;               /* 电流估计值 A（电压模型，诊断+软限幅） */
+    float iq_est_lpf_alpha;     /* 估计电流低通系数（Init算好） */
+    float voltage_vq_cmd_diag;  /* S2 电压闭环 iq_cmd 诊断 (×Rs_phase 前的电流口径) */
+    FOC_DtComp_t dt_comp;       /* 逆变器死区补偿 (E7 A/B, 默认 OFF) */
+
     /* V5 位置模式运行时运动配置 */
     float position_speed_limit_radps;   /* 速度上限 rad/s */
     float position_accel_limit_radps2;  /* 加速度上限 rad/s^2 */
@@ -303,9 +374,39 @@ typedef struct {
     float joint_pos_limit_max_rad;      /* 关节软限位上限 rad (JOINT_POS) */
     uint8_t joint_soft_limit_enabled;   /* 软限位使能 */
 
+    /* 静摩擦补偿运行时幅值 (A, 替代编译期宏, 可经 CMD:FRIC_COMP 调)
+     * 实测启动电流约 0.09A; 默认取宏值 0.05A (待扫描实验定版) */
+    float fric_comp_pos;                /* 正向静摩擦补偿电流 A */
+    float fric_comp_neg;                /* 反向静摩擦补偿电流 A */
+
     /* 外环控制器 */
     FOC_PI_Controller_t pi_speed;   /* 速度环PI */
     FOC_PositionPD_t pos_pd;        /* 位置环PD */
+    FOC_PositionPD_t pos_pd_direct; /* 位置环直连PD（输出力矩 A，跳过速度环） */
+    uint8_t pos_direct;             /* 1=位置模式直连电流环（默认0=三环级联） */
+    float   pos_direct_iq_cmd;      /* 直连模式位置环力矩指令 A（200Hz更新，2kHz使用） */
+    float   pos_direct_ki;          /* 直连位置环积分增益 A/(rad·s), 运行时CMD:POS_DIRECT_KI调 */
+    float   pos_integral;           /* 直连位置环积分状态 rad·s */
+    float   pos_integral_err_rad;   /* 条件积分误差阈值 rad (运行时 CMD:POS_INTEGR_ERR 调; 默认0.035=2°防阶跃过冲) */
+    float   pos_ki_out_prev;        /* 上拍积分输出 A — POSDBG 极限环量化: 0=顶死(±0.10A) 1=未饱和 */
+    float   pos_ki_raw_diag;        /* POSDBG: 饱和前原始积分输出 A (量化积分饱和深度) */
+    float   pos_cmd_dir_diag;       /* POSDBG: 指令方向锁存 -1/0/+1 */
+    uint8_t pos_aw_mode;            /* 积分抗饱和律: 0=条件冻结 1=超阈值回拉 2=Clegg过零复位 3=非对称泄放 */
+    float   pos_aw_rate;            /* mode1 回拉速率(比例/拍) / mode3 泄放速率 */
+    float   pos_aw_decay_diag;      /* POSDBG: 本拍积分泄放量 A */
+    float   pos_cmd_dir;            /* 位置指令方向锁存 -1/0/+1 (慢摇连续静摩擦补偿方向源) */
+    float   pos_ref_prev;           /* 上一周期 pos_ref (计算指令方向增量) */
+    uint16_t pos_cmd_dir_hold;      /* 指令方向保持计数 @200Hz (ref静止后仍保持, 防PC步进间歇清方向) */
+    uint8_t  pos_loop_skip_integral;/* 1=本拍位置环只更新PD不积分 (PREF处理器手动即时拍用,
+                                         防止PC PREF流率调制等效ki: 积分只允许200Hz TIM1拍) */
+    uint8_t  pos_aw_esc_en;         /* 僵持积分逃逸开关 (CMD:POS_AW_ESC, 默认0) */
+    uint8_t  pos_aw_esc_active;     /* 逃逸态: 暂停AW回拉+放开积分门; PDBBIN flags bit16 */
+    int8_t   pos_aw_esc_sign;       /* 触发时锚定的 err 符号 ±1 */
+    uint16_t pos_aw_esc_timer;      /* 触发计时 @200Hz (翻号/低于触发线清零) */
+    uint16_t pos_aw_esc_run_ticks;  /* 逃逸态计时 (FOC_POS_AW_ESC_MAX_TICKS 强制退出) */
+    uint16_t pos_aw_esc_count_diag; /* 逃逸触发累计 (JDIAG esc_n; CMD:POS_AW_ESC,1 时清零) */
+
+    uint8_t  trig_prev_state;       /* TRIG 触发监视: 上次主循环拍的 state (③) */
 
     /* 前馈数据 */
     FOC_CoggingLUT_t cogging_lut;   /* 齿槽转矩LUT (P0) */
@@ -367,6 +468,7 @@ typedef struct {
 void FOC_App_Init(FOC_AppHandle_t *handle);
 void FOC_App_MainLoop(FOC_AppHandle_t *handle);
 void FOC_App_TIM1_IRQHandler(FOC_AppHandle_t *handle);
+void FOC_App_PushCurrentStream(FOC_AppHandle_t *handle);
 void FOC_App_TIM2_IRQHandler(FOC_AppHandle_t *handle);
 void FOC_App_RequestFaultShutdownFromISR(FOC_AppHandle_t *handle, FOC_FaultCode_t fault);
 
@@ -430,7 +532,10 @@ const BlackBoxSample_t *BlackBox_GetSample(uint8_t index);  /* 0 = oldest */
 void FOC_App_SetCurrentRef(FOC_AppHandle_t *handle, float Id_ref, float Iq_ref);
 void FOC_App_SetSpeedRef(FOC_AppHandle_t *handle, float speed_ref);
 void FOC_App_SetPositionRef(FOC_AppHandle_t *handle, float pos_ref);
+void FOC_App_SetVoltageRef(FOC_AppHandle_t *handle, float vq_ref);
+void FOC_App_VoltageOff(FOC_AppHandle_t *handle);
 void FOC_App_SetPositionPDGains(FOC_AppHandle_t *handle, float kp, float kd);
+void FOC_App_SetPosDirectPDGains(FOC_AppHandle_t *handle, float kp, float kd);
 void FOC_App_SetControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetRawControlMode(FOC_AppHandle_t *handle, FOC_ControlMode_t mode);
 void FOC_App_SetAppMode(FOC_AppHandle_t *handle, AppMode_t mode);
@@ -449,6 +554,7 @@ float FOC_App_PositionControlToSensorFrame(const FOC_AppHandle_t *handle, float 
 /* 参数管理 */
 void FOC_App_LoadParam(FOC_AppHandle_t *handle);
 void FOC_App_SaveParam(FOC_AppHandle_t *handle);
+void FOC_App_CoggingUseCompiled(FOC_AppHandle_t *handle);
 void FOC_App_StartIdentify(FOC_AppHandle_t *handle);
 void FOC_App_StopIdentify(FOC_AppHandle_t *handle);
 uint8_t FOC_App_IsIdentifyComplete(FOC_AppHandle_t *handle);

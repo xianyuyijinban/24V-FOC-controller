@@ -335,7 +335,7 @@ void FOC_Init(FOC_Handle_t *foc, float Kp_d, float Ki_d, float Kp_q, float Ki_q)
     /* 默认母线电压 */
     foc->Vbus = 24.0f;
     foc->current_resistance_ohm = 0.0f;
-    foc->rs_ff_scale = 0.20f;       /* post-ARR baseline: 最低有效scale（0.10欠跟踪，0.30零回残留大） */
+    foc->rs_ff_scale = 1.0f;       /* 全幅 Rs 前馈: 电流交付比≈1.0 (2026-08-16 实测 rs=0.2 仅交付~24%, rs=1.0 Vq=2.5V@0.3A 正确) */
     foc->bemf_Ke_temp = 0.0f;       /* 0 = 使用默认Ke */
     foc->bemf_user_enable = 0U;     /* 默认关闭，需用户显式使能 */
     foc->bemf_blocked = 0U;

@@ -35,6 +35,9 @@
 #include "demo_button_control.h"
 #include "can_protocol.h"
 #include "current_stream.h"
+#include "debug_stream.h"
+#include "trig_ring.h"
+#include "foc_profiler.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -235,6 +238,7 @@ int main(void)
     Main_BootUartSend("BOOT,CLOCK_HSI_FALLBACK\r\n", 25U);
   }
   Main_BootUartSend("BOOT,CLOCK_READY\r\n", 18U);
+  FOC_Profiler_Init();
 
   /* USER CODE BEGIN SysInit */
 
@@ -263,6 +267,8 @@ int main(void)
   /* 初始化UART上传模块 */
   DrvUart_Init(&huart1, &drv8350s);
   CurStream_Init();  /* V1.1: binary current stream */
+  DebugStream_Init();  /* PDBBIN binary debug stream */
+  TrigRing_Init();  /* ③: fault-trigger ring buffer */
   CanProtocol_Init(CAN_NODE_ID_DEFAULT);  /* Phase 6 */
   Main_BootUartSend("BOOT,DRVUART_READY\r\n", 20U);
   
@@ -374,16 +380,45 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* 主循环整体 DWT 探针 (2026-08-30 任务卡调试: 区分命令服务/PREF/PDB发射/其余) */
+    uint32_t main_loop_start = FOC_Profiler_Begin();
+#if LOOP_PROF_EN
+    /* 主循环分段 (LOOP_PROF): SEG_CMD > SEG_PREF/SEG_PDB 嵌套; SEG_NFRAME; SEG_OTHER.
+     * 每段净耗时 = 墙钟差 − 段内 TIM1 ISR 税 (ISR 税校正, 2026-08-31 黑洞专项)。 */
+    FOC_Profiler_LoopBegin();
+    FOC_LoopSegHandle_t seg_cmd_h, seg_nframe_h, seg_other_h;
+#endif
+
     /* 处理上位机下发命令 */
+#if LOOP_PROF_EN
+    FOC_Profiler_SegBegin(&seg_cmd_h);
     UART_Command_ProcessPending();
+    FOC_Profiler_SegEnd(&seg_cmd_h, FOC_PROBE_SEG_CMD);
+#else
+    UART_Command_ProcessPending();
+#endif
 
-    /* FOC应用层主循环 - 状�?�机和故障处�? */
+    /* FOC应用层主循环 - 状态机和故障处理 */
+#if LOOP_PROF_EN
+    FOC_Profiler_SegBegin(&seg_other_h);
     FOC_App_MainLoop(&g_foc_app);
-
     DemoButtonControl_Service();
-    
+    FOC_Profiler_SegEnd(&seg_other_h, FOC_PROBE_SEG_OTHER);
+#else
+    FOC_App_MainLoop(&g_foc_app);
+    DemoButtonControl_Service();
+#endif
+
     /* UART数据上传处理 */
+#if LOOP_PROF_EN
+    FOC_Profiler_SegBegin(&seg_nframe_h);
     DrvUart_Process();
+    FOC_Profiler_SegEnd(&seg_nframe_h, FOC_PROBE_SEG_NFRAME);
+    /* SEG_OTHER 第二部分 (与第一部分非重叠同 probe): CurStream/Wheel/CAN/故障 */
+    FOC_Profiler_SegBegin(&seg_other_h);
+#else
+    DrvUart_Process();
+#endif
 
     /* V1.1: Binary current stream drain (after telemetry, P1 priority) */
     CurStream_Process();
@@ -417,6 +452,12 @@ int main(void)
     }
     
     /* USER CODE END WHILE */
+
+    FOC_Profiler_End(FOC_PROBE_MAIN_LOOP, main_loop_start);
+#if LOOP_PROF_EN
+    /* SEG_OTHER 结算 (覆盖 CurStream/Wheel/CAN/故障段) */
+    FOC_Profiler_SegEnd(&seg_other_h, FOC_PROBE_SEG_OTHER);
+#endif
 
     /* USER CODE BEGIN 3 */
   }

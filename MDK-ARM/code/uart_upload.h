@@ -332,6 +332,12 @@ bool DrvUart_IsEnabled(void);
 void DrvUart_GetStatistics(DrvUart_Statistics_t* stats);
 
 /**
+ * @brief Get cumulative TX admission-drop counters by priority.
+ * @note Counters are accumulated from boot and are copied atomically.
+ */
+void DrvUart_GetTxDropCounts(uint32_t* p0Drop, uint32_t* p1Drop, uint32_t* p2Drop);
+
+/**
  * @brief 清除故障历史
  */
 void DrvUart_ClearFaultHistory(void);

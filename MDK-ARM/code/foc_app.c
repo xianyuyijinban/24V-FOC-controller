@@ -201,9 +201,14 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     /* 初始化Rs在线估计器 */
     MI_RsOnlineEstimator_Init(&handle->rs_est, 0.01f);
 
-    /* P0 cogging runtime defaults (overridable via CMD:COG_CFG) */
-    handle->cogging_lut.gain = 0.0f;
-    handle->cogging_lut.phase_offset_rad = FOC_PI / 3.0f;  /* +60 deg */
+    /* P0 cogging runtime defaults (overridable via CMD:COG_CFG)
+     * 定版 2026-09-11 (C1 验证链, PROGRESS C1 条目):
+     *   phase=179.5° — 锚定 phi*=(180-zero_deg)%360, 本次 zero_deg=0.000;
+     *   gain=1.0    — gain 爬升单调最优 (amp22 0.00752→0.00155A, 无极限环)。
+     * ⚠ 依赖链: phi* 锚在 mech_zero_offset 上。重新 HOME / 改零点后
+     *   zero_deg 变化 → 本默认值静默失效 (与 FAULT_DETAIL 同类静默坑),
+     *   必须重跑 cog_phase_sweep.py 重扫 (理由见 PROGRESS C1 条目)。
+     * 注: gain/phase 赋值在下方标定 LUT 加载之后 (唯一处), 此处不重复。 */
 
     /* 静摩擦补偿运行时幅值默认 (overridable via CMD:FRIC_COMP) */
     handle->fric_comp_pos = FOC_POSITION_USER_POSITIVE_STATIC_FRICTION_COMP_A;
@@ -215,7 +220,8 @@ void FOC_App_Init(FOC_AppHandle_t *handle)
     memcpy(handle->cogging_lut.table, COGGING_LUT_CAL, sizeof(float) * FOC_COGGING_LUT_SIZE);
     handle->cogging_lut.valid_size = FOC_COGGING_LUT_SIZE;
     handle->cogging_lut.valid = 1U;
-    handle->cogging_lut.gain = 0.0f;  /* 定版 OFF (错相 LUT 0.5°/s 反噬; 精确标定后可运行时 COG_CFG 开) */
+    handle->cogging_lut.gain = 1.0f;   /* C1 定版 ON */
+    handle->cogging_lut.phase_offset_rad = 179.5f * FOC_PI / 180.0f;   /* C1 锚定 phi*=179.5° */
     FOC_App_UpdateIdentifyState(handle);
     
     /* 如果参数有效，更新控制环参数 */

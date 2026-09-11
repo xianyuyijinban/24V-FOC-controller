@@ -1,0 +1,53 @@
+{
+ "phi": 179.5,
+ "speed": 5.0,
+ "ladder": [
+  {
+   "gain": 0.0,
+   "v_mean": 5.09,
+   "amp22": 0.00752,
+   "th_pp": 3.636,
+   "suspect": false
+  },
+  {
+   "gain": 0.25,
+   "v_mean": 5.0,
+   "amp22": 0.00633,
+   "th_pp": 2.465,
+   "suspect": false
+  },
+  {
+   "gain": 0.5,
+   "v_mean": 5.01,
+   "amp22": 0.0035,
+   "th_pp": 1.71,
+   "suspect": false
+  },
+  {
+   "gain": 1.0,
+   "v_mean": 4.99,
+   "amp22": 0.00155,
+   "th_pp": 0.974,
+   "suspect": false
+  }
+ ],
+ "best_gain": 1.0,
+ "th_pp_vs_off": [
+  {
+   "gain": 0.0,
+   "ratio": 1.0
+  },
+  {
+   "gain": 0.25,
+   "ratio": 0.68
+  },
+  {
+   "gain": 0.5,
+   "ratio": 0.47
+  },
+  {
+   "gain": 1.0,
+   "ratio": 0.27
+  }
+ ]
+}

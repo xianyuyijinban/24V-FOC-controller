@@ -56,6 +56,8 @@ def main():
     ap.add_argument("--comp", type=float, default=0.022)
     ap.add_argument("--cog-gain", type=float, default=0.0,
                     help="COG LUT 增益 (默认0=固件定版OFF; 覆盖会改默认行为)")
+    ap.add_argument("--cog-phase", type=float, default=60.0,
+                    help="COG LUT 相位 (C1 锚定 phi*=179.50; 默认 60 为旧错相)")
     ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")
     ap.add_argument("--reps", type=int, default=1, help="斜坡+阶跃+稳态 重复轮数 (回归 ×2)")
     ap.add_argument("--esc", action="store_true",
@@ -220,7 +222,7 @@ def main():
     config_ack["POS_DIRECT"] = expect("CMD:POS_DIRECT,1", "POS_DIRECT,OK")
     config_ack["POS_DIRECT_GAIN"] = expect("CMD:POS_DIRECT_GAIN,%.4f,%.4f" % (args.kp, args.kd), "POS_DIRECT_GAIN,OK")
     config_ack["POS_DIRECT_KI"] = expect("CMD:POS_DIRECT_KI,%.2f" % args.ki, "POS_DIRECT_KI,OK")
-    ser.write(b"CMD:COG_CFG,%.3f,60.0\n" % args.cog_gain)
+    ser.write(b"CMD:COG_CFG,%.3f,%.2f\n" % (args.cog_gain, args.cog_phase))
     config_ack["FRIC_COMP"] = expect("CMD:FRIC_COMP,%.3f,%.3f" % (args.comp, args.comp), "FRIC_COMP,OK")
     aw_mode, aw_rate = args.aw.split(",")
     config_ack["POS_AW_MODE"] = expect("CMD:POS_AW_MODE,%s,%s" % (aw_mode, aw_rate), "POS_AW_MODE,OK")

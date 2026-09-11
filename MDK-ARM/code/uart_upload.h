@@ -263,6 +263,15 @@ bool DrvUart_UploadFault(void);
 bool DrvUart_UploadJDiag(void);
 
 /**
+ * @brief 上传 ThetaDiag 单行短报文 (C1 锚定用: zero_deg/enc_dir/cog_phase/
+ *        cog_gain/cog_valid; 只读观测, 不触控制逻辑).
+ *        存在理由: FAULT_DETAIL 整条 2-3KB > TX ring 1024B, 被 UartTx_Enqueue
+ *        (len >= RING) 静默丢弃 — zero 字段经此命令单行出口 (<200B).
+ * @return true 开始发送, false 发送忙
+ */
+bool DrvUart_UploadThetaDiag(void);
+
+/**
  * @brief 查询当前P0 cogging配置
  */
 void DrvUart_QueryCogCfg(void);

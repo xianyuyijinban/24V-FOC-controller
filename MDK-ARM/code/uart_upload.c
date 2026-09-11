@@ -1724,6 +1724,47 @@ bool DrvUart_UploadJDiag(void)
 }
 
 /**
+ * @brief Upload ThetaDiag 单行短报文 (C1 相位扫描锚定用)
+ * @note  zero 字段唯一可用出口: FAULT_DETAIL 整条 2-3KB > TX ring 1024B
+ *        被 UartTx_Enqueue 静默丢弃; 本命令 <200B 零丢帧风险。
+ *        只读观测 (motor_param.mech_zero_offset / encoder_dir / cogging_lut),
+ *        不触任何控制逻辑。
+ */
+bool DrvUart_UploadThetaDiag(void)
+{
+    extern FOC_AppHandle_t g_foc_app;
+    char zeroText[20], phaseText[16], gainText[16];
+    int16_t len;
+
+    if (s_huart == NULL || s_drvHandle == NULL) {
+        return false;
+    }
+    if (s_txITActive) {
+        return false;
+    }
+
+    DrvUart_FormatFixed(zeroText, sizeof(zeroText),
+                        g_foc_app.motor_param.mech_zero_offset * 180.0f / FOC_PI, 3U);
+    DrvUart_FormatFixed(phaseText, sizeof(phaseText),
+                        g_foc_app.cogging_lut.phase_offset_rad * 180.0f / FOC_PI, 1U);
+    DrvUart_FormatFixed(gainText, sizeof(gainText),
+                        g_foc_app.cogging_lut.gain, 3U);
+
+    len = snprintf((char*)s_txBuf, DRV_UART_BUF_SIZE,
+                   "THETA_DIAG,OK,zero_deg=%s,enc_dir=%d,cog_phase=%s,cog_gain=%s,cog_valid=%u\r\n",
+                   zeroText,
+                   (int)g_foc_app.motor_param.encoder_dir,
+                   phaseText, gainText,
+                   (unsigned)g_foc_app.cogging_lut.valid);
+
+    if (len > 0 && len < DRV_UART_BUF_SIZE) {
+        return DrvUart_StartSend((uint16_t)len);
+    }
+
+    return false;
+}
+
+/**
  * @brief Query current P0 cogging configuration
  */
 void DrvUart_QueryCogCfg(void)

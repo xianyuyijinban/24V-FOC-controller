@@ -1479,7 +1479,7 @@ static void UART_CommandExecute(const char *cmd)
             " GIMBAL: RAMP? RAMP,accel\r\n"
             " TELEM: ON OFF RATE,0..100 RATE?\r\n"
             " CAL: IDENTIFY,0|1 ENCODER_DIR,1|-1 MOTOR_PN,N HOME CLEAR_HOME ADC_ZERO,N\r\n"
-            " DIAG: FAULT_DETAIL JDIAG PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG? CH_CFG,gain,recon CH_CFG?\r\n"
+            " DIAG: FAULT_DETAIL JDIAG THETA_DIAG? PWM_DIAG UART_RX? FOC_TIME? FOC_TIME,CLEAR TLE_RAW TLE_GPIO,0|1 POSDBG,0|1 POSDBG? CH_CFG,gain,recon CH_CFG?\r\n"
             " TRIG: TRIG,NOW TRIG,STAT? TRIG,PULL,off,len TRIG,CLR (故障验尸 ring buffer)\r\n"
         );
         return;
@@ -1970,6 +1970,11 @@ static void UART_CommandExecute(const char *cmd)
     }
     if (strcmp(cmd, "CMD:JDIAG") == 0) {
         DrvUart_UploadJDiag();
+        return;
+    }
+    if (strcmp(cmd, "CMD:THETA_DIAG?") == 0) {
+        /* C1 锚定: zero_deg 单行出口 (FAULT_DETAIL >TX ring 被静默丢) */
+        (void)DrvUart_UploadThetaDiag();
         return;
     }
     if (strcmp(cmd, "CMD:COG_CFG?") == 0) {
@@ -2535,7 +2540,7 @@ static void UART_CommandExecute(const char *cmd)
         uint32_t angle_cdeg = (uint32_t)((tle5012_sensor.angle * 100.0f) + 0.5f);
         snprintf(response,
                  sizeof(response),
-                 "TLE_RAW,raw=0x%04X,safety=0x%04X,status=0x%02X,recv_crc=0x%02X,calc_crc=0x%02X,data_ok=%u,crc_error=%u,valid=%u,angle=%lu.%02lu\r\n",
+                 "TLE_RAW,raw=0x%04X,safety=0x%04X,status=0x%02X,recv_crc=0x%02X,calc_crc=0x%02X,data_ok=%u,crc_error=%u,valid=%u,angle=%lu.%02lu,spi_err=%u,crc_total=%u\r\n",
                  tle5012_sensor.raw_word,
                  tle5012_sensor.safety_word,
                  tle5012_sensor.status,
@@ -2545,7 +2550,9 @@ static void UART_CommandExecute(const char *cmd)
                  tle5012_sensor.crc_error,
                  tle5012_sensor.data_valid,
                  (unsigned long)(angle_cdeg / 100UL),
-                 (unsigned long)(angle_cdeg % 100UL));
+                 (unsigned long)(angle_cdeg % 100UL),
+                 TLE5012_GetSpiErrorCount(),
+                 TLE5012_GetCrcErrorTotal());
         UART_CommandSendText(response);
         return;
     }

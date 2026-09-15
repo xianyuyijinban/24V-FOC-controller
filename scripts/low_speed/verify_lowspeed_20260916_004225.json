@@ -1,0 +1,483 @@
+{
+  "schema": "verify_low_speed.v2",
+  "run_status": {
+    "valid": true,
+    "abort_reason": null
+  },
+  "args": {
+    "port": "COM10",
+    "baud": 1000000,
+    "power_ok": true,
+    "step": 20.0,
+    "ramp_deg_s": 0.5,
+    "ki": 0.37,
+    "kp": 0.49,
+    "kd": 0.007,
+    "comp": 0.022,
+    "cog_gain": 1.0,
+    "cog_phase": 179.5,
+    "cog_skip": false,
+    "aw": "1,0.03",
+    "reps": 1,
+    "esc": false,
+    "pdbver": 1
+  },
+  "meta": {
+    "fw_info": {
+      "version": "1.5.1",
+      "param": "1",
+      "baseline": "12V_STANDARD",
+      "git": "unknown"
+    },
+    "jdiag": {
+      "J": "0.00005294",
+      "B": "0.00100000",
+      "Tc": "0.000000",
+      "enc": "-1",
+      "valid": "0xFFFFFFFF",
+      "cog_valid": "1",
+      "cog_size": "264",
+      "cog_bins": "263",
+      "cog_save": "0",
+      "cog_gain": "1.000",
+      "cog_phase": "179.5",
+      "cog_min": "-0.0093",
+      "cog_max": "0.0133",
+      "esc": "0",
+      "esc_n": "0"
+    },
+    "ch_cfg": {
+      "gain_c": "1.000",
+      "recon": "0"
+    },
+    "fw_raw": "FW_INFO,OK,version=1.5.1,param=1,baseline=12V_STANDARD,git=unknown",
+    "jdiag_raw": "JDIAG,v7,J=0.00005294,B=0.00100000,Tc=0.000000,enc=-1,valid=0xFFFFFFFF,cog_valid=1,cog_size=264,cog_bins=263,cog_save=0,cog_gain=1.000,cog_phase=179.5,cog_min=-0.0093,cog_max=0.0133,esc=0,esc_n=0",
+    "ch_raw": "CH_CFG,OK,gain_c=1.000,recon=0",
+    "dt_enabled": false,
+    "dt_cmd_sent": true,
+    "dt_ack": "DT,OK,0",
+    "dt_status": "DT,OK,en=0,amp_mV=150,comp=0,0,0mV",
+    "config_ack": {
+      "UNLOCK": true,
+      "POS_DIRECT": true,
+      "POS_DIRECT_GAIN": true,
+      "POS_DIRECT_KI": true,
+      "FRIC_COMP": true,
+      "POS_AW_MODE": true,
+      "MODE": true,
+      "ENABLE": true
+    },
+    "n_coexist": true,
+    "esc_enabled": false,
+    "pdbbin_ver": 1
+  },
+  "results": {
+    "reps": [
+      {
+        "ramp": {
+          "arrival": {
+            "40.49999999999998": 100.4,
+            "41.49999999999998": 101.5,
+            "42.49999999999998": 101.4
+          },
+          "pp": 0.032948832556130014,
+          "max_dev": 19.99644400730601,
+          "n": 3129,
+          "track_pct": 105.4
+        },
+        "step": {
+          "arrival": {
+            "0.5": 98.3,
+            "1.0": 98.5,
+            "2.0": 99.3,
+            "2.8": 99.2
+          },
+          "pp": 0.032962492934487386,
+          "max_dev": 18.06325399563312,
+          "n": 345
+        },
+        "steady": {
+          "pp_deg": 0.05,
+          "resid_deg": 0.144,
+          "backlog": 0,
+          "gate_ok": true,
+          "gate_wait_s": 3.45,
+          "n": 93
+        },
+        "traj": [
+          {
+            "t": 0.014,
+            "theta_deg": 100.7445,
+            "poserr_deg": 0.0236,
+            "ff_iq": -0.00381,
+            "iq_act": -0.00617,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 1.3,
+            "theta_deg": 101.3927,
+            "poserr_deg": 0.1163,
+            "ff_iq": -0.00167,
+            "iq_act": -0.0062,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 2.603,
+            "theta_deg": 102.019,
+            "poserr_deg": 0.0335,
+            "ff_iq": -0.00359,
+            "iq_act": -0.00332,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 3.916,
+            "theta_deg": 102.5683,
+            "poserr_deg": -0.0267,
+            "ff_iq": -0.00387,
+            "iq_act": 0.00688,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 5.225,
+            "theta_deg": 103.3593,
+            "poserr_deg": 0.0187,
+            "ff_iq": -0.0022,
+            "iq_act": -0.00355,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 6.506,
+            "theta_deg": 103.9745,
+            "poserr_deg": 0.0261,
+            "ff_iq": -0.003,
+            "iq_act": -0.00358,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 8.235,
+            "theta_deg": 104.9084,
+            "poserr_deg": 0.132,
+            "ff_iq": 0.00048,
+            "iq_act": 0.00581,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 10.267,
+            "theta_deg": 105.8532,
+            "poserr_deg": 0.0548,
+            "ff_iq": 0.00455,
+            "iq_act": 0.00399,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 12.041,
+            "theta_deg": 106.6112,
+            "poserr_deg": -0.0858,
+            "ff_iq": 0.01032,
+            "iq_act": 0.00946,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 13.714,
+            "theta_deg": 107.2484,
+            "poserr_deg": -0.3309,
+            "ff_iq": 0.01153,
+            "iq_act": 0.00122,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 15.566,
+            "theta_deg": 108.2262,
+            "poserr_deg": -0.1275,
+            "ff_iq": 0.0136,
+            "iq_act": 0.0005,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 17.33,
+            "theta_deg": 108.9184,
+            "poserr_deg": -0.3951,
+            "ff_iq": 0.01156,
+            "iq_act": -0.00644,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 18.794,
+            "theta_deg": 109.5775,
+            "poserr_deg": -0.4469,
+            "ff_iq": 0.00964,
+            "iq_act": 0.00358,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 20.917,
+            "theta_deg": 110.2148,
+            "poserr_deg": -0.9799,
+            "ff_iq": 0.00157,
+            "iq_act": 0.0318,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 23.005,
+            "theta_deg": 112.412,
+            "poserr_deg": 0.215,
+            "ff_iq": -0.00708,
+            "iq_act": 0.04932,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 24.605,
+            "theta_deg": 113.1701,
+            "poserr_deg": 0.2609,
+            "ff_iq": -0.00808,
+            "iq_act": 0.04074,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 25.986,
+            "theta_deg": 113.9721,
+            "poserr_deg": 0.3179,
+            "ff_iq": -0.00889,
+            "iq_act": 0.03507,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 27.128,
+            "theta_deg": 114.5763,
+            "poserr_deg": 0.3022,
+            "ff_iq": -0.00804,
+            "iq_act": 0.02833,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 28.24,
+            "theta_deg": 115.0817,
+            "poserr_deg": 0.2919,
+            "ff_iq": -0.00702,
+            "iq_act": 0.01928,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 29.419,
+            "theta_deg": 115.5871,
+            "poserr_deg": 0.1663,
+            "ff_iq": -0.00603,
+            "iq_act": -0.00228,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 30.563,
+            "theta_deg": 116.2023,
+            "poserr_deg": 0.2758,
+            "ff_iq": -0.00463,
+            "iq_act": 0.01442,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 31.703,
+            "theta_deg": 116.6967,
+            "poserr_deg": 0.1375,
+            "ff_iq": -0.00406,
+            "iq_act": 0.00267,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 32.861,
+            "theta_deg": 117.3009,
+            "poserr_deg": 0.2353,
+            "ff_iq": -0.00356,
+            "iq_act": 0.00373,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 34.018,
+            "theta_deg": 117.9272,
+            "poserr_deg": 0.2272,
+            "ff_iq": -0.00346,
+            "iq_act": 0.00284,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 35.207,
+            "theta_deg": 118.4106,
+            "poserr_deg": 0.0912,
+            "ff_iq": -0.00304,
+            "iq_act": 0.00181,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 36.342,
+            "theta_deg": 118.872,
+            "poserr_deg": 0.0451,
+            "ff_iq": -0.00367,
+            "iq_act": -0.00767,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 37.476,
+            "theta_deg": 119.4652,
+            "poserr_deg": 0.0173,
+            "ff_iq": -0.00355,
+            "iq_act": -0.01178,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 38.643,
+            "theta_deg": 120.2562,
+            "poserr_deg": 0.3025,
+            "ff_iq": -0.00264,
+            "iq_act": -0.0017,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 39.757,
+            "theta_deg": 120.5968,
+            "poserr_deg": -0.011,
+            "ff_iq": -0.00189,
+            "iq_act": -0.00358,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 40.662,
+            "theta_deg": 120.7946,
+            "poserr_deg": 0.0754,
+            "ff_iq": -0.00121,
+            "iq_act": 0.00512,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 41.628,
+            "theta_deg": 121.0033,
+            "poserr_deg": 0.2841,
+            "ff_iq": -0.00042,
+            "iq_act": 0.00214,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 42.709,
+            "theta_deg": 121.0143,
+            "poserr_deg": 0.2621,
+            "ff_iq": -0.00078,
+            "iq_act": 0.00853,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 44.527,
+            "theta_deg": 101.0631,
+            "poserr_deg": 0.3332,
+            "ff_iq": -0.00339,
+            "iq_act": -0.00352,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 45.51,
+            "theta_deg": 120.7506,
+            "poserr_deg": -0.3096,
+            "ff_iq": -0.00643,
+            "iq_act": -0.00914,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 46.367,
+            "theta_deg": 120.9154,
+            "poserr_deg": -0.1448,
+            "ff_iq": -0.00062,
+            "iq_act": 0.00504,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 47.169,
+            "theta_deg": 120.9044,
+            "poserr_deg": -0.1558,
+            "ff_iq": -0.00089,
+            "iq_act": -0.00356,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 48.778,
+            "theta_deg": 101.5795,
+            "poserr_deg": 0.5305,
+            "ff_iq": 0.00572,
+            "iq_act": 0.00731,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 50.825,
+            "theta_deg": 101.217,
+            "poserr_deg": 0.1679,
+            "ff_iq": -0.00342,
+            "iq_act": 0.00288,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          },
+          {
+            "t": 52.847,
+            "theta_deg": 101.195,
+            "poserr_deg": 0.135,
+            "ff_iq": -0.00339,
+            "iq_act": -0.00338,
+            "ff_coulomb": 0.0,
+            "pos_integral": 0.0
+          }
+        ],
+        "v2_fields": {
+          "ff_coulomb_absmax": 0.0,
+          "ff_cogging_absmax": 0.0,
+          "pos_integral_absmax": 0.0
+        },
+        "health": {
+          "pdb_n": 3808,
+          "seq_gap": 0,
+          "tick_stall": 0,
+          "bad_state": 0,
+          "bad_fault": 0,
+          "crc_err": 0,
+          "sample_rate_hz": 71.9,
+          "seq_gap_loci": [],
+          "tx_p1_drop_delta": 0
+        }
+      }
+    ]
+  },
+  "trig_verdict": {
+    "stat": "TRIG,OK,state=0,src=0,trig_tick=0,post=0",
+    "note": "not frozen"
+  }
+}

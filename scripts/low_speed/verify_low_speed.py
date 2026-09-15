@@ -54,10 +54,10 @@ def main():
     ap.add_argument("--kp", type=float, default=0.49)
     ap.add_argument("--kd", type=float, default=0.007)
     ap.add_argument("--comp", type=float, default=0.022)
-    ap.add_argument("--cog-gain", type=float, default=0.0,
-                    help="COG LUT 增益 (默认0=固件定版OFF; 覆盖会改默认行为)")
-    ap.add_argument("--cog-phase", type=float, default=60.0,
-                    help="COG LUT 相位 (C1 锚定 phi*=179.50; 默认 60 为旧错相)")
+    ap.add_argument("--cog-gain", type=float, default=1.0,
+                    help="COG LUT 增益 (默认 1.0=固件定版 ON; --cog-skip 则不覆盖板上配置)")
+    ap.add_argument("--cog-phase", type=float, default=179.5,
+                    help="COG LUT 相位 (默认 179.5=C1 锚定 phi*; 旧 60 已裁决错相, 勿用)")
     ap.add_argument("--cog-skip", action="store_true",
                     help="跳过 COG_CFG 发送 — 验证编译期默认值轮 (不覆盖板上 COG 配置)")
     ap.add_argument("--aw", default="1,0.03", help="积分抗饱和律 'mode,rate' (默认 1,0.03)")

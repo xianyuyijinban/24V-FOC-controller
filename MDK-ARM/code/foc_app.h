@@ -115,8 +115,8 @@ extern "C" {
 
 /* 保护阈值默认值 */
 #define FOC_DEFAULT_OVERCURRENT_LIMIT_A   3.0f    /* 过流保护阈值 A */
-#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   18.0f   /* 12V系统过压阈值 V */
-#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  10.0f   /* 12V系统欠压阈值 V */
+#define FOC_DEFAULT_OVERVOLTAGE_LIMIT_V   28.0f   /* 24V系统过压阈值 V (24V 母线 +4V 裕量) */
+#define FOC_DEFAULT_UNDERVOLTAGE_LIMIT_V  14.0f   /* 24V系统欠压阈值 V (24V 母线 -10V 裕量) */
 #define FOC_VOLTAGE_SEVERE_TRIP_MARGIN_V  1.0f    /* 严重电压故障相对告警阈值的额外裕量 */
 #define FOC_VOLTAGE_FAULT_RECOVER_HYSTERESIS_V 0.5f /* 严重电压故障自动恢复滞回 */
 #define FOC_ADC_SAMPLE_MISS_FAULT_THRESHOLD 3U /* 连续采样失配升级为故障 */
@@ -162,7 +162,7 @@ extern "C" {
 #define FOC_WHEEL_LIMIT_DEFAULT      0.30f /* 卡点力限幅 A */
 
 /* 固件版本信息 */
-#define FOC_FW_VERSION          "1.5.0"
+#define FOC_FW_VERSION          "1.5.1"
 #define FOC_PARAM_VERSION       "1"
 #define FOC_BASELINE_NAME       "12V_STANDARD"
 #ifndef FOC_GIT_HASH

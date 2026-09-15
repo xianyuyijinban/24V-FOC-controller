@@ -2540,7 +2540,7 @@ static void UART_CommandExecute(const char *cmd)
         uint32_t angle_cdeg = (uint32_t)((tle5012_sensor.angle * 100.0f) + 0.5f);
         snprintf(response,
                  sizeof(response),
-                 "TLE_RAW,raw=0x%04X,safety=0x%04X,status=0x%02X,recv_crc=0x%02X,calc_crc=0x%02X,data_ok=%u,crc_error=%u,valid=%u,angle=%lu.%02lu\r\n",
+                 "TLE_RAW,raw=0x%04X,safety=0x%04X,status=0x%02X,recv_crc=0x%02X,calc_crc=0x%02X,data_ok=%u,crc_error=%u,valid=%u,angle=%lu.%02lu,spi_err=%u,crc_total=%u\r\n",
                  tle5012_sensor.raw_word,
                  tle5012_sensor.safety_word,
                  tle5012_sensor.status,
@@ -2550,7 +2550,9 @@ static void UART_CommandExecute(const char *cmd)
                  tle5012_sensor.crc_error,
                  tle5012_sensor.data_valid,
                  (unsigned long)(angle_cdeg / 100UL),
-                 (unsigned long)(angle_cdeg % 100UL));
+                 (unsigned long)(angle_cdeg % 100UL),
+                 TLE5012_GetSpiErrorCount(),
+                 TLE5012_GetCrcErrorTotal());
         UART_CommandSendText(response);
         return;
     }
